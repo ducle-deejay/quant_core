@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit gate for the ledger kit. Runs on every commit from any agent
+# or human, in any harness: the enforcement layer that cannot be forgotten.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+CANON_DIR=$(python3 -c "import json;print(json.load(open('ledger.config.json'))['canon_dir'])")
+
+# 1) The design canon is frozen: no staged change may touch it.
+if ! git diff --cached --quiet -- "${CANON_DIR}"; then
+    echo "COMMIT BLOCKED: staged changes inside frozen canon (${CANON_DIR}/)." >&2
+    echo "The canon states intent and never changes." >&2
+    echo "Record the disagreement in docs/ledger instead (see docs/ledger/HOME.md)." >&2
+    exit 1
+fi
+
+# 2) Ledger hygiene: statuses, naming, and canon doc_id links.
+python3 scripts/sweep_ledger.py
+
+exit 0

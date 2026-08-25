@@ -80,6 +80,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 ### Decisions
 
 - [DEC-001](decisions/DEC-001-frozen-canon-ledger-split.md) - enhanced stays frozen as design anchor; the ledger is the single living layer.
+- [DEC-002](decisions/DEC-002-multi-harness-kit.md) - multi-harness enforcement kit: AGENTS.md routing, canon guard hook, git backstop, ledger-discipline skill.
 
 ### Test mappings
 
