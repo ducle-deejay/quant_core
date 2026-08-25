@@ -96,3 +96,88 @@ pub fn ic_ladder(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Contract tests derived from the frozen canon concept note on IC
+    // metrics and the horizon ladder: correlation of score at t with the
+    // cumulative return from t+1 through t+h, aggregated into daily
+    // blocks and reported as mean plus block t-statistic. Ledger rule M4.
+
+    const WINDOW: usize = 20;
+    const BARS_PER_DAY: usize = 10;
+
+    /// Deterministic lead-lag world: return at t+1 equals the score at t
+    /// times a small gain plus a slow sinusoid that breaks exact block
+    // equality so block ICs vary and the t-statistic stays informative.
+    fn lead_lag_world(n: usize) -> (Vec<f64>, Vec<f64>) {
+        let score: Vec<f64> = (0..n)
+            .map(|t| ((t as f64) * 0.21).sin() + 0.3 * ((t as f64) * 0.53).cos())
+            .collect();
+        let mut ret = vec![0.0; n];
+        for t in 1..n {
+            let wobble = 0.001 * ((t as f64) * 0.077).sin();
+            ret[t] = 0.01 * score[t - 1] + wobble;
+        }
+        (score, ret)
+    }
+
+    #[test]
+    fn perfect_lead_lag_scores_near_one_with_strong_tstat() {
+        let (score, ret) = lead_lag_world(600);
+        let (mean_ic, t_stat, blocks) =
+            rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);
+
+        assert!(blocks >= 10, "expected many daily blocks, got {}", blocks);
+        assert!(mean_ic > 0.9, "lead-lag world must give mean IC ~ 1, got {}", mean_ic);
+        assert!(t_stat > 10.0, "consistent edge must give large t-stat, got {}", t_stat);
+    }
+
+    #[test]
+    fn mirrored_score_mirrors_mean_ic_and_tstat_sign() {
+        let (score, ret) = lead_lag_world(600);
+        let mirrored: Vec<f64> = score.iter().map(|v| -v).collect();
+
+        let (pos_ic, pos_t, _) = rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);
+        let (neg_ic, neg_t, _) = rank_ic_block(&mirrored, &ret, 1, WINDOW, BARS_PER_DAY);
+
+        assert!((pos_ic + neg_ic).abs() < 1e-9);
+        assert!(neg_t < 0.0 && pos_t > 0.0);
+    }
+
+    #[test]
+    fn horizon_ladder_reports_each_requested_horizon_in_order() {
+        let (score, ret) = lead_lag_world(800);
+        let rungs = ic_ladder(&score, &ret, &[1, 3, 8], WINDOW, BARS_PER_DAY);
+
+        assert_eq!(rungs.len(), 3);
+        assert_eq!(rungs[0].horizon, 1);
+        assert_eq!(rungs[1].horizon, 3);
+        assert_eq!(rungs[2].horizon, 8);
+        for rung in &rungs {
+            assert!(rung.mean_ic.is_finite() && rung.t_stat.is_finite());
+            assert!(rung.mean_ic.abs() <= 1.0 + 1e-9);
+        }
+    }
+
+    #[test]
+    fn short_series_yields_zero_blocks_and_neutral_output() {
+        // shorter than warmup plus horizon: no information, neutral result
+        let score = vec![1.0, -1.0, 1.0];
+        let ret = vec![0.0, 0.1, -0.1];
+        let (mean_ic, t_stat, blocks) = rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);
+        assert_eq!((mean_ic, t_stat, blocks), (0.0, 0.0, 0));
+    }
+
+    #[test]
+    fn constant_score_within_every_block_is_reported_neutral() {
+        // zero dispersion in score: correlation undefined, blocks skipped
+        let score = vec![2.5; 400];
+        let (_, ret) = lead_lag_world(400);
+        let (mean_ic, _, blocks) = rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);
+        assert_eq!(blocks, 0);
+        assert_eq!(mean_ic, 0.0);
+    }
+}
