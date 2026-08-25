@@ -232,4 +232,36 @@ mod tests {
             trees.iter().map(|t| t.to_string()).collect();
         assert!(unique.len() >= 10, "too few unique trees: {}", unique.len());
     }
+
+    #[test]
+    fn same_seed_reproduces_identical_sequence() {
+        // Reproducible research requires that a registry batch can be
+        // regenerated bit-for-bit from its recorded seed.
+        let cfg = GeneratorConfig::default();
+        let mut gen_a = AlphaGenerator::new(&cfg, 777);
+        let mut gen_b = AlphaGenerator::new(&cfg, 777);
+
+        for i in 0..60 {
+            let a = gen_a.generate().to_string();
+            let b = gen_b.generate().to_string();
+            assert_eq!(a, b, "sequence diverged between equal seeds at {}", i);
+        }
+    }
+
+    #[test]
+    fn serialisation_is_idempotent_through_parser() {
+        // to_string must be a fixed point of parse: whatever the generator
+        // emits, printing its re-parse prints the identical text. This keeps
+        // ledger notes and trial entries stable under re-serialisation.
+        let cfg = GeneratorConfig::default();
+        let mut gen = AlphaGenerator::new(&cfg, 2024);
+
+        for i in 0..80 {
+            let once = gen.generate().to_string();
+            let twice = parse(&once)
+                .unwrap_or_else(|e| panic!("tree {} '{}' failed to parse: {}", i, once, e))
+                .to_string();
+            assert_eq!(once, twice, "serialisation not idempotent at tree {}", i);
+        }
+    }
 }

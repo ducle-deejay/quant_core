@@ -1,6 +1,77 @@
 /// Orthogonalization: regress candidate PnL against pool PnLs,
 /// keep only the residual (pure incremental value).
 
+/// Contract tests derived from the frozen canon intent for Component 3:
+/// a candidate earns admission only through its RESIDUAL value after the
+/// pool's contribution is regressed out. Ledger rule M4.
+///
+/// The mathematical heart is the normal-equations guarantee: the residual
+/// must be orthogonal to every pool column.
+
+#[cfg(test)]
+mod orthogonal_contract_tests {
+    use super::orthogonalize;
+
+    #[test]
+    fn residual_is_orthogonal_to_every_pool_column() {
+        // THE admission invariant of Component 3.
+        let n = 300usize;
+        let candidate: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.31).sin() * 2.0).collect();
+        let pool: Vec<Vec<f64>> = vec![
+            (0..n).map(|t| ((t as f64) * 0.17).cos()).collect(),
+            (0..n).map(|t| ((t as f64) * 0.05).sin()).collect(),
+            (0..n).map(|t| if t % 7 == 0 { 1.0 } else { -0.5 }).collect(),
+        ];
+
+        let residual = orthogonalize(&candidate, &pool);
+
+        for (k, column) in pool.iter().enumerate() {
+            let dot: f64 = residual.iter().zip(column.iter()).map(|(r, x)| r * x).sum();
+            assert!(
+                dot.abs() < 1e-6,
+                "residual correlates with pool column {}: dot = {:.2e}",
+                k, dot
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_inside_pool_span_is_fully_absorbed() {
+        // y = x1 + 2*x2 carries nothing beyond the pool: residual ~ 0
+        let n = 200usize;
+        let x1: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.23).sin()).collect();
+        let x2: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.11).cos()).collect();
+        let candidate: Vec<f64> = x1.iter().zip(x2.iter()).map(|(a, b)| a + 2.0 * b).collect();
+
+        let residual = orthogonalize(&candidate, &[x1, x2]);
+
+        let energy: f64 = residual.iter().map(|r| r * r).sum();
+        assert!(energy < 1e-12, "in-span candidate must vanish, energy {:.2e}", energy);
+    }
+
+    #[test]
+    fn exactly_anticorrelated_candidate_passes_through() {
+        // candidate = -regressor pointwise: perfect fit with beta -1,
+        // residual must vanish
+        let n = 200usize;
+        let regressor: Vec<f64> = (0..n)
+            .map(|t| if t % 2 == 0 { 1.0 } else { -1.5 })
+            .collect();
+        let candidate: Vec<f64> = regressor.iter().map(|x| -1.7 * x).collect();
+
+        let residual = orthogonalize(&candidate, &[regressor]);
+
+        let energy: f64 = residual.iter().map(|r| r * r).sum();
+        assert!(energy < 1e-18, "perfectly explained candidate must vanish");
+    }
+
+    #[test]
+    fn empty_pool_returns_candidate_verbatim() {
+        let candidate = vec![1.5, -2.0, 0.25];
+        assert_eq!(orthogonalize(&candidate, &[]), candidate);
+    }
+}
+
 /// Simple OLS regression of candidate on pool members.
 /// Returns residual series after regressing out all pool columns.
 ///
