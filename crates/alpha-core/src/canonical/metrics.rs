@@ -117,3 +117,87 @@ fn rank_vec(v: &[f64]) -> Vec<f64> {
     }
     ranks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // Contract tests derived from the frozen canon (stage-1 formulas),
+    // ledger governance DEC-001: tests encode INTENT, never behaviour.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sharpe_known_answer_hand_computed() {
+        // daily pnl [3, 1, 3, 1]: sample std = sqrt(4/3), mean = 2
+        // annualised = 2 / sqrt(4/3) * sqrt(250) = sqrt(3) * sqrt(250)
+        let d = [3.0, 1.0, 3.0, 1.0];
+        let got = sharpe(&d, 100);
+        let want = (3.0f64).sqrt() * (250.0f64).sqrt();
+        assert!((got - want).abs() < 1e-9, "got {}, want {}", got, want);
+    }
+
+    #[test]
+    fn sharpe_zero_for_constant_series() {
+        assert_eq!(sharpe(&[2.0; 50], 100), 0.0);
+        assert_eq!(sharpe(&[], 100), 0.0);
+    }
+
+    #[test]
+    fn sharpe_scale_invariant_and_sign_mirror() {
+        // Metamorphic: scaling daily pnl carries no Sharpe information;
+        // negating mirrors it. Annualisation constant cancels either way.
+        let base: Vec<f64> = (0..300).map(|t| ((t as f64) * 0.37).sin()).collect();
+        let scaled: Vec<f64> = base.iter().map(|v| v * 17.0).collect();
+        let mirrored: Vec<f64> = base.iter().map(|v| -v).collect();
+
+        let s0 = sharpe(&base, 100);
+        assert!((sharpe(&scaled, 100) - s0).abs() < 1e-9);
+        assert!((sharpe(&mirrored, 100) + s0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn max_drawdown_known_answer() {
+        // equity curve of [1, 1, -2] is [1, 2, 0]; worst peak-to-trough -2
+        assert!((max_drawdown(&[1.0, 1.0, -2.0]) - (-2.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn max_drawdown_never_positive_and_zero_when_monotone_rising() {
+        assert_eq!(max_drawdown(&[1.0, 2.0, 3.0, 4.0]), 0.0);
+
+        let series: Vec<f64> = (0..500).map(|t| ((t as f64) * 0.11).sin() * 3.0).collect();
+        assert!(max_drawdown(&series) <= 0.0);
+    }
+
+    #[test]
+    fn rank_ic_perfect_monotone_relation_scores_one() {
+        // score strictly increasing and forward return strictly increasing:
+        // Spearman must be exactly 1 up to floating point.
+        let n = 200usize;
+        let score: Vec<f64> = (0..n).map(|t| t as f64).collect();
+        let ret: Vec<f64> = (0..n).map(|t| 0.001 * t as f64).collect();
+
+        let (ic, pairs) = rank_ic_block(&score, &ret, 1, 10);
+        assert!(ic > 0.999, "perfect lead-lag must give IC ~ 1, got {}", ic);
+        assert_eq!(pairs, n - 2, "pair window excludes both ends at horizon 1");
+    }
+
+    #[test]
+    fn rank_ic_anti_monotone_relation_scores_minus_one() {
+        let n = 150usize;
+        let score: Vec<f64> = (0..n).map(|t| -(t as f64)).collect();
+        let ret: Vec<f64> = (0..n).map(|t| 0.002 * t as f64).collect();
+
+        let (ic, _) = rank_ic_block(&score, &ret, 2, 10);
+        assert!(ic < -0.999, "anti-monotone must give IC ~ -1, got {}", ic);
+    }
+
+    #[test]
+    fn rank_ic_insufficient_data_reports_zero_pairs() {
+        // shorter than horizon plus one: no information, zero pairs out
+        let score = vec![1.0, 2.0];
+        let ret = vec![0.0, 0.1];
+        assert_eq!(rank_ic_block(&score, &ret, 5, 10), (0.0, 0));
+    }
+}
