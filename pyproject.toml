@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+
+[project]
+name = "quantcore"
+version = "0.1.0"
+description = "High-performance alpha research pipeline"
+requires-python = ">=3.9"
+
+[tool.maturin]
+python-source = "python"
+features = ["pyo3/extension-module"]
+manifest-benches = false

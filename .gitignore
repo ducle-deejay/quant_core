@@ -1,0 +1,7 @@
+data/
+.venv/
+.uv_cache/
+.uv-tmp/
+target/
+__pycache__/
+*.egg-info/
