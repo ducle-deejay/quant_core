@@ -68,6 +68,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-001](observations/OBS-001-nan-warmup-poisoning.md) - warmup NaN from rolling operators silently flattened every time-series alpha to a zero position.
 - [OBS-002](observations/OBS-002-zscore-catastrophic-cancellation.md) - unanchored E[x^2] - mean^2 variance lost precision for scores riding on large offsets.
 - [OBS-003](observations/OBS-003-phantom-trade-counting.md) - trades_per_day counted band triggers at the cap instead of executed position changes.
+- [OBS-004](observations/OBS-004-gate-dead-inputs.md) - gate input carries skewness, kurtosis and sample length that evaluate_gate ignores; PSR probability not wired (triaged).
+- [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; Pearson mislabeled as Rank IC (triaged).
 
 ### Reconciliations
 
@@ -79,7 +81,11 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 
 ### Test mappings
 
-(none yet - populated as component contract tests land)
+- [TST-001](tests/TST-001-metrics-contract-tests.md) - canonical metrics: known answers plus scale/sign metamorphic relations.
+- [TST-002](tests/TST-002-gate-contract-tests.md) - admission gate: deflation dynamics and independent fixed-limit enforcement.
+- [TST-003](tests/TST-003-ic-ladder-contract-tests.md) - IC ladder: lead-lag world, sign mirror, horizon attachment, degeneracies.
+- [TST-004](tests/TST-004-walk-forward-contract-tests.md) - walk-forward stability: regime-shift detection and block arithmetic.
+- [TST-005](tests/TST-005-pool-and-grammar-contract-tests.md) - residual orthogonality invariant plus generator reproducibility.
 
 ## Related notes
 
