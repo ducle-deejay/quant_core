@@ -2,7 +2,7 @@
 ///
 /// Integrates deflated Sharpe calculation, trial ledger tracking,
 /// and plateau detection into a unified gate evaluation.
-use super::deflated_sharpe::deflated_threshold;
+use super::deflated_sharpe::{deflated_sharpe_probability, deflated_threshold};
 use super::trial_ledger::TrialLedger;
 
 pub struct GateCriteria {
@@ -16,6 +16,10 @@ pub struct GateCriteria {
     pub slot_ceiling_turnover: f64,
     /// Variance of Sharpe ratios across all trials (for deflation)
     pub sharpe_variance_across_trials: f64,
+    /// Maximum tolerated probability that the observed best-of-N Sharpe is
+    /// spurious once return-distribution shape and sample length are
+    /// accounted for (PSR-style correction; 0.05 = 95% significance).
+    pub max_spurious_probability: f64,
 }
 
 impl Default for GateCriteria {
@@ -26,6 +30,7 @@ impl Default for GateCriteria {
             min_positive_blocks_pct: 60.0,
             slot_ceiling_turnover: 5000.0,
             sharpe_variance_across_trials: 0.25,
+            max_spurious_probability: 0.05,
         }
     }
 }
@@ -110,6 +115,36 @@ pub fn evaluate_gate(
         input.positive_blocks_pct >= criteria.min_positive_blocks_pct as f64,
     ));
 
+    // Third deflation layer (closes OBS-004 / plan T013): the PSR-style
+    // probability that the observed Sharpe is spurious once the return
+    // distribution's skewness, kurtosis and sample length are accounted
+    // for. The expected-max threshold above answers "how high could luck
+    // climb"; this check answers "how likely is THIS result itself fake".
+    // Observed Sharpe enters in unit cross-trial variance per the API.
+    let unit_sharpe = if criteria.sharpe_variance_across_trials > 0.0 {
+        input.net_sharpe_walkforward / criteria.sharpe_variance_across_trials.sqrt()
+    } else {
+        input.net_sharpe_walkforward
+    };
+    let spurious_probability = deflated_sharpe_probability(
+        unit_sharpe,
+        n_eff,
+        input.skewness,
+        input.kurtosis,
+        input.sample_length_bars,
+    );
+    checks.push((
+        format!(
+            "P(spurious) {:.4} <= {:.2} (skew {:+.2}, kurt {:.2}, T {})",
+            spurious_probability,
+            criteria.max_spurious_probability,
+            input.skewness,
+            input.kurtosis,
+            input.sample_length_bars
+        ),
+        spurious_probability <= criteria.max_spurious_probability,
+    ));
+
     let passed = checks.iter().all(|(_, pass)| *pass);
     GateResult {
         passed,
@@ -133,10 +168,8 @@ mod tests {
             cost_drag_pct: 10.0,
             turnover_annualized: 1000.0,
             positive_blocks_pct: 80.0,
-            // Ledger note OBS-004: skewness, kurtosis and sample_length_bars
-            // are accepted by the input contract but unused by evaluate_gate
-            // today (the full PSR-style probability is not wired). Kept here
-            // so the contract shape is visible at every call site.
+            // Normal-distribution moments over a long sample: the shape
+            // correction below sees nothing suspicious here.
             skewness: 0.0,
             kurtosis: 3.0,
             sample_length_bars: 50_000,
@@ -223,6 +256,86 @@ mod tests {
         let result = evaluate_gate(&input, &criteria, &ledger_with(1));
         assert!(result.checks[0].1, "boundary Sharpe must pass the >= check");
         assert_eq!(result.deflated_threshold_used, 0.0);
+    }
+
+    // -------------------------------------------------------------------
+    // Distribution-shape correction (PSR-style), closing OBS-004
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn clean_candidate_passes_all_seven_checks() {
+        let result = evaluate_gate(&base_input(), &GateCriteria::default(), &ledger_with(1));
+        assert_eq!(result.checks.len(), 7);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn negative_skew_and_excess_kurtosis_raise_spurious_probability() {
+        // For a positive observed Sharpe the estimator's variance grows with
+        // negative skew and with kurtosis above normal, so confidence drops.
+        let criteria = GateCriteria::default();
+        let mut clean = base_input();
+        clean.net_sharpe_walkforward = 2.0;
+        clean.sample_length_bars = 120;
+
+        let mut poisoned = clean.clone_fields();
+        poisoned.skewness = -2.0;
+        poisoned.kurtosis = 8.0;
+
+        let p_clean = spurious_probability_of(&clean, &criteria);
+        let p_poisoned = spurious_probability_of(&poisoned, &criteria);
+        assert!(
+            p_poisoned > p_clean,
+            "shape-poisoned candidate must carry higher P(spurious): {} vs {}",
+            p_poisoned, p_clean
+        );
+    }
+
+    #[test]
+    fn shape_poisoned_candidate_clears_trial_threshold_but_fails_distribution_check() {
+        // The scenario that justifies the whole layer: enough Sharpe to
+        // clear the expected-max threshold at a tiny registry, yet return
+        // shapes so hostile (negative skew, kurtosis 40, short sample) that
+        // the result is not distinguishable from luck.
+        let criteria = GateCriteria::default();
+        let mut input = base_input();
+        input.net_sharpe_walkforward = 2.0; // unit-scale 4.0, far above sr0 ~ 0.52
+        input.skewness = -3.0;
+        input.kurtosis = 40.0;
+        input.sample_length_bars = 30;
+
+        let result = evaluate_gate(&input, &criteria, &ledger_with(2));
+
+        assert!(result.checks[0].1, "trial-count threshold check must pass");
+        assert!(!result.checks[6].1, "distribution check must reject the candidate");
+        assert!(!result.passed);
+    }
+
+    impl GateInput {
+        fn clone_fields(&self) -> GateInput {
+            GateInput {
+                net_sharpe_walkforward: self.net_sharpe_walkforward,
+                icir: self.icir,
+                decay_through_target_holding: self.decay_through_target_holding,
+                cost_drag_pct: self.cost_drag_pct,
+                turnover_annualized: self.turnover_annualized,
+                positive_blocks_pct: self.positive_blocks_pct,
+                skewness: self.skewness,
+                kurtosis: self.kurtosis,
+                sample_length_bars: self.sample_length_bars,
+            }
+        }
+    }
+
+    fn spurious_probability_of(input: &GateInput, criteria: &GateCriteria) -> f64 {
+        let unit = input.net_sharpe_walkforward / criteria.sharpe_variance_across_trials.sqrt();
+        crate::evaluation::deflated_sharpe::deflated_sharpe_probability(
+            unit,
+            2,
+            input.skewness,
+            input.kurtosis,
+            input.sample_length_bars,
+        )
     }
 
     impl GateResult {

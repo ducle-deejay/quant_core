@@ -3,7 +3,7 @@ doc_id: OBS-005
 title: Duplicate rank_ic_block name with different statistics and a mislabeled doc comment
 type: observation
 owner: research
-status: triaged
+status: resolved
 version: 1.0
 components: [2]
 tags: [evaluation, naming, rank-ic, pearson]
@@ -32,4 +32,5 @@ Either resolution closes this note under M2 together with a test-mapping note fo
 
 ## Related notes
 
+- [REC-003](../reconciliations/REC-003-spearman-upgrade.md) - RESOLVED by this verdict: true Spearman implemented, name kept
 - [CON-MIN-IC-LADDER](../../enhanced/concepts/mining/ic-metrics-and-horizon-ladder.md) - canon definition of IC computation and the ladder

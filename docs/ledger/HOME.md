@@ -68,12 +68,14 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-001](observations/OBS-001-nan-warmup-poisoning.md) - warmup NaN from rolling operators silently flattened every time-series alpha to a zero position.
 - [OBS-002](observations/OBS-002-zscore-catastrophic-cancellation.md) - unanchored E[x^2] - mean^2 variance lost precision for scores riding on large offsets.
 - [OBS-003](observations/OBS-003-phantom-trade-counting.md) - trades_per_day counted band triggers at the cap instead of executed position changes.
-- [OBS-004](observations/OBS-004-gate-dead-inputs.md) - gate input carries skewness, kurtosis and sample length that evaluate_gate ignores; PSR probability not wired (triaged).
-- [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; Pearson mislabeled as Rank IC (triaged).
+- [OBS-004](observations/OBS-004-gate-dead-inputs.md) - gate input carried skewness, kurtosis and sample length that evaluate_gate ignored; PSR probability now wired.
+- [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; ladder upgraded to true Spearman.
 
 ### Reconciliations
 
 - [REC-001](reconciliations/REC-001-sanitize-scores-amendment.md) - Step A input contract amended to require finite scores; canonical_map sanitises first.
+- [REC-002](reconciliations/REC-002-psr-probability-wired.md) - PSR-style spurious probability wired into the gate as the seventh check; T013 complete.
+- [REC-003](reconciliations/REC-003-spearman-upgrade.md) - IC ladder upgraded to true Spearman; one-name-one-meaning restored.
 
 ### Decisions
 

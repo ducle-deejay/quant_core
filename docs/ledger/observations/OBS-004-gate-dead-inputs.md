@@ -3,7 +3,7 @@ doc_id: OBS-004
 title: Gate input carries skewness, kurtosis, sample length that the gate ignores
 type: observation
 owner: research
-status: triaged
+status: resolved
 version: 1.0
 components: [2]
 tags: [evaluation, deflated-sharpe, unfinished-wiring]
@@ -34,5 +34,6 @@ Either resolution closes the note under M2. Until then the fields remain documen
 
 ## Related notes
 
-- [STG-2-EVALUATION-SCREENING](../../enhanced/stages/stage-2-evaluation-screening.md) - frozen specification of admission gates
+- [REC-002](../reconciliations/REC-002-psr-probability-wired.md) - RESOLVED by this verdict: probability wired as seventh gate check
+- [STG-2-EVALUATION](../../enhanced/stages/stage-2-evaluation-screening.md) - frozen specification of admission gates
 - [trial-count-and-thresholds](../../enhanced/concepts/evaluation/trial-count-and-thresholds.md) - canon description of dynamic thresholds

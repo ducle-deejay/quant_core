@@ -17,8 +17,8 @@ test: [perfect_lead_lag_scores_near_one_with_strong_tstat, mirrored_score_mirror
 
 ## 1. Mapping
 
-A deterministic lead-lag world (return at t+1 built from score at t plus a slow wobble) pins mean IC near one with a strong block t-statistic, sign mirroring, correct horizon attachment across ladder rungs, and neutral output for degenerate inputs. Provoked by [OBS-005](../observations/OBS-005-duplicate-rank-ic-name.md): the module computes Pearson while its comment and name say Rank IC - decision between rename and Spearman implementation remains open.
+A deterministic lead-lag world (return at t+1 built from score at t plus a slow wobble) pins mean IC near one with a strong block t-statistic, sign mirroring, correct horizon attachment across ladder rungs, and neutral output for degenerate inputs. Provoked by [OBS-005](../observations/OBS-005-duplicate-rank-ic-name.md), resolved by [REC-003](../reconciliations/REC-003-spearman-upgrade.md): the block statistic is now genuine Spearman, and the fact that all five tests pass unchanged across that upgrade is itself evidence the switch preserved screening semantics.
 
 ## Related notes
 
-- [OBS-005](../observations/OBS-005-duplicate-rank-ic-name.md) - naming and statistic mismatch, decision open
+- [REC-003](../reconciliations/REC-003-spearman-upgrade.md) - verdict that upgraded the statistic

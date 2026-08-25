@@ -6,9 +6,36 @@ pub struct IcResult {
     pub t_stat: f64,
 }
 
+/// Rank transform: position + 1 after a stable sort (no tie averaging,
+/// matching the rank convention in canonical/metrics).
+fn rank_transform(v: &[f64]) -> Vec<f64> {
+    let mut indexed: Vec<usize> = (0..v.len()).collect();
+    indexed.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut ranks = vec![0.0; v.len()];
+    for (position, &original_index) in indexed.iter().enumerate() {
+        ranks[original_index] = position as f64 + 1.0;
+    }
+    ranks
+}
+
+/// A series with no dispersion carries no correlation information; ranking
+/// it would invent arbitrary order out of sort stability.
+fn has_dispersion(v: &[f64]) -> bool {
+    let first = match v.first() {
+        Some(&x) => x,
+        None => return false,
+    };
+    v.iter().any(|&x| (x - first).abs() > 1e-12)
+}
+
 /// Compute rolling Rank IC at a given horizon, grouped into daily blocks.
 ///
-/// Returns (mean of block means, t-statistic of block means).
+/// The statistic is Spearman rank correlation - Pearson applied to the
+/// rank-transformed score and forward return within each block - honouring
+/// the canon preference for outlier robustness. Blocks without dispersion
+/// on either side are skipped.
+///
+/// Returns (mean of block means, t-statistic of block means, block count).
 pub fn rank_ic_block(
     score: &[f64],
     ret: &[f64],
@@ -48,13 +75,29 @@ pub fn rank_ic_block(
             .map(|(a, b)| (*a, *b))
             .collect();
 
-        if pairs.len() > 5 {
+        if pairs.len() > 5 && has_dispersion(&pairs.iter().map(|p| p.0).collect::<Vec<_>>()) {
+            let score_ranks = rank_transform(&pairs.iter().map(|p| p.0).collect::<Vec<_>>());
+            let return_ranks = rank_transform(&pairs.iter().map(|p| p.1).collect::<Vec<_>>());
+
+            // Pearson on ranks = Spearman
             let np = pairs.len() as f64;
-            let ms: f64 = pairs.iter().map(|p| p.0).sum::<f64>() / np;
-            let mf: f64 = pairs.iter().map(|p| p.1).sum::<f64>() / np;
-            let cov: f64 = pairs.iter().map(|p| (p.0 - ms) * (p.1 - mf)).sum::<f64>();
-            let ss: f64 = pairs.iter().map(|p| (p.0 - ms).powi(2)).sum::<f64>().sqrt();
-            let sf: f64 = pairs.iter().map(|p| (p.1 - mf).powi(2)).sum::<f64>().sqrt();
+            let ms: f64 = score_ranks.iter().sum::<f64>() / np;
+            let mf: f64 = return_ranks.iter().sum::<f64>() / np;
+            let cov: f64 = score_ranks
+                .iter()
+                .zip(return_ranks.iter())
+                .map(|(a, b)| (a - ms) * (b - mf))
+                .sum();
+            let ss: f64 = score_ranks
+                .iter()
+                .map(|a| (a - ms).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let sf: f64 = return_ranks
+                .iter()
+                .map(|b| (b - mf).powi(2))
+                .sum::<f64>()
+                .sqrt();
             if ss > 1e-12 && sf > 1e-12 {
                 block_ics.push(cov / (ss * sf));
             }
