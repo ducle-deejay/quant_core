@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "(?i).*(edit|write|patch).*",
         "hooks": [
           {
             "type": "command",
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c \"import json,pathlib;c=json.loads(pathlib.Path('$CLAUDE_PROJECT_DIR/ledger.config.json').read_text());import subprocess;out=subprocess.run(['python3','scripts/sweep_ledger.py'],capture_output=True,text=True).stdout;debt=[l for l in out.splitlines() if l.startswith('drift debt')];print('ledger:', debt[0] if debt else 'sweep unavailable')\""
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/session_banner.py\""
           }
         ]
       }

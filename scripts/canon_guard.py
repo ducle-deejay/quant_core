@@ -46,6 +46,18 @@ def main() -> int:
     except json.JSONDecodeError:
         return 0  # not our event shape; stay silent
 
+    # Temporary diagnostics: record every invocation so we can see the
+    # harness's real tool names and paths. Remove once matcher semantics
+    # are confirmed on all target harnesses.
+    try:
+        with open("/tmp/canon_guard.log", "a", encoding="utf-8") as log:
+            log.write(json.dumps({
+                "tool": payload.get("tool_name"),
+                "path": (payload.get("tool_input") or {}).get("file_path"),
+            }) + "\n")
+    except OSError:
+        pass
+
     tool_input = payload.get("tool_input") or {}
     file_path = tool_input.get("file_path") or ""
     if not file_path:
