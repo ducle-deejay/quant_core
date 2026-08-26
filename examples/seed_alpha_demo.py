@@ -16,7 +16,7 @@ an mot phan vao return tuong lai (continuation); gia co micro-bounce lag-1
 de seed reversion co viec an. Moi quan he nay dai dien cho "edge" thuc
 ma researcher tin la ton tai trong data VN30F1M.
 
-Chi dung numpy/pandas. Chay: python3 research/seed_alpha_demo.py
+Chi dung numpy/pandas. Chay: python3 examples/seed_alpha_demo.py
 """
 
 import numpy as np

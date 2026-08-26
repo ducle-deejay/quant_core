@@ -79,6 +79,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [REC-002](reconciliations/REC-002-psr-probability-wired.md) - PSR-style spurious probability wired into the gate as the seventh check; T013 complete.
 - [REC-003](reconciliations/REC-003-spearman-upgrade.md) - IC ladder upgraded to true Spearman; one-name-one-meaning restored.
 - [REC-004](reconciliations/REC-004-backstop-only-dsh.md) - DSH enforcement stays commit-level backstop until the hooks bridge matures.
+- [REC-005](reconciliations/REC-005-research-to-examples.md) - demonstration scripts moved to examples/; frozen docs keep old paths, this note is the authoritative pointer.
 
 ### Decisions
 

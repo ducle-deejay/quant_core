@@ -8,7 +8,7 @@ tinh nhanh hon nhieu lan, va cho ketqua thua le hon (overestimate).
 Script nay chay ca hai phien ban tren cung data va cung mot seed alpha,
 roi so sanh: gia tri fitness, thoi gian tinh, va giai thich tai sao khac nhau.
 
-Chay: python3 research/fitness_proxy_vs_canonical.py
+Chay: python3 examples/fitness_proxy_vs_canonical.py
 """
 
 import time

@@ -2,7 +2,7 @@
 Verify: Search fitness proxy vs Canonical simulation on REAL VN30F1M data.
 Uses a price-based seed (OHLCV only, no book depth available).
 
-Run: uv run python3 research/verify_real_data.py
+Run: uv run python3 examples/verify_real_data.py
 """
 
 import numpy as np
