@@ -44,6 +44,14 @@ You are working in a repo with governance:
   ledger.config.json).
 ```
 
+## Decision authority
+
+1. Never run `git commit`, `git tag`, or any command writing outside the workspace unless the owner explicitly ordered that exact action in the current session.
+2. Changes to policy text (this file, hooks configuration, `scripts/`, `skills/`, `ledger.config.json`): propose the change with rationale first; apply only after the owner approves.
+3. Answering questions, analysis, and read-only investigation are always free - a question about *how* to do something is not permission to do it.
+4. Exception for active data-loss risk: act minimally to stop the damage, then disclose fully and immediately.
+5. Ratified by the owner after a real incident (2026-08-26): three commits landed without orders - see decision note DEC-004 in the ledger.
+
 ## Harness notes
 
 - Codex reads this file natively. Claude Code imports it via `CLAUDE.md`.

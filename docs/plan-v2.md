@@ -21,6 +21,18 @@ context from another task's description. Component references use full names
 
 Status values: `[x]` = done, `[ ]` = pending, `[~]` = partially done.
 
+## Progress snapshot (updated 2026-08-26)
+
+    Complete            : 29 of 32 tasks
+    Partially complete  : 3  (T023 drawdown-live feed, T030 maturin
+                          verification, T031 seed-comparison entry point)
+    Pending             : 0
+    Quality gates       : 222 Rust unit tests green; system-audit battery
+                          passes on real VN30F1M data; ledger sweep clean
+    Beyond-plan additions since v2.0: evaluation/screening module,
+                          bin/system_audit battery, bin/batch_verify,
+                          examples/ rename, governance kit + ledger
+
 ---
 
 ## Section A — Foundation (no dependencies beyond Rust toolchain)
@@ -51,7 +63,8 @@ registry (reference/notation.md). Prevents typo-based bugs where two
 different concepts accidentally share a symbol name.
 Verified by: cargo build passes; every formula symbol resolves to a
 registry entry.
-Status: [ ] Pending.
+Status: [x] Complete (NotationRegistry with collision guard, 4 unit
+tests; verified during governance-kit audit).
 
 ---
 
@@ -181,7 +194,10 @@ maximum Sharpe for expected maximum of N random trials, using skewness,
 kurtosis, and sample length.
 Done when: threshold rises monotonically with trial count and converges
 to zero-inflation case when N equals one.
-Status: [ ] Pending.
+Status: [x] Complete (deflated_threshold plus PSR-style
+deflated_sharpe_probability; both wired into evaluate_gate as checks;
+monotonicity and single-trial degeneracy covered by contract tests -
+see reconciliation REC-002).
 
 ### TASK 014: Implement trial ledger (persistence layer)
 
@@ -192,7 +208,9 @@ and result for every evaluation event. Supports deduplication by hash and
 counting unique entries for effective-N estimation.
 Verified by: adding entries, deduplicating identical hashes, counting
 unique evaluations.
-Status: [ ] Pending.
+Status: [x] Complete (append-only entries, FNV-1a hash dedup,
+unique_count and effective_n clustering, save/load persistence;
+7 unit tests).
 
 ### TASK 015: Implement parameter plateau sweep automation
 
@@ -202,7 +220,8 @@ Deliverable: sweep alpha parameters on grid around chosen values,
 compute metric at each point, detect plateau versus sharp peak by
 measuring neighbor variance around optimum.
 Verified by: known plateau passes; known single-point peak fails.
-Status: [ ] Pending.
+Status: [x] Complete (make_grid and detect_plateau; flat-neighborhood
+plateau accepted and sharp peak rejected by dedicated tests - 9 total).
 
 ### TASK 016: Implement gate evaluation criteria
 
@@ -211,8 +230,9 @@ Depends on: TASK 009, 011, 012, 013, 015
 Deliverable: evaluate_gate(input, criteria) -> list of named checks
 with pass/fail booleans; all must hold simultaneously for overall PASS.
 Default criteria match docs/plan.md section on Stage 2 gates.
-Status: [x] Complete (criteria defined; deflated threshold integration
-pending TASK 013).
+Status: [x] Complete (seven named checks including expected-maximum
+threshold and PSR spurious-probability gate; integration finished -
+see REC-002).
 
 ---
 
@@ -293,8 +313,10 @@ Depends on: TASK 022
 Deliverable: multiply vol-targeted position by m from pre-committed
 drawdown table. Table frozen before live deployment; changes require
 logged change-review cycle.
-Status: [ ] Pending (requires equity curve tracking infrastructure from
-live deployment; documented in drawdown-overlay concept note).
+Status: [~] Partially complete - DrawdownLadder with DEFAULT_BANDS rule
+table built and covered by 18 offline tests; remaining work is multiplying
+the vol-targeted position inside the live sizing path and feeding real
+equity-curve updates from deployment.
 
 ---
 
@@ -348,7 +370,9 @@ Deliverable:
 - Integration with batch_executor for vectorised fitness evaluation
 Done when: GA loop runs for specified generations, population fitness
 improves measurably, best individual is extractable as DSL string.
-Status: [ ] Pending.
+Status: [x] Complete (tournament selection, subtree crossover, four
+mutation operators, elitism, canonical-form invariant; end-to-end test
+drives generations through batch_executor fitness - 21 tests).
 
 ---
 
@@ -377,8 +401,10 @@ Deliverable: #[pyfunction] wrappers around canonical_map, compute_pnl,
 ic_ladder enabling researchers to call Rust functions from Python notebooks.
 Done when: python import quantcore works; canonical_map called from Python
 produces identical output to Rust-native call on same input.
-Status: [ ] Pending (requires PyO3 macro integration; deferred until core
-logic stabilizes).
+Status: [~] Partially complete - #[pyfunction] wrappers for canonical_map,
+compute_pnl, ic_ladder and helpers exist behind the python-bindings
+feature; import-parity verification still requires a maturin build outside
+the sandbox.
 
 ---
 
@@ -394,11 +420,12 @@ Done when: pipeline loads real data without errors, generates six seed
 alphas with varying lookback windows, runs canonical simulation producing
 non-zero positions, computes meaningful Sharpe ratios and Information
 Coefficient values, outputs formatted comparison table.
-Current status: pipeline runs and produces real results. Six lookback
-variants evaluated. LB=50 shows best net Sharpe at 1.205. Gate evaluation
-correctly identifies ICIR and cost drag as failing conditions. Exit code
-101 caused by NaN in max_by comparator - needs graceful NaN handling.
-Status: [~] Partially complete - produces results but panics on NaN.
+Current status: pipeline runs end-to-end without panics (NaN comparator
+fixed under TASK 032). Superseded in scope by bin/batch_verify, which
+pushes 250 grammar-guided expressions through the full stack per run;
+alphascreen remains the seed-based variant comparison entry point.
+Status: [~] Partially complete - functional; broader coverage delegated
+to batch verification.
 
 ### TASK 032: Fix NaN panic in max_by comparator
 
