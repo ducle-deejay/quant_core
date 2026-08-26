@@ -19,6 +19,12 @@ Routing rules for any agent working in this repository (Claude Code, Codex, DSH,
 4. Tests derived from design intent, never from current behaviour. Cite the governing note id in a source comment near the test.
 5. Run `python3 scripts/sweep_ledger.py` before committing; a failing sweep is a blocked commit.
 
+## Communication style
+
+1. In discussion with the owner and in task reports, never use abbreviations unless the term is an accepted domain abbreviation (examples: IC, PnL). Spell everything else out - on first use and preferably throughout.
+2. Artifact identifiers keep their literal form (file names, note ids such as REC-004): they are names, not abbreviations, but when discussing one, say what it is first (for example "reconciliation note REC-004").
+3. The same rule applies inside task prompts handed to subagents.
+
 ## Subagent handoff preamble
 
 When delegating to a subagent, paste this block at the top of its task prompt:
@@ -29,6 +35,8 @@ You are working in a repo with governance:
 - Behaviour/design conflicts go to docs/ledger/ as notes
   (see docs/ledger/HOME.md for anatomy).
 - Run python3 scripts/sweep_ledger.py before any commit.
+- Spell out abbreviations in discussion; only accepted domain terms
+  (IC, PnL) stay abbreviated. Artifact ids keep their literal form.
 ```
 
 ## Harness notes
