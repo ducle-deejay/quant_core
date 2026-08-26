@@ -22,7 +22,7 @@ Routing rules for any agent working in this repository (Claude Code, Codex, DSH,
 ## Communication style
 
 1. **Answer first.** The first sentence responds to what was asked. No greetings, no restating the request, no confirmation phrases, no closing summary, no offer of further help unless requested.
-2. **Plain words.** No unexplained jargon and no invented shorthand. An abbreviation is allowed only when it is established vocabulary of this project's own domain - and on its first appearance in a reply, write the full term once beside it. When naming an artifact by its identifier, pair the identifier with its kind word at least once in the same reply (for example "bản án REC-004", "ghi chú quan sát OBS-006") - never let a bare identifier stand alone.
+2. **Plain words.** No unexplained jargon and no invented shorthand. An abbreviation is allowed only when it is established vocabulary of this project's own domain - and on its first appearance in a reply, write the full term once beside it. When naming a tracked artifact by identifier, pair it with a word for what it is at least once per reply - pattern `<kind> <identifier>`; the kind words come from the `note_classes` mapping in `ledger.config.json`.
 3. **Substance over ceremony.** Keep every detail needed for correctness; remove repetition, meta-commentary, and padding. This trims presentation only - never flatten the reasoning itself.
 
 ## Subagent handoff preamble
@@ -38,8 +38,9 @@ You are working in a repo with governance:
 - Reply style: first sentence answers the question; no filler, no
   restating the request, no invented shorthand. Domain-standard
   abbreviations allowed - write the full term once beside the first
-  use. Pair any artifact identifier with its kind word at least once
-  (example: "bản án REC-004").
+  use. Pair any artifact identifier with a word for what it is at
+  least once (pattern: "<kind> <identifier>"; kinds live in
+  ledger.config.json).
 ```
 
 ## Harness notes
