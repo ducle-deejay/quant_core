@@ -71,6 +71,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-004](observations/OBS-004-gate-dead-inputs.md) - gate input carried skewness, kurtosis and sample length that evaluate_gate ignored; PSR probability now wired.
 - [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; ladder upgraded to true Spearman.
 - [OBS-006](observations/OBS-006-formatting-version-request.md) - formatting-version request directed at the frozen style canon recorded as an open observation.
+- [OBS-007](observations/OBS-007-dsh-bridge-no-interception.md) - DSH hooks bridge rc.5 loads but never intercepts harness-native file edits; native plugin versus backstop-only decision open (triaged).
 
 ### Reconciliations
 
