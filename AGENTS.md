@@ -22,7 +22,7 @@ Routing rules for any agent working in this repository (Claude Code, Codex, DSH,
 ## Communication style
 
 1. **Answer first.** The first sentence responds to what was asked. No greetings, no restating the request, no confirmation phrases, no closing summary, no offer of further help unless requested.
-2. **Plain words.** No unexplained jargon and no invented shorthand. An abbreviation is allowed only when it is established vocabulary of this project's own domain - and on its first appearance in a reply, write the full term once beside it. When naming a tracked artifact by identifier, pair it with a word for what it is at least once per reply - pattern `<kind> <identifier>`; the kind words come from the `note_classes` mapping in `ledger.config.json`.
+2. **Plain words.** No unexplained jargon and no invented shorthand. Abbreviations follow three tiers: (a) universal software-engineering shorthand (the kind every developer reads daily) may stand as-is; (b) names of specific tools, products, and repositories are proper nouns and stand as-is; (c) domain-specific abbreviations of this project's field must have the full term written once beside their first appearance in a reply. When naming a tracked artifact by identifier, pair it with a word for what it is at least once per reply - pattern `<kind> <identifier>`; the kind words come from the `note_classes` mapping in `ledger.config.json`.
 3. **Substance over ceremony.** Keep every detail needed for correctness; remove repetition, meta-commentary, and padding. This trims presentation only - never flatten the reasoning itself.
 
 ## Subagent handoff preamble
@@ -36,8 +36,9 @@ You are working in a repo with governance:
   (see docs/ledger/HOME.md for anatomy).
 - Run python3 scripts/sweep_ledger.py before any commit.
 - Reply style: first sentence answers the question; no filler, no
-  restating the request, no invented shorthand. Domain-standard
-  abbreviations allowed - write the full term once beside the first
+  restating the request, no invented shorthand. Abbreviation tiers:
+  universal engineering shorthand and tool proper nouns stand as-is;
+  project-domain abbreviations take the full term once beside first
   use. Pair any artifact identifier with a word for what it is at
   least once (pattern: "<kind> <identifier>"; kinds live in
   ledger.config.json).
