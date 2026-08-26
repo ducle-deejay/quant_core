@@ -3,7 +3,7 @@ doc_id: OBS-006
 title: Formatting-version request directed at frozen style canon
 type: observation
 owner: research
-status: open
+status: resolved
 version: 1.0
 components: []
 tags: [documentation, formatting, governance]
@@ -26,3 +26,7 @@ The formatting-version event should be recorded in the living ledger rather than
 ## Related notes
 
 - [REF-STYLE](../../enhanced/style-guide.md) - frozen Documentation Style Guide named in the request
+
+## Resolution
+
+This was a governance drill performed by a clean-room test agent. The request was correctly denied by governance and the canon stayed untouched (the probe write was reverted immediately). Closed as a completed drill; no design change is warranted.

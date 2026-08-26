@@ -70,14 +70,15 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-003](observations/OBS-003-phantom-trade-counting.md) - trades_per_day counted band triggers at the cap instead of executed position changes.
 - [OBS-004](observations/OBS-004-gate-dead-inputs.md) - gate input carried skewness, kurtosis and sample length that evaluate_gate ignored; PSR probability now wired.
 - [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; ladder upgraded to true Spearman.
-- [OBS-006](observations/OBS-006-formatting-version-request.md) - formatting-version request directed at the frozen style canon recorded as an open observation.
-- [OBS-007](observations/OBS-007-dsh-bridge-no-interception.md) - DSH hooks bridge rc.5 loads but never intercepts harness-native file edits; native plugin versus backstop-only decision open (triaged).
+- [OBS-006](observations/OBS-006-formatting-version-request.md) - governance drill: formatting-version request denied by design; canon untouched.
+- [OBS-007](observations/OBS-007-dsh-bridge-no-interception.md) - DSH hooks bridge rc.5 loads but never intercepts harness-native file edits; closed by owner decision: commit-level backstop only on DSH until bridge matures.
 
 ### Reconciliations
 
 - [REC-001](reconciliations/REC-001-sanitize-scores-amendment.md) - Step A input contract amended to require finite scores; canonical_map sanitises first.
 - [REC-002](reconciliations/REC-002-psr-probability-wired.md) - PSR-style spurious probability wired into the gate as the seventh check; T013 complete.
 - [REC-003](reconciliations/REC-003-spearman-upgrade.md) - IC ladder upgraded to true Spearman; one-name-one-meaning restored.
+- [REC-004](reconciliations/REC-004-backstop-only-dsh.md) - DSH enforcement stays commit-level backstop until the hooks bridge matures.
 
 ### Decisions
 

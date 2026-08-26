@@ -3,7 +3,7 @@ doc_id: OBS-007
 title: DSH hooks bridge rc.5 loads but never intercepts harness-native file edits
 type: observation
 owner: research
-status: triaged
+status: resolved
 version: 1.0
 components: []
 tags: [governance, dsh, hooks, compatibility]
@@ -47,3 +47,7 @@ Either resolution closes this note; Option A additionally supersedes part of DEC
 ## Related notes
 
 - [DEC-002](../decisions/DEC-002-multi-harness-kit.md) - kit whose L2 layer is affected
+
+## Resolution
+
+Closed by [REC-004](../reconciliations/REC-004-backstop-only-dsh.md): Option B accepted - commit-level backstop only on DSH until the bridge matures.
