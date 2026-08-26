@@ -21,9 +21,9 @@ Routing rules for any agent working in this repository (Claude Code, Codex, DSH,
 
 ## Communication style
 
-1. In discussion with the owner and in task reports, never use abbreviations unless the term is an accepted domain abbreviation (examples: IC, PnL). Spell everything else out - on first use and preferably throughout.
-2. Artifact identifiers keep their literal form (file names, note ids such as REC-004): they are names, not abbreviations, but when discussing one, say what it is first (for example "reconciliation note REC-004").
-3. The same rule applies inside task prompts handed to subagents.
+1. **Answer first.** The first sentence responds to what was asked. No greetings, no restating the request, no confirmation phrases, no closing summary, no offer of further help unless requested.
+2. **Plain words.** No unexplained jargon and no invented shorthand. An abbreviation is allowed only when it is established vocabulary of this project's own domain - and on its first appearance in a reply, write the full term once beside it. When discussing an artifact, say what it is before naming it.
+3. **Substance over ceremony.** Keep every detail needed for correctness; remove repetition, meta-commentary, and padding. This trims presentation only - never flatten the reasoning itself.
 
 ## Subagent handoff preamble
 
@@ -35,8 +35,9 @@ You are working in a repo with governance:
 - Behaviour/design conflicts go to docs/ledger/ as notes
   (see docs/ledger/HOME.md for anatomy).
 - Run python3 scripts/sweep_ledger.py before any commit.
-- Spell out abbreviations in discussion; only accepted domain terms
-  (IC, PnL) stay abbreviated. Artifact ids keep their literal form.
+- Reply style: first sentence answers the question; no filler, no
+  restating the request, no invented shorthand. Domain-standard
+  abbreviations allowed - write the full term once beside the first use.
 ```
 
 ## Harness notes
