@@ -16,19 +16,7 @@ source: "discussion: second-brain ledger anchored on the frozen design canon; re
 
 This ledger is the only living documentation layer of the project. The design canon rooted at [HOME](../enhanced/HOME.md) is frozen: it states intent, formulas, and contracts and does not change again. Whenever code behaviour and canon disagree, the disagreement is recorded here, triaged, and resolved either by correcting the code or by recording an accepted amendment - never by editing the canon and never silently. A reader who wants to know how the running system relates to the stated design starts here, not in git history.
 
-## 2. Start here
-
-Use the layer that answers the question:
-
-- **What should the system do?** Read the frozen canon at [HOME](../enhanced/HOME.md); do not edit it.
-- **Why does implementation differ from the canon?** Search [Observations](observations/) for the finding, then follow its linked reconciliation.
-- **What decision was accepted?** Read [Decisions](decisions/) and check the related notes.
-- **Which test protects a contract?** Read [Test mappings](tests/) and follow the governing note identifier into the source comment.
-- **What changed location?** Read [REC-005](reconciliations/REC-005-research-to-examples.md) before using the paths named by older canon pages.
-
-For a new behaviour or design conflict, record the smallest useful observation first. Add a reconciliation only after the verdict is known; add a test mapping when a contract is protected by tests. Run `python3 scripts/sweep_ledger.py` before committing so broken design references and naming errors are caught early.
-
-## 3. Note classes
+## 2. Note classes
 
 Every ledger note covers exactly one idea (atomicity). Four classes exist:
 
@@ -39,7 +27,7 @@ Every ledger note covers exactly one idea (atomicity). Four classes exist:
 
 Numbering per class is sequential starting at 001 and identifiers are never reused.
 
-## 4. Front matter and lifecycle
+## 3. Front matter and lifecycle
 
 Ledger notes reuse the nine-field front matter defined in [style-guide](../enhanced/style-guide.md) with two adaptations. First, `doc_id` follows the note class scheme (`OBS-001`, `REC-001`, and so on) plus a short slug in the file name. Second, `status` draws from the ledger lifecycle vocabulary below instead of draft/approved/deprecated:
 
@@ -58,7 +46,7 @@ Three link fields are mandatory inside front matter for all classes except pure 
     test        test names protecting the contract (empty until B3 lands)
 ```
 
-## 5. Drift control rules
+## 4. Drift control rules
 
 ```text
     M1   any change touching a contract stated in the canon must add or
@@ -73,7 +61,7 @@ Three link fields are mandatory inside front matter for all classes except pure 
 
 The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any referenced design doc_id does not resolve inside docs/enhanced.
 
-## 6. Index
+## 5. Index
 
 ### Observations
 
@@ -97,7 +85,6 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 
 - [DEC-001](decisions/DEC-001-frozen-canon-ledger-split.md) - enhanced stays frozen as design anchor; the ledger is the single living layer.
 - [DEC-002](decisions/DEC-002-multi-harness-kit.md) - multi-harness enforcement kit: AGENTS.md routing, canon guard hook, git backstop, ledger-discipline skill.
-- [DEC-003](decisions/DEC-003-commit-lanes-and-tags.md) - commit lane prefixes, restoration tags, no-rewrite history policy.
 
 ### Test mappings
 

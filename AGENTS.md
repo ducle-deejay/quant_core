@@ -44,12 +44,6 @@ You are working in a repo with governance:
   ledger.config.json).
 ```
 
-## Commit conventions
-
-1. Every commit message starts with a lane prefix: `[core]` for product code (crates/, python/, examples/, Cargo files), `[kit]` for governance tooling (AGENTS.md, .claude/, .githooks/, scripts/, skills/, ledger.config.json), `[ledger]` for docs/ledger changes, `[docs]` for anything else under docs/.
-2. Never rewrite or force-push existing history. Restore by adding forward commits (`git checkout <ref> -- <paths>` then commit).
-3. Restoration milestones are git tags (`git tag -n`); when a work stream reaches an all-green state, tag it.
-
 ## Harness notes
 
 - Codex reads this file natively. Claude Code imports it via `CLAUDE.md`.
