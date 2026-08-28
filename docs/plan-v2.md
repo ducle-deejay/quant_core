@@ -23,10 +23,12 @@ Status values: `[x]` = done, `[ ]` = pending, `[~]` = partially done.
 
 ## Progress snapshot (updated 2026-08-26)
 
-    Complete            : 29 of 32 tasks
-    Partially complete  : 3  (T023 drawdown-live feed, T030 maturin
-                          verification, T031 seed-comparison entry point)
+    Complete            : 30 of 32 tasks
+    Partially complete  : 2  (T023 drawdown-live feed, T031 seed-comparison
+                          entry point)
     Pending             : 0
+    Python API          : full-surface bindings live (DEC-005); 21-check
+                          parity suite green on Python 3.14
     Quality gates       : 222 Rust unit tests green; system-audit battery
                           passes on real VN30F1M data; ledger sweep clean
     Beyond-plan additions since v2.0: evaluation/screening module,
@@ -401,10 +403,11 @@ Deliverable: #[pyfunction] wrappers around canonical_map, compute_pnl,
 ic_ladder enabling researchers to call Rust functions from Python notebooks.
 Done when: python import quantcore works; canonical_map called from Python
 produces identical output to Rust-native call on same input.
-Status: [~] Partially complete - #[pyfunction] wrappers for canonical_map,
-compute_pnl, ic_ladder and helpers exist behind the python-bindings
-feature; import-parity verification still requires a maturin build outside
-the sandbox.
+Status: [x] Complete - full-surface bindings shipped under DEC-005:
+18 exported functions and 6 result classes across Components 0-5,
+pyo3 upgraded to 0.29 for Python 3.14, maturin develop verified in
+.venv, and a 21-check parity suite (examples/parity_full_surface.py)
+passes end-to-end.
 
 ---
 

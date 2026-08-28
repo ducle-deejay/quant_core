@@ -72,6 +72,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-005](observations/OBS-005-duplicate-rank-ic-name.md) - duplicate rank_ic_block name with different statistics; ladder upgraded to true Spearman.
 - [OBS-006](observations/OBS-006-formatting-version-request.md) - governance drill: formatting-version request denied by design; canon untouched.
 - [OBS-007](observations/OBS-007-dsh-bridge-no-interception.md) - DSH hooks bridge rc.5 loads but never intercepts harness-native file edits; closed by owner decision: commit-level backstop only on DSH until bridge matures.
+- [OBS-008](observations/OBS-008-user-acceptance-production-gaps.md) - shop-persona acceptance tests exposed Python boundary poison, Rust panics, packaging blockers and a memory-scale limitation.
 
 ### Reconciliations
 
@@ -80,11 +81,14 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [REC-003](reconciliations/REC-003-spearman-upgrade.md) - IC ladder upgraded to true Spearman; one-name-one-meaning restored.
 - [REC-004](reconciliations/REC-004-backstop-only-dsh.md) - DSH enforcement stays commit-level backstop until the hooks bridge matures.
 - [REC-005](reconciliations/REC-005-research-to-examples.md) - demonstration scripts moved to examples/; frozen docs keep old paths, this note is the authoritative pointer.
+- [REC-006](reconciliations/REC-006-uat-fix-wave.md) - user-acceptance fix wave closes Python boundary, Rust panic and packaging blockers; accepted gaps remain explicit.
 
 ### Decisions
 
 - [DEC-001](decisions/DEC-001-frozen-canon-ledger-split.md) - enhanced stays frozen as design anchor; the ledger is the single living layer.
 - [DEC-002](decisions/DEC-002-multi-harness-kit.md) - multi-harness enforcement kit: AGENTS.md routing, canon guard hook, git backstop, ledger-discipline skill.
+- [DEC-004](decisions/DEC-004-decision-authority-ratified.md) - owner-ratified decision authority protocol for commits, policy changes and outside-workspace writes.
+- [DEC-005](decisions/DEC-005-python-first-api.md) - Python-first public API strategy with phased full-surface bindings.
 
 ### Test mappings
 
@@ -93,6 +97,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [TST-003](tests/TST-003-ic-ladder-contract-tests.md) - IC ladder: lead-lag world, sign mirror, horizon attachment, degeneracies.
 - [TST-004](tests/TST-004-walk-forward-contract-tests.md) - walk-forward stability: regime-shift detection and block arithmetic.
 - [TST-005](tests/TST-005-pool-and-grammar-contract-tests.md) - residual orthogonality invariant plus generator reproducibility.
+- [TST-006](tests/TST-006-full-surface-parity-and-uat.md) - 21-check Python parity suite plus ten-persona UAT and three-persona closure round.
 
 ## Related notes
 

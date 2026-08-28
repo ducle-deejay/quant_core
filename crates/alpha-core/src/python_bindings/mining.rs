@@ -1,10 +1,157 @@
-//! Slot P3: Component 0 mining bindings (parser, DAG executor, GA loop).
-//! Owner-approved workstream DEC-005. Registers nothing yet.
+//! Python bindings for Component 0 mining (parser, DAG executor, GA loop).
 
+use std::collections::HashMap;
+
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
+use super::helpers::{ensure_all_finite, ensure_non_empty, ensure_positive_usize};
+use crate::strategies::mining::{
+    build_dag, execute_batch, parse, AlphaGenerator, GaConfig, GeneratorConfig, Individual,
+    XorShift,
+};
+
+/// Parse an expression and return its canonical DSL serialization.
+///
+/// Raises:
+///     ValueError: If `dsl` is not a valid mining expression.
+#[pyfunction]
+fn validate_expression_py(py: Python<'_>, dsl: &str) -> PyResult<String> {
+    py.detach(|| {
+        parse(dsl)
+            .map(|ast| ast.to_string())
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    })
+}
+
+/// Execute several mining expressions over close and volume columns.
+///
+/// Returns one score series per expression. Expressions are parsed and then
+/// evaluated through one shared computation DAG.
+///
+/// Raises:
+///     ValueError: If an input column is empty or an expression is invalid.
+#[pyfunction]
+fn execute_batch_py(
+    py: Python<'_>,
+    expressions: Vec<String>,
+    close: Vec<f64>,
+    volume: Vec<f64>,
+) -> PyResult<Vec<Vec<f64>>> {
+    ensure_non_empty("close", &close)?;
+    ensure_all_finite("close", &close)?;
+    ensure_non_empty("volume", &volume)?;
+    ensure_all_finite("volume", &volume)?;
+    py.detach(|| {
+        let asts = expressions
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| {
+                parse(expression).map_err(|err| {
+                    PyValueError::new_err(format!("expression at index {index}: {err}"))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut data = HashMap::new();
+        data.insert("close".to_string(), close);
+        data.insert("volume".to_string(), volume);
+        let dag = build_dag(&asts);
+        Ok(execute_batch(&dag, &data, &dag.roots))
+    })
+}
+
+/// Run the mining genetic algorithm and return its best DSL expression.
+///
+/// The generator is restricted to `close` and `volume`; fitness is the mean
+/// product of each finite score and the next-bar close return, evaluated via
+/// the batch executor. Tournament selection, crossover, mutation, and elitism
+/// use the shared seed-GA implementation.
+///
+/// Raises:
+///     ValueError: If either input column is empty or `population_size` is 0.
+#[pyfunction]
+fn ga_best_expression_py(
+    py: Python<'_>,
+    close: Vec<f64>,
+    volume: Vec<f64>,
+    population_size: usize,
+    generations: usize,
+    seed: u64,
+) -> PyResult<String> {
+    ensure_non_empty("close", &close)?;
+    ensure_non_empty("volume", &volume)?;
+    super::helpers::ensure_all_finite("close", &close)?;
+    super::helpers::ensure_all_finite("volume", &volume)?;
+    ensure_positive_usize("population_size", population_size)?;
+
+    py.detach(|| {
+        let generator_config = GeneratorConfig {
+            fields: vec!["close".into(), "volume".into()],
+            ..Default::default()
+        };
+        let mut generator = AlphaGenerator::new(&generator_config, seed);
+        let seeds = generator.generate_batch(population_size.min(4));
+        let mut returns = vec![0.0; close.len()];
+        for t in 1..close.len() {
+            returns[t] = close[t] / close[t - 1] - 1.0;
+        }
+        let forward_returns = returns[1..].to_vec();
+        let data = {
+            let mut map = HashMap::new();
+            map.insert("close".to_string(), close);
+            map.insert("volume".to_string(), volume);
+            map
+        };
+        let config = GaConfig {
+            population_size,
+            elite_count: 4.min(population_size),
+            tournament_size: 3,
+            crossover_rate: 0.75,
+            mutation_rate: 0.3,
+            max_generations: generations,
+            max_tree_depth: 6,
+        };
+        let evaluate = |population: &[Individual]| {
+            population
+                .iter()
+                .map(|individual| {
+                    let ast = match parse(&individual.dsl_string) {
+                        Ok(ast) => ast,
+                        Err(_) => return f64::NEG_INFINITY,
+                    };
+                    let dag = build_dag(std::slice::from_ref(&ast));
+                    let rows = execute_batch(&dag, &data, &dag.roots);
+                    let n = rows[0].len().min(forward_returns.len());
+                    let mut total = 0.0;
+                    let mut count = 0usize;
+                    for t in 0..n {
+                        if rows[0][t].is_finite() && forward_returns[t].is_finite() {
+                            total += rows[0][t] * forward_returns[t];
+                            count += 1;
+                        }
+                    }
+                    if count == 0 {
+                        -1.0
+                    } else {
+                        total / count as f64
+                    }
+                })
+                .collect::<Vec<f64>>()
+        };
+        let final_population =
+            crate::strategies::mining::run_ga(&seeds, &config, evaluate, &mut XorShift::new(seed));
+        final_population
+            .first()
+            .map(|individual| individual.dsl_string.clone())
+            .ok_or_else(|| PyValueError::new_err("genetic algorithm produced no individuals"))
+    })
+}
+
 /// Register Component 0 bindings onto the extension module.
-pub fn register(_m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(validate_expression_py, m)?)?;
+    m.add_function(wrap_pyfunction!(execute_batch_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ga_best_expression_py, m)?)?;
     Ok(())
 }

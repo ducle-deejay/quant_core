@@ -4,7 +4,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use super::helpers::{ensure_non_empty, ensure_non_negative_f64, ensure_positive_usize};
+use super::helpers::{
+    ensure_all_finite, ensure_non_empty, ensure_non_negative_f64, ensure_positive_usize,
+};
 use crate::canonical::mapping::{canonical_map, CanonicalResult};
 use crate::canonical::pnl::{compute_pnl, PnlConfig, PnlResult};
 use crate::harness_config::HarnessConfig;
@@ -82,13 +84,19 @@ fn canonical_map_py(
     z_window: usize,
     band: f64,
     cap: f64,
-    bars_per_day: usize,
+    bars_per_day: i64,
 ) -> PyResult<PyCanonicalResult> {
     ensure_non_empty("score", &score)?;
+    ensure_all_finite("score", &score)?;
     ensure_positive_usize("span", span)?;
     ensure_positive_usize("z_window", z_window)?;
     ensure_non_negative_f64("band", band)?;
     ensure_non_negative_f64("cap", cap)?;
+    if bars_per_day <= 0 {
+        return Err(PyValueError::new_err(
+            "`bars_per_day` must be greater than zero",
+        ));
+    }
 
     // `canonical_map` does not model costs; carry over the harness default
     // so the config remains a faithful `HarnessConfig`.
@@ -100,7 +108,7 @@ fn canonical_map_py(
         cost_per_side: HarnessConfig::default().cost_per_side,
     };
 
-    let result = py.detach(|| canonical_map(&score, &cfg, bars_per_day));
+    let result = py.detach(|| canonical_map(&score, &cfg, bars_per_day as usize));
     Ok(PyCanonicalResult::from_core(result))
 }
 
@@ -118,10 +126,12 @@ fn compute_pnl_py(
     pos: Vec<f64>,
     ret: Vec<f64>,
     cost_per_side: f64,
-    bars_per_day: usize,
+    bars_per_day: i64,
 ) -> PyResult<PyPnlResult> {
     ensure_non_empty("pos", &pos)?;
+    ensure_all_finite("pos", &pos)?;
     ensure_non_empty("ret", &ret)?;
+    ensure_all_finite("ret", &ret)?;
     if pos.len() != ret.len() {
         return Err(PyValueError::new_err(format!(
             "`pos` and `ret` must have equal length (got {} and {})",
@@ -129,11 +139,15 @@ fn compute_pnl_py(
             ret.len()
         )));
     }
-    ensure_positive_usize("bars_per_day", bars_per_day)?;
+    if bars_per_day <= 0 {
+        return Err(PyValueError::new_err(
+            "`bars_per_day` must be greater than zero",
+        ));
+    }
 
     let cfg = PnlConfig {
         cost_per_side,
-        bars_per_day,
+        bars_per_day: bars_per_day as usize,
     };
 
     let result = py.detach(|| compute_pnl(&pos, &ret, &cfg));

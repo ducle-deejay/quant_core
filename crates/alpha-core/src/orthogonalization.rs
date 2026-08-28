@@ -70,15 +70,30 @@ mod orthogonal_contract_tests {
         let candidate = vec![1.5, -2.0, 0.25];
         assert_eq!(orthogonalize(&candidate, &[]), candidate);
     }
+
+    #[test]
+    fn shorter_pool_column_uses_common_prefix_and_preserves_tail() {
+        let candidate = vec![1.0, 2.0, 3.0, 4.0];
+        let pool = vec![vec![0.5, 1.0, 1.5]];
+        let residual = orthogonalize(&candidate, &pool);
+
+        assert_eq!(residual.len(), candidate.len());
+        assert!(residual[..3].iter().all(|value| value.is_finite()));
+        assert_eq!(&residual[3..], &candidate[3..]);
+    }
 }
 
 /// Simple OLS regression of candidate on pool members.
 /// Returns residual series after regressing out all pool columns.
 ///
+/// Regression and residual calculation use the common prefix of the
+/// candidate and pool columns. Any candidate tail beyond that prefix is kept
+/// unchanged, since no pool observations exist to explain it.
+///
 /// For large pools, use ridge regularization or PCA reduction.
 pub fn orthogonalize(candidate: &[f64], pool: &[Vec<f64>]) -> Vec<f64> {
-    let n = candidate.len();
     let k = pool.len();
+    let n = candidate.len().min(pool.iter().map(Vec::len).min().unwrap_or(0));
     if k == 0 || n == 0 {
         return candidate.to_vec();
     }

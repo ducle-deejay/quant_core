@@ -1,6 +1,10 @@
 /// Batch metrics computed from canonical PnL and score series.
 
-/// Annualized Sharpe ratio from daily PnL series.
+/// Annualized Sharpe ratio from a DAILY PnL series.
+///
+/// The annualization always uses `sqrt(250)`. The trailing `_bars_per_day`
+/// parameter is accepted for interface symmetry with other metrics and is
+/// intentionally unused.
 pub fn sharpe(daily_pnl: &[f64], _bars_per_day: usize) -> f64 {
     if daily_pnl.is_empty() {
         return 0.0;
@@ -17,7 +21,9 @@ pub fn sharpe(daily_pnl: &[f64], _bars_per_day: usize) -> f64 {
 }
 
 /// Maximum drawdown from equity curve (cumulative sum of PnL).
-/// Returns the most negative drawdown as a fraction of peak.
+/// Returns the most negative equity-curve difference (e - peak) in the same
+/// units as the input PnL series (e.g. -0.25 means a quarter of initial
+/// capital lost peak-to-trough when inputs are simple-return PnLs).
 pub fn max_drawdown(pnl_series: &[f64]) -> f64 {
     let _equity = 0.0;
     let mut peak = f64::NEG_INFINITY;

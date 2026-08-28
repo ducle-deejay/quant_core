@@ -140,6 +140,14 @@ pub fn canonical_map(
     cfg: &crate::harness_config::HarnessConfig,
     bars_per_day: usize,
 ) -> CanonicalResult {
+    if score.is_empty() {
+        return CanonicalResult {
+            position: vec![],
+            turnover: vec![],
+            trades_per_day: 0.0,
+        };
+    }
+
     let score = sanitize_scores(score);
     let smoothed = ewma_smooth(&score, cfg.span);
     let z = rolling_zscore(&smoothed, cfg.z_window);
@@ -271,6 +279,15 @@ mod tests {
         assert!(position_changes < res.position.len() - 1,
             "oscillating score must not trade on every bar");
         assert_eq!(res.trades_per_day, position_changes as f64 / 500.0);
+    }
+
+    #[test]
+    fn empty_score_yields_empty_result_without_crash() {
+        let cfg = HarnessConfig::default();
+        let res = canonical_map(&[], &cfg, 250);
+        assert!(res.position.is_empty());
+        assert!(res.turnover.is_empty());
+        assert_eq!(res.trades_per_day, 0.0);
     }
 
     #[test]

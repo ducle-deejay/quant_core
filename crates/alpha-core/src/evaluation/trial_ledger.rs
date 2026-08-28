@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn effective_n_accepts_precomputed_correlation_matrix() {
-        let mut led = TrialLedger::new();
+        let led = TrialLedger::new();
         // Square input: treated as a correlation matrix directly.
         let corr = vec![
             vec![1.0, 0.95, 0.10],

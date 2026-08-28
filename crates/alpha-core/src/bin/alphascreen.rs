@@ -22,9 +22,11 @@ fn load_csv(path: &str) -> (Vec<f64>, Vec<f64>, usize) {
         if line.is_empty() { continue; }
         let cols: Vec<&str> = line.split(',').collect();
         if cols.len() >= 8 {
-            dates.insert(cols[0].split(' ').next().unwrap_or("").to_string());
             let c_val = cols[6].parse::<f64>().unwrap_or(0.0);
-            if c_val > 0.0 { close.push(c_val); }
+            if c_val > 0.0 {
+                dates.insert(cols[0].split(' ').next().unwrap_or("").to_string());
+                close.push(c_val);
+            }
             volume.push(cols[7].parse::<f64>().unwrap_or(0.0));
         }
     }

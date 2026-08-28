@@ -5,18 +5,12 @@
 /// All scores must already be standardized (z-scored) by the canonical
 /// mapping in Component 1. Weights come from Stage 3 residual dossiers.
 pub fn composite_score(scores: &[Vec<f64>], weights: &[f64]) -> Vec<f64> {
-    let n_alphas = scores.len();
     let n_bars = scores.first().map(|s| s.len()).unwrap_or(0);
-    assert_eq!(
-        n_alphas,
-        weights.len(),
-        "scores and weights must have same length"
-    );
-
     let mut composite = vec![0.0; n_bars];
-    for (score, &w) in scores.iter().zip(weights.iter()) {
+    for (alpha, score) in scores.iter().enumerate() {
+        let w = weights.get(alpha).copied().unwrap_or(0.0);
         for t in 0..n_bars {
-            composite[t] += w * score[t];
+            composite[t] += w * score.get(t).copied().unwrap_or(0.0);
         }
     }
     composite
@@ -42,5 +36,18 @@ mod tests {
         let w = [1.0, 0.0];
         let result = composite_score(&[s1, s2], &w);
         assert_eq!(result, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_ragged_score_missing_bars_contribute_zero() {
+        let s1 = vec![1.0, 2.0, 3.0];
+        let s2 = vec![10.0];
+        let result = composite_score(&[s1, s2], &[1.0, 1.0]);
+        assert_eq!(result, vec![11.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_empty_scores_with_weights_returns_empty() {
+        assert!(composite_score(&[], &[1.0, 2.0]).is_empty());
     }
 }

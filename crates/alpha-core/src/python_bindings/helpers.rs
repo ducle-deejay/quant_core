@@ -16,6 +16,20 @@ pub fn ensure_non_empty(name: &str, series: &[f64]) -> PyResult<()> {
     Ok(())
 }
 
+/// Reject NaN and infinite values, naming the first offending index.
+pub fn ensure_all_finite(name: &str, series: &[f64]) -> PyResult<()> {
+    if let Some((index, value)) = series
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(PyValueError::new_err(format!(
+            "`{name}[{index}]` must be finite (non-finite value: {value})"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject zero-valued count-like parameters (spans, windows, bar counts).
 pub fn ensure_positive_usize(name: &str, value: usize) -> PyResult<()> {
     if value == 0 {

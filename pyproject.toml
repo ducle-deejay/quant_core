@@ -7,8 +7,12 @@ name = "quantcore"
 version = "0.1.0"
 description = "High-performance alpha research pipeline"
 requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "TBD"}
+authors = [{name = "research"}]
 
 [tool.maturin]
 python-source = "python"
-features = ["pyo3/extension-module"]
+manifest-path = "crates/alpha-core/Cargo.toml"
+features = ["python-bindings"]
 manifest-benches = false
