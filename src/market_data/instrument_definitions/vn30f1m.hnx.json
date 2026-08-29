@@ -1,0 +1,16 @@
+{
+  "symbol": "VN30F1M",
+  "venue": "HNX",
+  "exchange": "HSTC",
+  "underlying": "VN30",
+  "currency": "VND",
+  "currency_precision": 0,
+  "currency_iso4217": 704,
+  "currency_name": "Vietnamese dong",
+  "price_precision": 1,
+  "size_precision": 0,
+  "tick_size": 0.1,
+  "multiplier": 100000,
+  "lot_size": 1,
+  "vsd_initial_margin_ratio": 0.17
+}

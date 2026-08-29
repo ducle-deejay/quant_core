@@ -1,0 +1,6 @@
+{
+  "raw_root": "data/raw/vietnam/dnse",
+  "catalog_path": "data/catalog",
+  "instrument": "VN30F1M",
+  "request_delay_seconds": 0.02
+}
