@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Each submodule exposes a single `register(m: &Bound<'_, PyModule>)`
-//! function; [`quantcore`] activates them. Shared input validation lives
+//! function; [`alpha_core`] activates them. Shared input validation lives
 //! in [`helpers`].
 
 pub mod canonical;
@@ -27,9 +27,9 @@ pub mod portfolio;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-/// Register the `quantcore` Python extension module.
+/// Register the `alpha_core` Python extension module.
 #[pymodule]
-fn quantcore(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn alpha_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     canonical::register(m)?;
     portfolio::register(m)?;
     metrics::register(m)?;

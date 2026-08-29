@@ -1,11 +1,11 @@
-"""quantcore - Python bindings for the alpha-core quantitative engine.
+"""alpha_core - Python bindings for the alpha-core quantitative engine.
 
 Rust engine exposed via PyO3 (pyo3 0.29). Every pipeline stage is callable
 from Python; the Rust public API remains the engine-side surface.
 
 Quick start::
 
-    import quantcore as q
+    import alpha_core as q
 
     pos = q.canonical_map_py(score, span=8, z_window=480,
                              band=0.35, cap=2.0, bars_per_day=240)
@@ -14,7 +14,7 @@ Quick start::
     rows = q.ic_ladder_py(score, returns, horizons=[1, 3, 8],
                           window=480, bars_per_day=240)
 """
-from .quantcore import (
+from .alpha_core import (
     # Component 1 - canonical simulation
     PyCanonicalResult,
     PyPnlResult,

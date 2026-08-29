@@ -1,4 +1,4 @@
-"""Phase 4 parity suite: exercise every exported quantcore function.
+"""Phase 4 parity suite: exercise every exported alpha_core function.
 
 Run with the project virtualenv after a maturin build:
     .venv/bin/python3 examples/parity_full_surface.py
@@ -7,7 +7,7 @@ Anchors mirror the Rust unit tests so Python results are compared against
 the values the core itself asserts.
 """
 import math
-import quantcore as q
+import alpha_core as q
 
 checks = []
 
