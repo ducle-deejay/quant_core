@@ -1,9 +1,14 @@
-data/
+/data/
+.env
+.env.*
+!.env.example
+# Broker export files contain personal identifiers; aggregates live in ledger notes
+verification/
 .venv/
 .uv_cache/
 .uv-tmp/
 target/
 __pycache__/
 *.egg-info/
-python/quantcore/*.so
+src/alpha_core/*.so
 .cargo-home/
