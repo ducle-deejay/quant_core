@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "dnse-sdk-openapi>=2.0.0",
+    "nautilus-trader==1.231.0",
+    "pandas>=2.3.3",
+    "pyarrow",
+    "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
+    "truststore>=0.10.4",
+    "websockets>=16.0",
+]
+
+[tool.setuptools]
+package-dir = { market_data = "." }
+packages = [
+    "market_data",
+    "market_data.sources",
+    "market_data.sources.dnse",
+]
+
+[tool.setuptools.package-data]
+market_data = ["instrument_definitions/*.json"]
