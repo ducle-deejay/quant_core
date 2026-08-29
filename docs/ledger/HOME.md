@@ -73,6 +73,10 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-006](observations/OBS-006-formatting-version-request.md) - governance drill: formatting-version request denied by design; canon untouched.
 - [OBS-007](observations/OBS-007-dsh-bridge-no-interception.md) - DSH hooks bridge rc.5 loads but never intercepts harness-native file edits; closed by owner decision: commit-level backstop only on DSH until bridge matures.
 - [OBS-008](observations/OBS-008-user-acceptance-production-gaps.md) - shop-persona acceptance tests exposed Python boundary poison, Rust panics, packaging blockers and a memory-scale limitation.
+- [OBS-009](observations/OBS-009-entrade-fee-and-margin-schedule.md) - verified entrade fee and margin schedule (5% margin; 31,500 + 8.1 x price VND round trip per contract; 5% profit tax) as the cost-model calibration reference; canon cost estimates are outdated.
+- [OBS-010](observations/OBS-010-empirical-entrade-fee-verification.md) - seven demo deals verify every fee/margin component exactly; partnership fee measured at 8.22015/point vs published 8.1; tax is a symmetric 5% of gross PnL.
+- [OBS-011](observations/OBS-011-canonical-map-binding-nan.md) - canonical_map_py binding rejects warmup NaN the Rust core sanitizes; orchestrator mirrors sanitize_scores on the Python side (parity contract for milestone 1).
+
 
 ### Reconciliations
 
@@ -82,6 +86,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [REC-004](reconciliations/REC-004-backstop-only-dsh.md) - DSH enforcement stays commit-level backstop until the hooks bridge matures.
 - [REC-005](reconciliations/REC-005-research-to-examples.md) - demonstration scripts moved to examples/; frozen docs keep old paths, this note is the authoritative pointer.
 - [REC-006](reconciliations/REC-006-uat-fix-wave.md) - user-acceptance fix wave closes Python boundary, Rust panic and packaging blockers; accepted gaps remain explicit.
+- [REC-007](reconciliations/REC-007-relocation-src-monorepo.md) - engine and bindings relocated under src/ per DEC-007; earlier ledger code paths are historical; verification chain re-passed.
 
 ### Decisions
 
@@ -89,6 +94,11 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-002](decisions/DEC-002-multi-harness-kit.md) - multi-harness enforcement kit: AGENTS.md routing, canon guard hook, git backstop, ledger-discipline skill.
 - [DEC-004](decisions/DEC-004-decision-authority-ratified.md) - owner-ratified decision authority protocol for commits, policy changes and outside-workspace writes.
 - [DEC-005](decisions/DEC-005-python-first-api.md) - Python-first public API strategy with phased full-surface bindings.
+- [DEC-006](decisions/DEC-006-milestone-1-fee-model.md) - milestone-1 fee model keeps scalar cost_per_side (fee 1.461 + half-spread 0.333 + buffer 0.5 bp at reference price 1,500); two-part price-dependent model deferred after wiring.
+- [DEC-007](decisions/DEC-007-repo-layout-and-rename.md) - src/ monorepo with per-package packaging (uv workspace); Python package renamed quantcore -> alpha_core; apps/ for entrypoints.
+- [DEC-008](decisions/DEC-008-live-wiring-architecture.md) - milestone-1 wiring: contract-first (src/trading/contracts.py), three parallel workstreams (orchestration, bridge strategy, risk overlay), risk built to live standard from the paper phase; spec-sheet gauges deferred.
+- [DEC-009](decisions/DEC-009-data-sources-and-telegram-alerts.md) - DNSE primary + Mirae fallback data sources with fixed coverage semantics (Mirae-resolved gaps succeed); Telegram alerts for data ingest and live trading via one env pair.
+
 
 ### Test mappings
 
@@ -98,6 +108,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [TST-004](tests/TST-004-walk-forward-contract-tests.md) - walk-forward stability: regime-shift detection and block arithmetic.
 - [TST-005](tests/TST-005-pool-and-grammar-contract-tests.md) - residual orthogonality invariant plus generator reproducibility.
 - [TST-006](tests/TST-006-full-surface-parity-and-uat.md) - 21-check Python parity suite plus ten-persona UAT and three-persona closure round.
+- [TST-007](tests/TST-007-milestone-1-wiring-contract-tests.md) - milestone-1 wiring contract tests: portfolio orchestrator (8), bridge strategy (23), risk overlay (24) against STG-1/5/6/7 and DEC-006/008.
+- [TST-008](tests/TST-008-data-fallback-and-alert-tests.md) - data fallback and alert tests: daily orchestrator semantics (10) and Telegram transport failure safety (4) per DEC-009.
 
 ## Related notes
 
