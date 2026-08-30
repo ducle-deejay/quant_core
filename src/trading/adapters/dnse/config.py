@@ -9,6 +9,7 @@ VN_TZ = "Asia/Ho_Chi_Minh"
 DNSE_DATA_CLIENT_NAME = "DNSE"
 DNSE_API_VERSION = "2026-07-23"
 SUPPORTED_DNSE_RESOLUTIONS = frozenset({"1", "3", "5", "15", "30", "60", "1H", "1D", "1W"})
+ALLOWED_HISTORICAL_SOURCES = frozenset({"catalog", "api"})
 
 
 class DnseDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
@@ -33,6 +34,15 @@ class DnseDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
     market_working_dates: tuple[str, ...] = ()
     historical_bar_type: str = "DERIVATIVE"
     volume_precision: int = 0
+    historical_source: str = "catalog"
+    catalog_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.historical_source not in ALLOWED_HISTORICAL_SOURCES:
+            raise ValueError(
+                f"Invalid historical_source={self.historical_source!r}; "
+                f"expected one of {sorted(ALLOWED_HISTORICAL_SOURCES)}",
+            )
 
     @property
     def venue(self) -> str:
