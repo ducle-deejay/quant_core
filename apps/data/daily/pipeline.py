@@ -6,6 +6,14 @@ Usage (from the repo root, project venv):
     TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \\
     .venv/bin/python3 apps/data/daily/pipeline.py [--date YYYY-MM-DD]
 
+Alert coverage (DEC-012, replaces silent-failure gaps found 2026-08-30):
+- the notifier is built FIRST; any failure before the run starts (config
+  load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero;
+- the success/failure alert is sent with raise_on_error=True, so an
+  undeliverable alert fails the run loudly instead of pretending success;
+- every run writes a heartbeat status file (market_data.heartbeat) that the
+  io.quant-core.daily-etl-watch LaunchAgent checks for missed runs.
+
 Exits non-zero when both sources failed or bars remain missing after the
 Mirae backfill; the Telegram alert carries the failure detail.
 """
@@ -13,8 +21,10 @@ Mirae backfill; the Telegram alert carries the failure detail.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
+import sys
 from datetime import date
 from datetime import datetime
 from pathlib import Path
@@ -22,11 +32,14 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from market_data.daily import alert_bootstrap_failure
 from market_data.daily import dnse_runner
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
 from market_data.daily import run_and_alert
+from market_data.heartbeat import write_status
 from market_data.notify import data_notifier_from_env
+from market_data.notify import notify_or_log
 
 
 HERE = Path(__file__).resolve().parent
@@ -42,25 +55,64 @@ def main() -> None:
     args = parser.parse_args()
     load_dotenv(ROOT / ".env")
 
-    config = load_json_config(args.config)
-    dnse_config = load_json_config(_resolve(args.config.parent, config["dnse_config"]))
-    mirae_config = load_json_config(_resolve(args.config.parent, config["mirae_config"]))
     day = args.date or datetime.now(LOCAL_TIMEZONE).date()
 
+    # The notifier is built before anything that can fail: config-load crashes
+    # must still reach Telegram (DEC-012).
     notifier = data_notifier_from_env()
-    report = run_and_alert(
-        day=day,
-        run_dnse=dnse_runner(dnse_config),
-        run_mirae=mirae_runner(mirae_config, dnse_config),
-        notifier=notifier,
-    )
-    print(json.dumps(report, indent=2, sort_keys=True))
+
+    # Bootstrap phase: config resolution. Any error here previously died
+    # silently before the notifier existed (OBS-013); now it alerts loudly.
+    try:
+        config = load_json_config(args.config)
+        dnse_config = load_json_config(_resolve(config["dnse_config"]))
+        mirae_config = load_json_config(_resolve(config["mirae_config"]))
+    except Exception as error:
+        notify_or_log(
+            notifier,
+            alert_bootstrap_failure(day, error),
+            raise_on_error=True,
+        )
+        print(f"STARTUP FAILED: {error}", file=sys.stderr)
+        write_status(day, result=f"failed: {error}")
+        sys.exit(1)
+
+    write_status(day, result="running")
+
+    try:
+        report = run_and_alert(
+            day=day,
+            run_dnse=dnse_runner(dnse_config),
+            run_mirae=mirae_runner(mirae_config, dnse_config),
+            notifier=notifier,
+            raise_on_error=True,
+        )
+    except Exception as error:
+        print(json.dumps({"day": day.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
+        write_status(day, result=f"failed: {error}")
+        sys.exit(1)
+
+    write_status(day, result="ok")
+    print(json.dumps(_slim_report(report), indent=2, sort_keys=True))
 
 
-def _resolve(anchor: Path, value: object) -> Path:
+def _slim_report(report: dict[str, object]) -> dict[str, object]:
+    """Strip huge per-bar timestamp arrays from the printed report (the full
+    report stays available programmatically for the acceptance layers)."""
+    slim = copy.deepcopy(report)
+    for source in ("dnse", "mirae"):
+        section = slim.get(source)
+        if isinstance(section, dict):
+            section.pop("missing_bar_timestamps", None)
+            section.pop("added_bar_timestamps", None)
+    return slim
+
+
+def _resolve(value: object) -> Path:
+    """Resolve a config path against the repo root (matches daily._resolve_path)."""
     path = Path(str(value))
-    return path if path.is_absolute() else anchor / path
+    return path if path.is_absolute() else ROOT / path
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

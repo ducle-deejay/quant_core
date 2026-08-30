@@ -1,13 +1,17 @@
 """Telegram notification transport shared by the data and trading packages.
 
-Single env-var pair drives every alert in the system:
+Two env-var pairs drive the two alert channels (DEC-011):
 
-    TELEGRAM_BOT_TOKEN=...
-    TELEGRAM_CHAT_ID=...
+    DATA_TELEGRAM_BOT_TOKEN / DATA_TELEGRAM_CHAT_ID      (data ingest)
+    TRADING_TELEGRAM_BOT_TOKEN / TRADING_TELEGRAM_CHAT_ID (live trading)
+
+Messages use Telegram ``parse_mode=HTML`` (DEC-012): formatters build the
+markup, dynamic values must be escaped with :func:`esc`.
 
 Failure-safe by contract: alerting must never break the pipeline or the
 trading loop, so every public helper swallows transport errors (logged to
-stderr) unless ``raise_on_error=True`` is passed explicitly.
+stderr) unless ``raise_on_error=True`` is passed explicitly. The daily ETL
+entrypoint opts out (DEC-012): an undeliverable alert fails the run loudly.
 """
 
 from __future__ import annotations
@@ -15,9 +19,15 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from html import escape
 from typing import Any
 
 import requests
+
+
+def esc(value: object) -> str:
+    """HTML-escape dynamic text embedded in alert messages (parse_mode=HTML)."""
+    return escape(str(value))
 
 
 @dataclass(frozen=True)
@@ -57,15 +67,18 @@ class TelegramNotifier:
         self.config = config
         self._session = session or requests.Session()
 
-    def send_message(self, text: str) -> dict[str, Any]:
+    def send_message(self, text: str, *, parse_mode: str = "HTML") -> dict[str, Any]:
         if not text:
             raise ValueError("Telegram message cannot be empty")
 
         url = f"{self.config.api_base_url.rstrip('/')}/bot{self.config.bot_token}/sendMessage"
+        payload: dict[str, Any] = {"chat_id": self.config.chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
             response = self._session.post(
                 url,
-                json={"chat_id": self.config.chat_id, "text": text},
+                json=payload,
                 timeout=self.config.timeout_seconds,
             )
         except requests.RequestException as exc:

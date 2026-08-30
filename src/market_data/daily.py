@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from market_data.notify import TelegramNotifier
+from market_data.notify import esc
 from market_data.notify import notify_or_log
 from market_data.sources.dnse.pipeline import retained_contract_symbol
 from market_data.sources.dnse.pipeline import run_daily as run_dnse_daily
@@ -190,49 +191,76 @@ def load_json_config(path: Path) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Telegram alert formatting
+# Telegram alert formatting (unified template, DEC-012)
+#
+# Header : <icon> QC-<DOMAIN> <EVENT> | <date> [<time>] | <verdict>
+# Body   : monospace <pre> block, source-grouped, thousands separators
+# Footer : only when actionable
 # --------------------------------------------------------------------------- #
 
 
 def alert_success(day: date, report: dict[str, object]) -> str:
-    dnse = _section("DNSE", report.get("dnse"))
-    mirae = _section("Mirae", report.get("mirae"))
-    mirae_error = report.get("mirae_error")
-    warning = (
-        f"\n\n\u26A0\ufe0f Mirae fallback failed (DNSE covered the day): {mirae_error}"
-        if mirae_error
-        else ""
+    """[QC-DATA] success alert: per-source bullet counts, verdict OK."""
+    dnse = report.get("dnse")
+    mirae = report.get("mirae")
+    dnse_counts = _records(dnse)
+    mirae_counts = _records(mirae)
+    dnse_block = (
+        "DNSE \u2705\n"
+        f"\u2022 bars: {_count(dnse_counts, 'Bar'):,}\n"
+        f"\u2022 trades: {_count(dnse_counts, 'TradeTick'):,}\n"
+        f"\u2022 book: {_count(dnse_counts, 'OrderBookDepth10'):,}"
     )
+    mirae_error = report.get("mirae_error")
+    if mirae_error:
+        verdict = "OK (mirae down)"
+        mirae_block = f"Mirae \u274C\n\u2022 {esc(mirae_error)}"
+    else:
+        verdict = "OK"
+        mirae_block = (
+            "Mirae \u2705\n"
+            f"\u2022 added: {_count(mirae_counts, 'Bar'):,}\n"
+            f"\u2022 skipped: {_count(mirae_counts, 'SkippedBar'):,}"
+        )
     return (
-        f"[QC-DATA] \U00002705 DATA ETL | {day:%d-%m-%Y}\n\n"
-        f"{dnse}\n\n{mirae}{warning}\n\nCatalog updated"
+        f"\u2705 QC-DATA ETL | {day:%d-%m-%Y} | {verdict}\n\n"
+        f"{dnse_block}\n{mirae_block}\n\n"
+        "gaps 0 · catalog updated"
     )
 
 
 def alert_failure(day: date, error: Exception, report: dict[str, object] | None) -> str:
-    dnse = _section("DNSE", report.get("dnse") if report else None, error=error)
-    return f"[QC-DATA] \U0000274C DATA ETL | {day:%d-%m-%Y}\n\n{dnse}\n\n{error}"
-
-
-def _section(source: str, report: object, *, error: Exception | None = None) -> str:
-    if error is not None:
-        return f"{source} \U0000274C {error}"
-    if not isinstance(report, dict):
-        return f"{source} - not run"
-    records = report.get("records")
-    counts = records if isinstance(records, dict) else {}
-    if source == "DNSE":
-        return (
-            f"DNSE \U00002705\n"
-            f"Bars       {_count(counts, 'Bar'):>9,}\n"
-            f"Trades     {_count(counts, 'TradeTick'):>9,}\n"
-            f"Order book {_count(counts, 'OrderBookDepth10'):>9,}"
-        )
+    """[QC-DATA] run-failure alert: the error, catalog untouched."""
     return (
-        f"Mirae \U00002705\n"
-        f"Bars added   {_count(counts, 'Bar'):>7,}\n"
-        f"Bars skipped {_count(counts, 'SkippedBar'):>7,}"
+        f"\u274C QC-DATA ETL | {day:%d-%m-%Y} | FAILED\n\n"
+        f"<code>{esc(error)}</code>\n\n"
+        "catalog NOT updated"
     )
+
+
+def alert_bootstrap_failure(day: date, error: Exception) -> str:
+    """[QC-DATA] startup alert (DEC-012): any failure before the run starts."""
+    return (
+        f"\u274C QC-DATA ETL | {day:%d-%m-%Y} | STARTUP FAILED\n\n"
+        f"<code>{esc(error)}</code>\n\n"
+        "check data/logs/daily-etl.err.log"
+    )
+
+
+def format_run_missing(day: date) -> str:
+    """[QC-DATA] heartbeat alert (DEC-012): the scheduled run never happened."""
+    return (
+        f"\U0001F6A8 QC-DATA ETL | {day:%d-%m-%Y} | RUN MISSING\n\n"
+        "expected 16:00 run not detected\n\n"
+        "check: launchctl list · data/logs/daily-etl.err.log"
+    )
+
+
+def _records(report: object) -> dict[str, object]:
+    if not isinstance(report, dict):
+        return {}
+    records = report.get("records")
+    return records if isinstance(records, dict) else {}
 
 
 def _count(records: dict[str, object], key: str) -> int:
@@ -246,12 +274,17 @@ def run_and_alert(
     run_dnse: SourceRunner,
     run_mirae: SourceRunner,
     notifier: TelegramNotifier | None,
+    raise_on_error: bool = False,
 ) -> dict[str, object]:
-    """Run the daily pipeline and send the corresponding Telegram alert."""
+    """Run the daily pipeline and send the corresponding Telegram alert.
+
+    ``raise_on_error`` opts out of the failure-safe contract (DEC-012): the
+    ETL entrypoint passes True so an undeliverable alert fails the run loudly.
+    """
     try:
         report = run_daily(day=day, run_dnse=run_dnse, run_mirae=run_mirae)
     except Exception as error:
-        notify_or_log(notifier, alert_failure(day, error, None))
+        notify_or_log(notifier, alert_failure(day, error, None), raise_on_error=raise_on_error)
         raise
-    notify_or_log(notifier, alert_success(day, report))
+    notify_or_log(notifier, alert_success(day, report), raise_on_error=raise_on_error)
     return report
