@@ -1,4 +1,4 @@
 {
-  "dnse_config": "applications/data/sources/dnse/config/pipeline.json",
-  "mirae_config": "applications/data/sources/mirae/config/pipeline.json"
+  "dnse_config": "apps/data/sources/dnse/config/pipeline.json",
+  "mirae_config": "apps/data/sources/mirae/config/pipeline.json"
 }

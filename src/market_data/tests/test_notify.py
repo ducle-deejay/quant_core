@@ -1,4 +1,5 @@
-"""Telegram notifier tests (governing note DEC-009): env parsing + failure safety."""
+"""Telegram notifier tests (governing note DEC-009/DEC-012): env parsing,
+failure safety, and the HTML parse-mode transport."""
 
 from __future__ import annotations
 
@@ -7,9 +8,31 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from market_data.notify import TelegramConfig  # noqa: E402
 from market_data.notify import TelegramNotifier  # noqa: E402
+from market_data.notify import esc  # noqa: E402
 from market_data.notify import notifier_from_env  # noqa: E402
 from market_data.notify import notify_or_log  # noqa: E402
+
+
+class FakeResponse:
+    status_code = 200
+    content = b"{}"
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, url, *, json=None, timeout=None):
+        self.calls.append((url, json or {}))
+        return FakeResponse({"ok": True})
 
 
 class RaisingNotifier:
@@ -58,6 +81,22 @@ def test_notify_or_log_raises_when_requested():
 
 def test_notify_or_log_none_is_noop():
     notify_or_log(None, "hello")  # must not raise
+
+
+def test_send_message_uses_html_parse_mode():
+    # DEC-012: the transport always sends parse_mode=HTML so formatter <pre>
+    # blocks render as monospace in Telegram.
+    session = FakeSession()
+    notifier = TelegramNotifier(TelegramConfig(bot_token="tok", chat_id="123"), session=session)
+    notifier.send_message("<pre>DNSE  ✅ bars 241</pre>")
+    _, payload = session.calls[0]
+    assert payload["parse_mode"] == "HTML"
+    assert payload["text"] == "<pre>DNSE  ✅ bars 241</pre>"
+
+
+def test_esc_html_escapes_dynamic_values():
+    assert esc("<a&b>") == "&lt;a&amp;b&gt;"
+    assert esc("plain") == "plain"
 
 
 def _run_all() -> int:
