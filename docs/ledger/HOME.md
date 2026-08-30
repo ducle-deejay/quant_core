@@ -99,6 +99,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-008](decisions/DEC-008-live-wiring-architecture.md) - milestone-1 wiring: contract-first (src/trading/contracts.py), three parallel workstreams (orchestration, bridge strategy, risk overlay), risk built to live standard from the paper phase; spec-sheet gauges deferred.
 - [DEC-009](decisions/DEC-009-data-sources-and-telegram-alerts.md) - DNSE primary + Mirae fallback data sources with fixed coverage semantics (Mirae-resolved gaps succeed); Telegram alerts for data ingest and live trading via one env pair.
 - [DEC-010](decisions/DEC-010-commit-convention.md) - commit messages follow conventional commits `<type>(<scope>): <imperative summary>` with fixed type and scope vocabulary; amend/squash pre-push only.
+- [DEC-011](decisions/DEC-011-telegram-channel-separation.md) - two Telegram alert channels (DATA_/TRADING_ bot pairs) superseding the shared single pair; no hidden fallback.
+
 
 
 

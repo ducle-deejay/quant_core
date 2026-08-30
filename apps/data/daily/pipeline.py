@@ -26,7 +26,7 @@ from market_data.daily import dnse_runner
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
 from market_data.daily import run_and_alert
-from market_data.notify import notifier_from_env
+from market_data.notify import data_notifier_from_env
 
 
 HERE = Path(__file__).resolve().parent
@@ -47,7 +47,7 @@ def main() -> None:
     mirae_config = load_json_config(_resolve(args.config.parent, config["mirae_config"]))
     day = args.date or datetime.now(LOCAL_TIMEZONE).date()
 
-    notifier = notifier_from_env()
+    notifier = data_notifier_from_env()
     report = run_and_alert(
         day=day,
         run_dnse=dnse_runner(dnse_config),

@@ -48,7 +48,7 @@ from trading.adapters.entrade.config import DNSE_EXECUTION_CLIENT_NAME
 from trading.adapters.entrade.config import EntradeExecClientConfig
 from trading.adapters.entrade.factory import EntradeLiveExecClientFactory
 from trading.adapters.entrade.transport import EntradeEnvironment
-from market_data.notify import notifier_from_env
+from market_data.notify import trading_notifier_from_env
 from trading.portfolio import PortfolioOrchestrator
 from trading.portfolio import default_seed_portfolio_config
 from trading.risk.overlay import RiskOverlayActor
@@ -134,7 +134,7 @@ def build_composition(dry_run: bool) -> TradingNode:
     node.add_exec_client_factory(DNSE_EXECUTION_CLIENT_NAME, EntradeLiveExecClientFactory)
 
     # Telegram alerting (failure-safe; None when TELEGRAM_* env unset).
-    notifier = notifier_from_env()
+    notifier = trading_notifier_from_env()
 
     # Workstream C: risk overlay first so the bridge can reference the instance.
     risk_config = RiskOverlayConfig(

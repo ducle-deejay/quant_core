@@ -116,6 +116,22 @@ def notifier_from_env(
     )
 
 
+def data_notifier_from_env() -> TelegramNotifier | None:
+    """Alerts for data ingest: DATA_TELEGRAM_BOT_TOKEN / DATA_TELEGRAM_CHAT_ID."""
+    return notifier_from_env(
+        bot_token_env="DATA_TELEGRAM_BOT_TOKEN",
+        chat_id_env="DATA_TELEGRAM_CHAT_ID",
+    )
+
+
+def trading_notifier_from_env() -> TelegramNotifier | None:
+    """Alerts for live trading: TRADING_TELEGRAM_BOT_TOKEN / TRADING_TELEGRAM_CHAT_ID."""
+    return notifier_from_env(
+        bot_token_env="TRADING_TELEGRAM_BOT_TOKEN",
+        chat_id_env="TRADING_TELEGRAM_CHAT_ID",
+    )
+
+
 def notify_or_log(
     notifier: TelegramNotifier | None,
     text: str,
