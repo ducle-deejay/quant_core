@@ -204,14 +204,14 @@ def alert_success(day: date, report: dict[str, object]) -> str:
         else ""
     )
     return (
-        f"\U00002705 DATA ETL | {day:%d-%m-%Y}\n\n"
+        f"[QC-DATA] \U00002705 DATA ETL | {day:%d-%m-%Y}\n\n"
         f"{dnse}\n\n{mirae}{warning}\n\nCatalog updated"
     )
 
 
 def alert_failure(day: date, error: Exception, report: dict[str, object] | None) -> str:
     dnse = _section("DNSE", report.get("dnse") if report else None, error=error)
-    return f"\U0000274C DATA ETL | {day:%d-%m-%Y}\n\n{dnse}\n\n{error}"
+    return f"[QC-DATA] \U0000274C DATA ETL | {day:%d-%m-%Y}\n\n{dnse}\n\n{error}"
 
 
 def _section(source: str, report: object, *, error: Exception | None = None) -> str:

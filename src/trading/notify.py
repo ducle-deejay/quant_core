@@ -15,33 +15,33 @@ from market_data.notify import notify_or_log  # noqa: F401  (re-export)
 
 
 def format_session(message: str) -> str:
-    return f"\U0001F4C8 TRADING | {message}"
+    return f"[QC-TRADING] [PAPER] \U0001F4C8 {message}"
 
 
 def format_order_outcome(kind: str, *, client_order_id: str, reason: str | None = None) -> str:
     suffix = f" reason={reason}" if reason else ""
     return (
-        f"\U000026A0 TRADING | ORDER {kind}\n"
+        f"[QC-TRADING] [PAPER] \U000026A0 ORDER {kind}\n"
         f"Order: {client_order_id}{suffix}"
     )
 
 
 def format_force_close(position: int, *, time: str) -> str:
     return (
-        f"\U0001F6D1 TRADING | FORCE CLOSE {time}\n"
+        f"[QC-TRADING] [PAPER] \U0001F6D1 FORCE CLOSE {time}\n"
         f"Position: {position} contracts -> flat"
     )
 
 
 def format_risk_state(previous: str, current: str, reason: str) -> str:
     return (
-        f"\U0001F6A8 TRADING | RISK STATE {previous} -> {current}\n"
+        f"[QC-TRADING] [PAPER] \U0001F6A8 RISK STATE {previous} -> {current}\n"
         f"Reason: {reason}"
     )
 
 
 def format_flatten_failed(instrument: str, attempts: int) -> str:
     return (
-        f"\U0001F534 TRADING | FLATTEN FAILED after {attempts} attempts\n"
+        f"[QC-TRADING] [PAPER] \U0001F534 FLATTEN FAILED after {attempts} attempts\n"
         f"Instrument: {instrument} - manual intervention required"
     )
