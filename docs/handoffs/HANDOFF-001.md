@@ -5,6 +5,18 @@ Branch: `feat/nautilus-live-wiring` (HEAD: clean tree, all work committed).
 
 ## 1. GOAL (the north star - what "done" means)
 
+**Collaboration contract (cách owner và agent làm việc - đọc kỹ trước khi làm):**
+
+- Ngôn ngữ: tiếng Việt, xưng hô tao/mày; thuật ngữ quant/finance giữ tiếng Anh (owner đọc hiểu native, không dịch).
+- Trả lời thẳng: câu đầu tiên trả lời đúng câu hỏi; không chào hỏi thừa, không restate yêu cầu, không closing summary trừ khi được hỏi.
+- Ít jargon: từ viết tắt tối thiểu; abbreviation domain viết đầy đủ ở lần đầu tiên.
+- Quy trình quyết định: agent đề xuất kèm rationale + số liệu -> owner duyệt -> mới thực thi. Không tự ý mở rộng scope, không tự quyết thay owner.
+- Kỷ luật verify: mọi claim có evidence (test chạy, log, số liệu); chạy test suite + `sweep_ledger.py` trước khi báo "xong"; không báo xong khi chưa verify.
+- Blocker: báo blocker kèm các giả thuyết đã loại + bước tiếp theo đề xuất; không im lặng, không đoán mò.
+- Governance: `docs/enhanced/` FROZEN; ledger append-only (supersede, không sửa); sweep trước mọi commit; **commit chỉ khi owner ra lệnh trong phiên hiện tại**; commit convention DEC-010.
+- Tiến độ: cập nhật Progress tracker (section 2) khi trạng thái đổi; tạo HANDOFF mới khi có thay đổi vật chất.
+- Owner quyết định ưu tiên; agent hỏi khi mơ hồ thay vì đoán ý.
+
 **Overarching goal**: run quant_core in production per the frozen lifecycle
 (`docs/enhanced/framework-lifecycle.md`) - Phase 4 (paper execution) then
 Phase 5 (live small + risk minimum). Components 0-5 (research engine) are
