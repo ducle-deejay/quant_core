@@ -3,6 +3,9 @@
 Verifies the .env credentials against the entrade API and, on success,
 prints the investorId needed for ENTRADE_INVESTOR_ID.
 
+ENTRADE_USERNAME is the entrade login identifier (an email for this account),
+NOT the numeric investor id - the two are different credentials.
+
 Usage: .venv/bin/python3 apps/trading/check_auth.py [--env .env]
 """
 
@@ -47,11 +50,15 @@ def main() -> None:
         token = client.authenticate(username, password)
     except Exception as error:
         print(f"RESULT: AUTH FAILED - {type(error).__name__}: {error}")
+        payload = getattr(error, "payload", None)
+        if payload:
+            print(f"server payload: {payload}")
         print(
-            "Hints: (1) username must be the entrade partnership account code "
-            "(10-digit number), not the DNSE securities account; "
-            "(2) check whether a separate trading/API password exists; "
-            "(3) the demo account may be expired - re-activate via support.",
+            "Hints: (1) ENTRADE_USERNAME is the entrade login identifier "
+            "(an email for this account), not the numeric investor id - "
+            "the two are different credentials; "
+            "(2) ENTRADE_INVESTOR_ID is printed by this script on success "
+            "and may stay unset in .env (auto-resolved from the token).",
         )
         sys.exit(1)
 

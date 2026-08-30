@@ -15,6 +15,9 @@ Usage (project venv; credentials via environment or --env file):
     API_KEY=... API_SECRET=... \\
     .venv/bin/python3 apps/trading/paper.py [--env .env] [--dry-run]
 
+ENTRADE_USERNAME is the entrade login email (not the investor id);
+ENTRADE_INVESTOR_ID is optional - auto-resolved from the auth token.
+
 --dry-run builds and prints the full runtime composition without connecting
 (no credentials required, safe to run outside market hours).
 
