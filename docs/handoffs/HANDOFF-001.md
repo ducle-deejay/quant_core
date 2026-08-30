@@ -28,7 +28,7 @@ Definition of done (all five):**
 
 | # | Criterion | Verify by |
 |---|---|---|
-| 1 | entrade demo auth works | `apps/trading/check_auth.py` -> `AUTH OK` + investor id (BLOCKED now: 401) |
+| 1 | entrade demo auth works | `apps/trading/check_auth.py` -> `AUTH OK` + investor id (OK 2026-08-30, investor id 1000060107) |
 | 2 | Daily ETL first successful run | `apps/data/daily/pipeline.py` -> catalog populated, `[QC-DATA]` alert received |
 | 3 | Paper run >= 1 full session, market hours | `apps/trading/paper.py` -> bars in, LO/MAK orders on demo, force-close 14:00, reconciliation clean, `[QC-TRADING]` alerts received |
 | 4 | Acceptance report, 6 layers, PASS/FAIL with numbers | `apps/trading/acceptance.py` (NOT BUILT - see pending #4) |
@@ -59,12 +59,15 @@ automatically:
 | Repo restructure (src/, rename alpha_core, per-package) | DONE | DEC-007, REC-007 |
 | Milestone-1 wiring (contract, portfolio, bridge, risk) | DONE | DEC-008; tests 8/23/24 |
 | Data sources DNSE + Mirae fallback | DONE | DEC-009; tests 6 |
-| Telegram 2 channels + QC prefixes | DONE | DEC-011; bots NOT created yet (user) |
+| Telegram 2 channels + QC prefixes | DONE | DEC-011; bots NOT created yet (user) - alert delivery NOT tested yet |
+| Telegram alert test | PENDING | user creates bots per approved convention: Data @quantcore_data_etl_bot, Trading @quantcore_trading_monitor_paper_bot (see .env.example), pastes token + chat id into .env, then test [QC-DATA]/[QC-TRADING] alerts - gate before next steps |
 | Daily ETL LaunchAgent 16:00 Mon-Fri | DONE | installed, loaded |
 | Commit convention + clean history | DONE | DEC-010 |
-| entrade demo auth | BLOCKED | 401 INVALID_CREDENTIAL - see pending #1 |
-| Daily ETL first run | PENDING | needs DNSE keys in .env |
-| Paper E2E first session | PENDING | needs auth + market hours |
+| entrade demo auth | DONE | AUTH OK 2026-08-30; investor id 1000060107; username = login email (not investor id) |
+| Daily ETL first run | DONE | 2026-08-28: 241 bars / 89,565 trades / 593,874 book, gaps 0; Mirae backfill 473,773 bars (2018->2026-08-27); catalog populated; alert delivered 2026-08-30 |
+| Telegram alert test | DONE | bots created per convention (Data @quantcore_data_etl_bot, Trading @quantcore_trading_monitor_paper_bot); chat ids fixed to 8214218868; smoke 9/9 delivered; unified format (DEC-012) |
+| Alert coverage wave A | DONE | DEC-012/OBS-013/TST-009: bootstrap alerts, fail-loud entrypoint, heartbeat status + watcher LaunchAgent 16:10, smoke script |
+| Paper E2E first session | PENDING | needs market hours - next: 2026-09-03 (thu 5; holiday 31-08..02-09) |
 | Acceptance checklist discussion | IN PROGRESS | plan agreed; user wanted to re-discuss - continue here |
 | Acceptance implementation (decision log + acceptance.py) | PENDING | agreed in principle |
 | Cost calibration (7->1) | PENDING | after M1 |
@@ -82,35 +85,43 @@ automatically:
   force-close 14:00 VN; bridge logs decisions only as log lines (structured
   per-bar decision log NOT yet added - needed for L1).
 - **Env**: `.env` gitignored; `.env.example` template. Telegram pairs:
-  `DATA_TELEGRAM_*` / `TRADING_TELEGRAM_*`.
+  `DATA_TELEGRAM_*` / `TRADING_TELEGRAM_*`; chat ids numeric (private
+  8214218868), NOT bot usernames. Alert format unified (DEC-012): HTML
+  parse-mode, header `<icon> QC-<DOMAIN> <EVENT> | <date> <time VN> | <verdict>`,
+  inline `<code>` monospace body (no code box). Heartbeat status at
+  `data/state/daily-etl-status.json`;
+  watcher LaunchAgent `io.quant-core.daily-etl-watch` at 16:10 Mon-Fri.
 
 ## 4. Pending / blocked (priority order)
 
-1. **entrade demo 401** (blocker): username format verified (10-digit numeric);
-   endpoint/host verified. Hypotheses: wrong account type (entrade partnership
-   account code, not DNSE securities account) / separate API-trading password /
-   demo account expired (last verified 2026-07-20). Retest: `check_auth.py`.
-2. **Daily ETL first run**: needs `API_KEY`/`API_SECRET`; manual run or wait
-   for LaunchAgent 16:00.
-3. **Paper E2E**: market hours only; dry-run verified.
-4. **Acceptance**: (a) re-discuss checklist with user (start here - the 6-layer
+1. **Paper E2E first session**: market hours only - next trading day 2026-09-03
+   (thu 5; VN holiday Mon 31-08 .. Wed 02-09). Runs `apps/trading/paper.py`;
+   trading alerts (reject/deny/force-close/risk-state) get their first live
+   test then.
+2. **Acceptance**: (a) re-discuss checklist with user (start here - the 6-layer
    table above is the proposal), (b) then implement bridge per-bar decision
    log + `apps/trading/acceptance.py` (replay-diff report per layer).
-5. Optional: OBS-011 binding NaN fix; two-part cost model (0.1575/P+0.0000411);
-   instrument-helper dedup market_data/trading.
+3. **Alert wave B** (with acceptance): rolling volume baselines (30-day
+   median), cross-source divergence DNSE vs Mirae, wrong-contract guard
+   (DEC-012 deferred items).
+4. Optional: OBS-011 binding NaN fix; two-part cost model (0.1575/P+0.0000411);
+   instrument-helper dedup market_data/trading; quiet the catalog
+   "already exists, skipping write" stdout noise.
 
 ## 5. Session start protocol (self-check before trusting this note)
 
 ```sh
 git status --short                     # expect empty
-git log --oneline -4                   # expect c2415b8 ... (12 commits, DEC-010 format)
+git log --oneline -4                   # expect c0efe02 ... (DEC-010 format)
 python3 scripts/sweep_ledger.py        # expect SWEEP OK, 0 drift
 .venv/bin/python3 src/trading/tests/test_portfolio.py && \
 .venv/bin/python3 src/trading/tests/test_bridge.py && \
 .venv/bin/python3 src/trading/tests/test_risk.py && \
+.venv/bin/python3 src/trading/tests/test_notify.py && \
 .venv/bin/python3 src/market_data/tests/test_daily.py && \
-.venv/bin/python3 src/market_data/tests/test_notify.py
-launchctl list | grep quant-core       # expect io.quant-core.daily-data-etl loaded
+.venv/bin/python3 src/market_data/tests/test_notify.py && \
+.venv/bin/python3 src/market_data/tests/test_heartbeat.py
+launchctl print gui/$(id -u) | grep quant-core   # expect daily-data-etl + daily-etl-watch loaded
 ```
 If any check fails, reconcile with the ledger (DEC/OBS/REC/TST) and git log
 before proceeding; record findings as ledger notes per the governance rules.
