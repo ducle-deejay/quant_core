@@ -35,14 +35,29 @@ Integration notes (milestone 1, decision DEC-008):
   "still not flat" alert uses level ERROR because v1's ``Logger`` has no
   ``critical`` level (confirmed: levels are debug/info/warning/error) - the
   message embeds ``CRITICAL`` so the severity survives grepping.
+- Transition log: with ``transition_log_path`` set, every risk-state change
+  (status + reason) is appended as one JSONL record
+  ``{"ts_ns", "previous", "current", "reason"}``, anchored by a
+  ``previous="<start>"``/``reason="startup"`` record at start-up, for the
+  acceptance layer to match against the trigger matrix. Observability only:
+  write failures are logged via stdlib ``logging``, never raised.
 - The flatten circuit breaker (cancel-all + close-all with retry) fires on a
   TRANSITION to HALTED caused by a loss or staleness trigger, matching the
   task contract. Exposure-cap REDUCING is enforced passively through the gate
   (only position-reducing moves are allowed) and does not auto-flatten.
+- State persistence: ``on_save``/``on_load`` persist the risk state machine
+  (status, reason, halt latch, loss-limit bookkeeping) through the kernel's
+  save/load hooks (TradingNodeConfig ``save_state``/``load_state``). A
+  restored HALTED status stays latched HALTED - the operator must intervene;
+  the ledger's own day rollover / decide() cannot silently re-arm it.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import msgspec
@@ -68,6 +83,155 @@ from trading.risk.state import (
     RiskLedger,
 )
 
+# --- transition JSONL helpers (observability only) ---------------------------
+# Records every risk-state change (ACTIVE/HALTED/REDUCING + reason) as one
+# JSONL line for the acceptance layer. Pure and failure-tolerant: a write
+# error is logged, never raised, so logging can never affect trading behavior.
+
+_LOGGER = logging.getLogger(__name__)
+_ensured_dirs: set[str] = set()
+
+START_STATE = "<start>"
+REASON_STARTUP = "startup"
+
+
+def format_transition(ts_ns: int, previous: str, current: str, reason: str | None) -> str:
+    """Serialize one transition as a single JSONL line (no trailing newline)."""
+    return json.dumps(
+        {
+            "ts_ns": ts_ns,
+            "previous": previous,
+            "current": current,
+            "reason": reason,
+        }
+    )
+
+
+def append_transition(path: str, line: str) -> None:
+    """Append one JSONL line to ``path``, creating parent directories on the
+    first write and flushing. Never raises on write errors: a failure logs a
+    warning and returns (logging must never affect trading behavior)."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent not in _ensured_dirs:
+            os.makedirs(parent, exist_ok=True)
+            _ensured_dirs.add(parent)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+    except OSError as exc:
+        _LOGGER.warning("RISK: transition log write failed for %s: %s", path, exc)
+
+
+def transitions_since(
+    new_status: str,
+    new_reason: str,
+    last_seen: tuple[str, str] | None,
+) -> list[dict] | None:
+    """One transition record when ``(new_status, new_reason)`` differs from the
+    last-seen ``(status, reason)`` pair, else ``None`` (no change). The first
+    observation (``last_seen is None``) anchors the sequence with
+    ``previous="<start>"`` and ``reason="startup"``; later records carry the
+    prior status and the new reason (``None`` when the reason is empty)."""
+    if last_seen is not None and (new_status, new_reason) == last_seen:
+        return None
+    if last_seen is None:
+        return [{"previous": START_STATE, "current": new_status, "reason": REASON_STARTUP}]
+    return [
+        {
+            "previous": last_seen[0],
+            "current": new_status,
+            "reason": new_reason or None,
+        }
+    ]
+
+
+# --- state save/load helpers (pure, unit-testable) ---------------------------
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _dt_from_iso(value: Any) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def format_overlay_state(ledger: RiskLedger, halted_latch: bool) -> dict[str, Any]:
+    """Plain-values dict of the risk state machine for the Redis save/load hooks.
+
+    Persists the status/reason (from ``decide()``), the halt latch, and the
+    loss-limit bookkeeping (realized/marked PnL, position, entry, last mark,
+    bar/session timestamps) so the trigger math is identical after restart.
+    Datetimes are ISO strings (msgspec-safe).
+    """
+    return {
+        "status": ledger.status,
+        "reason": ledger.reason,
+        "halted_latch": bool(halted_latch),
+        "realized_pnl_vnd": float(ledger.realized_pnl_vnd),
+        "marked_pnl_vnd": float(ledger.marked_pnl_vnd),
+        "position": int(ledger.position),
+        "avg_entry": ledger.avg_entry,
+        "last_price": ledger.last_price,
+        "last_bar_ts": _iso_or_none(ledger.last_bar_ts),
+        "last_bar_seen_session": bool(ledger.last_bar_seen_session),
+        "intraday_start_ts": _iso_or_none(ledger.intraday_start_ts),
+    }
+
+
+def apply_overlay_state(
+    ledger: RiskLedger,
+    state: dict[str, Any],
+) -> tuple[str, str, bool]:
+    """Restore risk bookkeeping from a saved state dict onto ``ledger``.
+
+    Returns the effective ``(status, reason, halted_latch)``: a persisted
+    HALTED status latches the halt so the actor stays halted after restart
+    (the ledger's own ``decide()`` would otherwise recompute ACTIVE as soon
+    as the trigger clears). Malformed/missing values fall back to ACTIVE
+    defaults; never raises.
+    """
+    if not isinstance(state, dict):
+        state = {}
+    ledger.realized_pnl_vnd = _to_float(state.get("realized_pnl_vnd"), 0.0)
+    ledger.marked_pnl_vnd = _to_float(state.get("marked_pnl_vnd"), 0.0)
+    ledger.position = _to_int(state.get("position"), 0)
+    avg = state.get("avg_entry")
+    ledger.avg_entry = _to_float(avg, 0.0) if avg is not None else None
+    last_px = state.get("last_price")
+    ledger.last_price = _to_float(last_px, 0.0) if last_px is not None else None
+    ledger.last_bar_ts = _dt_from_iso(state.get("last_bar_ts"))
+    ledger.last_bar_seen_session = bool(state.get("last_bar_seen_session", False))
+    ledger.intraday_start_ts = _dt_from_iso(state.get("intraday_start_ts"))
+
+    status = state.get("status") or ACTIVE
+    reason = state.get("reason") or ""
+    if status not in (ACTIVE, HALTED, REDUCING):
+        status, reason = ACTIVE, ""
+    ledger.status = status
+    ledger.reason = reason
+    return status, reason, status == HALTED
+
 
 class RiskOverlayConfig(StrategyConfig, kw_only=True, frozen=True):
     """Configuration for the risk overlay actor (v1 StrategyConfig subclass).
@@ -86,6 +250,8 @@ class RiskOverlayConfig(StrategyConfig, kw_only=True, frozen=True):
     ``f"<component_id>-{order_id_tag}"``, so prefer setting ``order_id_tag``
     and letting ``component_id`` default to the class name. ``bridge_strategy_id``
     must match the bridge's final id computed the same way.
+    ``transition_log_path`` (default ``None``) enables the observability-only
+    per-transition JSONL log; ``None`` disables it.
     """
 
     bar_type: BarType
@@ -100,6 +266,7 @@ class RiskOverlayConfig(StrategyConfig, kw_only=True, frozen=True):
     flatten_retry_secs: float = 1.0
     contract_multiplier: float = 100_000.0
     heartbeat_interval_secs: float = 1.0
+    transition_log_path: str | None = None
 
     def risk_config(self) -> RiskConfig:
         """Project the flat overlay fields onto the pure core config."""
@@ -146,6 +313,15 @@ class RiskOverlayActor(Strategy):
         self._bridge_topic: str | None = None
         self._heartbeat_name = f"RISK_HEARTBEAT:{self.instrument_id}"
         self._flatten_name = f"RISK_FLATTEN:{self.instrument_id}"
+        self._transition_log_path = config.transition_log_path
+        self._last_seen: tuple[str, str] | None = None
+        #: Set by on_load when a persisted HALTED status is restored; while
+        #: latched, _evaluate keeps the actor HALTED no matter what the
+        #: ledger's decide() would recompute (operator must intervene).
+        self._halted_latch = False
+        #: The persisted halt reason, kept stable while latched (decide() would
+        #: otherwise clear the ledger reason when the trigger clears).
+        self._halted_reason: str = ""
 
     @property
     def instrument_id(self):
@@ -227,10 +403,80 @@ class RiskOverlayActor(Strategy):
     def status(self) -> RiskState:
         return RiskState(status=self._ledger.status, reason=self._ledger.reason)
 
+    # -- state save/load hooks --------------------------------------------------
+    # The kernel calls these via Trader.save()/load() -> Cache.update_strategy/
+    # load_strategy -> database (Redis) when TradingNodeConfig.save_state/
+    # load_state are set (verified in system/kernel.py + common/actor.pyx: the
+    # hooks are ``on_save``/``on_load``, NOT ``on_save_state``/``on_load_state``).
+
+    def on_save(self) -> dict[str, Any]:
+        """Persist the risk state machine so an ACTIVE circuit breaker survives
+        restart (the persisted HALTED status latches on load)."""
+        return format_overlay_state(self._ledger, self._halted_latch)
+
+    def on_load(self, state: dict[str, Any]) -> None:
+        """Restore risk bookkeeping; a persisted HALTED status stays HALTED -
+        the operator must intervene (no silent re-arm). Save/load errors are
+        logged, never raised, so a corrupt state cannot break start-up."""
+        try:
+            status, reason, halted = apply_overlay_state(self._ledger, state)
+            self._halted_latch = halted
+            self._halted_reason = reason if halted else ""
+            if halted:
+                self.log.warning(
+                    f"RISK: restored HALTED ({reason or 'unknown'}) from saved "
+                    "state - trading stays halted; operator intervention required"
+                )
+            else:
+                self.log.info(
+                    f"RISK: restored risk state ({status}:{reason or 'ok'}) "
+                    "from saved state"
+                )
+        except Exception as error:  # noqa: BLE001 - save/load must never break start
+            self.log.warning(f"RISK: failed to load saved state: {error}")
+
+    # -- transition logging (observability only) ------------------------------
+
+    def _log_transition(self, status: str, reason: str) -> None:
+        """Append one JSONL record per state change; a no-op without a path."""
+        if self._transition_log_path is None:
+            return
+        records = transitions_since(status, reason, self._last_seen)
+        if not records:
+            return
+        for record in records:
+            append_transition(
+                self._transition_log_path,
+                format_transition(
+                    time.time_ns(),
+                    record["previous"],
+                    record["current"],
+                    record["reason"],
+                ),
+            )
+        self._last_seen = (status, reason)
+
     # -- decision evaluation -------------------------------------------------
 
     def _evaluate(self) -> None:
+        if self._halted_latch:
+            # Restored HALTED circuit breaker: never silently re-arm. The
+            # ledger's own decide() would recompute ACTIVE as soon as the
+            # trigger clears (e.g. bars flowing again after a stale-feed
+            # halt), so the latch pins the state until the operator
+            # intervenes - including the ledger status the gate reads.
+            self._ledger.status = HALTED
+            self._ledger.reason = self._halted_reason
+            state = RiskState(status=HALTED, reason=self._halted_reason)
+            if state != self._last_state:
+                self.log.warning(
+                    f"RISK: still HALTED ({self._halted_reason or 'unknown'}) - "
+                    "operator intervention required"
+                )
+                self._last_state = state
+            return
         state = self._ledger.decide()
+        self._log_transition(state.status, state.reason)
         if state != self._last_state:
             self.log.warning(
                 f"RISK: state {self._last_state.status}:{self._last_state.reason or 'ok'} "

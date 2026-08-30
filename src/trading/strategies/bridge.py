@@ -16,18 +16,34 @@ Data path
 
 Decision path (per bar, in this order)
 --------------------------------------
-1. Force-close check: local time (Asia/Ho_Chi_Minh) at/after
+1. Force-close check: only on a configured expiry day (``force_close_dates``,
+   Asia/Ho_Chi_Minh dates; empty list = never) at/after
    ``force_close_local_time`` -> cancel all orders and close the position,
    then block the rest of the day (same-day re-entry blocked). The first bar
    of a new local day re-arms the session.
-2. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition`` (contracts.py).
-3. ``risk.gate(target)`` -> ``(allowed, reason)``; denied targets are logged
+2. Warmup: no decision until ``warmup_bars`` closes are collected.
+3. Session window: new orders only inside ``session_windows`` (VN local). The
+   force-close branch above runs before this check, so the 14:00 expiry close
+   still fires inside the afternoon window.
+4. Expiry day before the force-close time: only orders that reduce the
+   absolute position are allowed (``is_expiry_day_entry_blocked``).
+5. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition`` (contracts.py).
+6. ``risk.gate(target)`` -> ``(allowed, reason)``; denied targets are logged
    and skipped.
-4. Cooldown: skip when less than ``cooldown_secs`` elapsed since the last
+7. Cooldown: skip when less than ``cooldown_secs`` elapsed since the last
    order submission.
-5. Gap: skip when ``abs(target - current) < min_gap_contracts``.
-6. No stacking: skip when a working (non-terminal) order exists for the
+8. Gap: skip when ``abs(target - current) < min_gap_contracts``.
+9. No stacking: skip when a working (non-terminal) order exists for the
    instrument.
+
+Every exit path above appends one JSONL line to ``decision_log_path`` when
+configured (see ``format_decision``); the log is consumed later by an
+acceptance report.
+
+State persistence: ``on_save``/``on_load`` persist the session flags
+(``session_date``/``session_closed``/``last_submit_ns``) through the kernel's
+save/load hooks (TradingNodeConfig ``save_state``/``load_state``); a same-day
+restart keeps the force-close-closed session, a new day starts fresh.
 
 Order construction
 ------------------
@@ -58,12 +74,16 @@ they are unit-testable without a running node (see
 
 from __future__ import annotations
 
+import json
+import os
 from collections import deque
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import date
 from datetime import datetime
 from datetime import time as local_time
 from datetime import timedelta
+from datetime import timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -97,10 +117,12 @@ VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 LO_TIME_IN_FORCE = TimeInForce.DAY
 MAK_TIME_IN_FORCE = TimeInForce.IOC
 
-#: Calendar-time multiple applied on top of the raw bar count when computing
-#: the warmup request window, because bars only exist inside VN trading hours
-#: (a 1-minute bar needs roughly 3x calendar time to accumulate 800 bars).
-WARMUP_CALENDAR_MULTIPLE = 2.0
+#: Calendar-time multiple for the warmup request window. One-minute bars only
+#: exist inside VN trading hours: with 241 bars/session and 5 sessions/week,
+#: 7200 bars need ~30 sessions ~= 42 calendar days, i.e. a multiple of ~8.4x;
+#: 10.0 adds margin for holidays and partial sessions. The rolling buffer caps
+#: how much is actually retained.
+WARMUP_CALENDAR_MULTIPLE = 10.0
 
 #: Minutes per bar aggregation step (step x unit = bar period in minutes).
 _AGGREGATION_MINUTES = {
@@ -139,6 +161,55 @@ def should_force_close(ts: datetime, force_close_time_str: str, tz: ZoneInfo) ->
         raise ValueError("should_force_close requires a timezone-aware timestamp")
     cutoff = _parse_local_time(force_close_time_str)
     return ts.astimezone(tz).time() >= cutoff
+
+
+def is_force_close_day(
+    now: datetime,
+    force_close_dates: list[str],
+    tz: ZoneInfo,
+) -> bool:
+    """Return whether ``now``'s calendar date in ``tz`` is in ``force_close_dates``.
+
+    Dates are ISO strings ("YYYY-MM-DD"); an empty list means the force-close
+    never fires (the live bridge must only flatten on the contract's expiry
+    day, not daily at the cutoff).
+    """
+    if now.tzinfo is None:
+        raise ValueError("is_force_close_day requires a timezone-aware timestamp")
+    return now.astimezone(tz).date().isoformat() in force_close_dates
+
+
+def is_expiry_day_entry_blocked(current_contracts: int, delta: int) -> bool:
+    """True when the trade is blocked by the expiry-day reduce-only rule.
+
+    On an expiry day before the force-close time, only orders that decrease
+    the absolute position are allowed: ``abs(current + delta) < abs(current)``.
+    Everything else is blocked: entries from flat, increases, and flips
+    through zero that end up with a larger |position|.
+    """
+    return abs(current_contracts + delta) >= abs(current_contracts)
+
+
+def in_session_window(
+    now: datetime,
+    windows: list[tuple[str, str]],
+    tz: ZoneInfo,
+) -> bool:
+    """True when ``now``'s local time in ``tz`` falls inside a window.
+
+    Windows are ``HH:MM`` ``(start, end)`` pairs, half-open ``[start, end)``:
+    a timestamp exactly on a start boundary is inside, exactly on an end
+    boundary is outside.
+    """
+    if now.tzinfo is None:
+        raise ValueError("in_session_window requires a timezone-aware timestamp")
+    now_time = now.astimezone(tz).time()
+    for start_str, end_str in windows:
+        start = _parse_local_time(start_str)
+        end = _parse_local_time(end_str)
+        if start <= now_time < end:
+            return True
+    return False
 
 
 def target_delta(target_contracts: int, current_contracts: int) -> int:
@@ -213,6 +284,95 @@ def warmup_start(
     return now_utc - bar_period_timedelta(bar_type_str) * warmup_bars * calendar_multiple
 
 
+def format_decision(
+    ts_event_ns: int,
+    clock_ns: int,
+    close: float | None,
+    target: int | None,
+    current_contracts: int,
+    action: str,
+    reason: str | None,
+) -> str:
+    """One JSON line for the per-bar decision log (pure, unit-testable).
+
+    ``close``/``target``/``reason`` are null when not computed for that path
+    (e.g. ``skip-warmup`` fires before ``compute_target``).
+    """
+    return json.dumps(
+        {
+            "ts_event_ns": int(ts_event_ns),
+            "clock_ns": int(clock_ns),
+            "close": close,
+            "target": target,
+            "current_contracts": int(current_contracts),
+            "action": action,
+            "reason": reason,
+        },
+    )
+
+
+# -- session save/load helpers (pure, unit-testable) ------------------------- #
+
+
+def vn_today_iso(now_utc: datetime | None = None) -> str:
+    """The Asia/Ho_Chi_Minh calendar date of ``now_utc`` as ``YYYY-MM-DD``.
+
+    ``now_utc`` defaults to the wall-clock UTC now; a naive input is assumed
+    UTC. Used by the save/load hooks to decide whether a persisted session
+    belongs to the current trading day.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(VN_TZ).date().isoformat()
+
+
+def format_bridge_state(
+    session_date: date | None,
+    session_closed: bool,
+    last_submit_ns: int | None,
+) -> dict[str, Any]:
+    """The bridge's persisted session-state dict (plain values, Redis-safe).
+
+    ``session_date`` is ``None`` when no bar has been seen yet (fresh start).
+    """
+    return {
+        "session_date": session_date.isoformat() if session_date is not None else None,
+        "session_closed": bool(session_closed),
+        "last_submit_ns": last_submit_ns,
+    }
+
+
+def should_restore_session(saved_session_date: str | None, today_iso: str) -> bool:
+    """True when a persisted session belongs to the same VN day as ``today_iso``.
+
+    A new day must start fresh (the force-close/session machinery re-arms on
+    day rollover anyway), so only a same-day restart restores the flags.
+    """
+    return saved_session_date is not None and saved_session_date == today_iso
+
+
+def append_decision(path: str, line_dict: str | dict[str, Any]) -> bool:
+    """Append one JSON line to ``path``, creating parent dirs on first write.
+
+    ``line_dict`` may be a JSON string (e.g. from :func:`format_decision`) or
+    a dict, which is serialized here. Best-effort writer: never raises;
+    returns False on any OSError so a bad log path cannot crash the decision
+    loop (the strategy logs the warning).
+    """
+    line = line_dict if isinstance(line_dict, str) else json.dumps(line_dict)
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+        return True
+    except OSError:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -234,8 +394,19 @@ class BridgeConfig:
     cooldown_secs: float = 5.0
     min_gap_contracts: int = 1
     force_close_local_time: str = "14:00"
-    warmup_bars: int = 800
-    buffer_bars: int = 2000
+    #: ISO "YYYY-MM-DD" expiry dates interpreted in Asia/Ho_Chi_Minh; the
+    #: force-close fires only on these days (empty list = never, i.e. the
+    #: live bridge no longer flattens daily at the cutoff).
+    force_close_dates: list[str] = field(default_factory=list)
+    #: VN local windows within which NEW orders may be submitted; the
+    #: force-close branch runs before the window check and is unaffected.
+    session_windows: list[tuple[str, str]] = field(
+        default_factory=lambda: [("09:00", "11:30"), ("13:00", "14:30")],
+    )
+    #: JSONL path for the per-bar decision log; None disables logging.
+    decision_log_path: str | None = None
+    warmup_bars: int = 7200  # 30 sessions x 241 bars
+    buffer_bars: int = 8000
     client_order_id_prefix: str = "bridge"
     #: Nautilus order_id_tag -> strategy id becomes "BridgeStrategy-<tag>"
     #: (v1 formula: f"{component_id}-{order_id_tag}"); the risk overlay's
@@ -264,6 +435,29 @@ class BridgeStrategy(Strategy):
         if config.buffer_bars < config.warmup_bars:
             raise ValueError("buffer_bars must be >= warmup_bars so warmup can complete")
         _parse_local_time(config.force_close_local_time)  # validate eagerly
+        if not config.session_windows:
+            raise ValueError("session_windows must not be empty")
+        for window in config.session_windows:
+            try:
+                start_str, end_str = window
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"session_windows entries must be (start, end) HH:MM pairs, got {window!r}",
+                ) from error
+            _parse_local_time(start_str)
+            _parse_local_time(end_str)
+        for date_str in config.force_close_dates:
+            try:
+                parsed = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError as error:
+                raise ValueError(
+                    f"force_close_dates entries must be ISO 'YYYY-MM-DD', got {date_str!r}",
+                ) from error
+            if parsed.date().isoformat() != date_str:
+                raise ValueError(
+                    f"force_close_dates entries must be zero-padded ISO 'YYYY-MM-DD', "
+                    f"got {date_str!r}",
+                )
 
         self._instrument_id = InstrumentId.from_str(config.instrument_id)
         self._bar_type = BarType.from_str(config.bar_type)
@@ -360,23 +554,40 @@ class BridgeStrategy(Strategy):
     # -- data handlers ------------------------------------------------------ #
 
     def on_bar(self, bar: Bar) -> None:
-        """One decision per bar: session rules, target, risk gate, throttle, gap, no-stacking."""
+        """One decision per bar; every exit path appends a decision-log line."""
         if bar.bar_type != self._bar_type:
             return
         self._append_bar(bar)
 
         now = self.clock.utc_now()
+        now_ns = self.clock.timestamp_ns()
         self._update_session_date(now)
 
         if self._session_closed:
+            self._log_decision(bar, now_ns, "skip-session-closed")
             return
 
-        if should_force_close(now, self.bridge_config.force_close_local_time, VN_TZ):
+        on_expiry_day = is_force_close_day(
+            now,
+            self.bridge_config.force_close_dates,
+            VN_TZ,
+        )
+        if on_expiry_day and should_force_close(
+            now,
+            self.bridge_config.force_close_local_time,
+            VN_TZ,
+        ):
             self._force_close(now)
             self._session_closed = True
+            self._log_decision(bar, now_ns, "force-close")
             return
 
         if not self._warmed_up():
+            self._log_decision(bar, now_ns, "skip-warmup")
+            return
+
+        if not in_session_window(now, self.bridge_config.session_windows, VN_TZ):
+            self._log_decision(bar, now_ns, "skip-window")
             return
 
         target = self.bridge_config.portfolio.compute_target(
@@ -394,26 +605,80 @@ class BridgeStrategy(Strategy):
                 f"Bridge {self.id} target denied by risk controller: {reason} "
                 f"(target={target.target_contracts})",
             )
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-denied",
+                reason=reason,
+                target=target.target_contracts,
+            )
             return
 
         current_contracts = self._current_position_contracts()
         delta = target_delta(target.target_contracts, current_contracts)
 
-        now_ns = self.clock.timestamp_ns()
+        if on_expiry_day and is_expiry_day_entry_blocked(current_contracts, delta):
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-expiry-day-entry",
+                target=target.target_contracts,
+                current=current_contracts,
+            )
+            return
+
         if not is_cooldown_elapsed(
             self._last_submit_ns,
             now_ns,
             self.bridge_config.cooldown_secs,
         ):
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-cooldown",
+                target=target.target_contracts,
+                current=current_contracts,
+            )
             return
 
         if is_below_min_gap(delta, self.bridge_config.min_gap_contracts):
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-gap",
+                target=target.target_contracts,
+                current=current_contracts,
+            )
             return
 
         if self._working_order_exists():
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-working",
+                target=target.target_contracts,
+                current=current_contracts,
+            )
+            return
+
+        if self._order_factory is None or self._instrument is None:
+            self._log_decision(
+                bar,
+                now_ns,
+                "skip-instrument-not-ready",
+                target=target.target_contracts,
+                current=current_contracts,
+            )
             return
 
         self._submit_target_delta(delta, now_ns)
+        self._log_decision(
+            bar,
+            now_ns,
+            "submit",
+            target=target.target_contracts,
+            current=current_contracts,
+        )
 
     def on_historical_data(self, data: Any) -> None:
         """Feed the warmup response into the same rolling buffers as live bars."""
@@ -510,6 +775,40 @@ class BridgeStrategy(Strategy):
                 self.log.info(
                     f"Bridge {self.id} session re-armed for {today.isoformat()}",
                 )
+
+    def _log_decision(
+        self,
+        bar: Bar,
+        now_ns: int,
+        action: str,
+        reason: str | None = None,
+        target: int | None = None,
+        current: int | None = None,
+    ) -> None:
+        """Append one decision-log line (best-effort; never raises).
+
+        ``target`` stays null when it was not computed yet; ``current`` and
+        ``close`` are read lazily when not supplied.
+        """
+        if self.bridge_config.decision_log_path is None:
+            return
+        if current is None:
+            current = self._current_position_contracts()
+        close = self._closes[-1] if self._closes else None
+        line = format_decision(
+            ts_event_ns=bar.ts_event,
+            clock_ns=now_ns,
+            close=close,
+            target=target,
+            current_contracts=current,
+            action=action,
+            reason=reason,
+        )
+        if not append_decision(self.bridge_config.decision_log_path, line):
+            self.log.warning(
+                f"Bridge {self.id} failed to write decision log line "
+                f"(path={self.bridge_config.decision_log_path}, action={action})",
+            )
 
     def _force_close(self, now: datetime) -> None:
         """Cancel all orders and close the position (idempotent per session)."""
@@ -622,3 +921,61 @@ class BridgeStrategy(Strategy):
             "session_closed": self._session_closed,
             "buffer_size": len(self._closes),
         }
+
+    # -- state save/load hooks -------------------------------------------------
+    # The kernel calls these via Trader.save()/load() -> Cache.update_strategy/
+    # load_strategy -> database (Redis) when TradingNodeConfig.save_state/
+    # load_state are set (verified in system/kernel.py + common/actor.pyx:
+    # the hooks are ``on_save``/``on_load``, NOT ``on_save_state``/
+    # ``on_load_state``). State dicts are msgspec-serialized by the cache
+    # database adapter, so only plain JSON-compatible values are persisted.
+
+    def on_save(self) -> dict[str, Any]:
+        """Persist session state so a same-day restart keeps force-close state.
+
+        Returns the session date (VN), whether the session is force-close
+        closed, and the last order-submission timestamp (nanoseconds).
+        """
+        return format_bridge_state(
+            session_date=self._session_date,
+            session_closed=self._session_closed,
+            last_submit_ns=self._last_submit_ns,
+        )
+
+    def on_load(self, state: dict[str, Any]) -> None:
+        """Restore session state only when the saved session is today's VN date.
+
+        A new day starts fresh (the force-close/session machinery re-arms on
+        day rollover anyway). Save/load errors are logged, never raised, so a
+        corrupt state cannot break start-up.
+        """
+        try:
+            saved = state.get("session_date") if isinstance(state, dict) else None
+            if not should_restore_session(saved, vn_today_iso(self._now_utc())):
+                if saved is not None:
+                    self.log.info(
+                        f"Bridge {self.id}: saved session {saved} is not today; "
+                        "starting fresh",
+                    )
+                return
+            self._session_date = date.fromisoformat(saved)
+            self._session_closed = bool(state.get("session_closed", False))
+            last_submit_ns = state.get("last_submit_ns")
+            self._last_submit_ns = (
+                int(last_submit_ns) if last_submit_ns is not None else None
+            )
+            self.log.info(
+                f"Bridge {self.id}: restored session state for {saved} "
+                f"(closed={self._session_closed}, "
+                f"last_submit_ns={self._last_submit_ns})",
+            )
+        except Exception as error:  # noqa: BLE001 - save/load must never break start
+            self.log.warning(f"Bridge {self.id}: failed to load saved state: {error}")
+
+    def _now_utc(self) -> datetime:
+        """UTC now from the strategy clock, falling back to wall clock when the
+        clock has no registered time source (standalone construction/tests)."""
+        try:
+            return self.clock.utc_now()
+        except Exception:  # noqa: BLE001 - unwired clock in standalone construction
+            return datetime.now(timezone.utc)
