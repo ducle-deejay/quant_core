@@ -67,9 +67,10 @@ automatically:
 | Daily ETL first run | DONE | 2026-08-28: 241 bars / 89,565 trades / 593,874 book, gaps 0; Mirae backfill 473,773 bars (2018->2026-08-27); catalog populated; alert delivered 2026-08-30 |
 | Telegram alert test | DONE | bots created per convention (Data @quantcore_data_etl_bot, Trading @quantcore_trading_monitor_paper_bot); chat ids fixed to 8214218868; smoke 9/9 delivered; unified format (DEC-012) |
 | Alert coverage wave A | DONE | DEC-012/OBS-013/TST-009: bootstrap alerts, fail-loud entrypoint, heartbeat status + watcher LaunchAgent 16:10, smoke script |
-| Paper E2E first session | PENDING | needs market hours - next: 2026-09-03 (thu 5; holiday 31-08..02-09) |
-| Acceptance checklist discussion | IN PROGRESS | plan agreed; user wanted to re-discuss - continue here |
-| Acceptance implementation (decision log + acceptance.py) | PENDING | agreed in principle |
+| Paper E2E first session | READY | 2026-09-03 (thu 5): runbook docs/runbooks/paper-session-2026-09-03.md; pre-flight done (auth, dry-run, warmup window 7953 bars, smoke 9/9); manual start 08:45 VN |
+| Acceptance checklist discussion | DONE | 6-layer checklist finalized 2026-08-30: parity (data, signal) vs engine audit (execution, position, cost, risk); owner-approved wording |
+| Milestone-1 live corrections (DEC-013) | DONE | expiry-day force-close + 09-03 fake date, session windows, catalog warmup (7200/8000), decision log + risk transition log, Redis installed + backend verified (wheel has RedisCacheDatabase - no source build) |
+| Acceptance implementation (decision log + acceptance.py) | DONE | bridge decision log + risk transition log + acceptance.py 6 checks + paper wiring (streaming/Redis/save-load); 178 tests green; runbook ready |
 | Cost calibration (7->1) | PENDING | after M1 |
 | Live preparation (Phase 5) | FUTURE | C7 already live-standard |
 
