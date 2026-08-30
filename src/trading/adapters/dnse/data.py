@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -39,6 +40,7 @@ from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
 from trading.adapters.dnse.calendar import is_valid_vn_trading_day
 from trading.adapters.dnse.calendar import parse_working_dates_body
@@ -48,6 +50,10 @@ from trading.adapters.dnse.config import SUPPORTED_DNSE_RESOLUTIONS
 from trading.adapters.dnse.config import VN_TZ
 from trading.adapters.dnse.config import DnseDataClientConfig
 from trading.adapters.dnse.instruments import DnseInstrumentProvider
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog"
 
 
 LIVE_DATA_RECONNECTED_SIGNAL_NAME = "LiveDataReconnected"
@@ -217,6 +223,22 @@ def dnse_ohlc_body_to_nautilus_bars(
     return bars
 
 
+def _load_catalog_bars(
+    catalog: ParquetDataCatalog,
+    bar_type: BarType,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> list[Bar]:
+    """Query bars for a bar type within [start, end] from a ParquetDataCatalog.
+
+    The catalog stores bars under ``data/bar/{bar_type}`` and filters on
+    ``ts_init``; catalog bars carry ``ts_event == ts_init`` at the bar open
+    time in UTC, matching the DNSE API conversion path (see
+    ``dnse_ohlc_to_nautilus_bar``).
+    """
+    return catalog.bars(bar_types=[str(bar_type)], start=start, end=end)
+
+
 @dataclass(frozen=True)
 class SubscriptionKey:
     """NOX composition key for a DNSE OHLC subscription."""
@@ -267,6 +289,12 @@ class DnseLiveDataClient(LiveMarketDataClient):
             base_url=config.rest_base_url,
             api_version=config.api_version,
         )
+        self._catalog: ParquetDataCatalog | None = None
+        if config.historical_source == "catalog":
+            catalog_path = Path(config.catalog_path) if config.catalog_path else DEFAULT_CATALOG_PATH
+            if not catalog_path.is_absolute():
+                catalog_path = REPO_ROOT / catalog_path
+            self._catalog = ParquetDataCatalog(str(catalog_path))
         self._bar_types_by_key: dict[SubscriptionKey, BarType] = {}
         self._subscribed_keys: set[SubscriptionKey] = set()
         self._last_bar_ts_by_key: dict[SubscriptionKey, int] = {}
@@ -376,68 +404,100 @@ class DnseLiveDataClient(LiveMarketDataClient):
             resolution=resolution,
         )
 
-        query: dict[str, Any] = {
-            "symbol": key.symbol,
-            "resolution": resolution,
-        }
-        if start is not None:
-            query["from"] = int(start.timestamp())
-        if end is not None:
-            query["to"] = int(end.timestamp())
-
-        try:
-            status, body = self._rest_client.get_ohlc(
-                bar_type=self._config.historical_bar_type,
-                query=query,
-                dry_run=False,
-            )
-            if status != 200:
-                raise ValueError(
-                    "DNSE get_ohlc failed with "
-                    f"status={status}, symbol={query['symbol']}, "
-                    f"resolution={resolution}, body={body}",
+        bars: list[Bar] = []
+        source = "api"
+        if self._config.historical_source == "catalog":
+            if self._catalog is None:
+                self._log.warning(
+                    "historical_source=catalog but no catalog was constructed; "
+                    "falling back to DNSE API",
                 )
-
-            bars = dnse_ohlc_body_to_nautilus_bars(
-                body=body,
-                symbol=query["symbol"],
-                resolution=resolution,
-                venue=self._config.venue,
-                price_precision=self._config.price_precision,
-                volume_precision=self._config.volume_precision,
-                timezone_name=self._config.timezone_name,
-                working_dates=self._market_working_dates,
-                drop_invalid_trading_days=self._config.drop_weekend_bars,
-            )
-
-            if bars and bars[0].bar_type != request.bar_type:
-                bars = [
-                    Bar(
-                        request.bar_type,
-                        bar.open,
-                        bar.high,
-                        bar.low,
-                        bar.close,
-                        bar.volume,
-                        bar.ts_event,
-                        bar.ts_init,
+            else:
+                try:
+                    bars = _load_catalog_bars(
+                        catalog=self._catalog,
+                        bar_type=request.bar_type,
+                        start=start,
+                        end=end,
                     )
-                    for bar in bars
-                ]
+                except Exception as e:  # noqa: BLE001 - a catalog read failure must not break warmup
+                    self._log.warning(
+                        f"Catalog bar load failed for {request.bar_type}: {e}; "
+                        "falling back to DNSE API",
+                    )
+                    bars = []
+                if bars:
+                    source = "catalog"
+                else:
+                    self._log.warning(
+                        f"No catalog bars for {request.bar_type} within "
+                        f"[{start}, {end}]; falling back to DNSE API",
+                    )
 
-            self._handle_bars(
-                request.bar_type,
-                bars,
-                correlation_id=request.id,
-                start=request.start,
-                end=request.end,
-                params=request.params,
-            )
-        except Exception:
-            if key in self._recovering_keys:
-                self._failed_recovery_keys.add(key)
-                self._buffered_ohlc_by_key.pop(key, None)
-            raise
+        if not bars:
+            query: dict[str, Any] = {
+                "symbol": key.symbol,
+                "resolution": resolution,
+            }
+            if start is not None:
+                query["from"] = int(start.timestamp())
+            if end is not None:
+                query["to"] = int(end.timestamp())
+
+            try:
+                status, body = self._rest_client.get_ohlc(
+                    bar_type=self._config.historical_bar_type,
+                    query=query,
+                    dry_run=False,
+                )
+                if status != 200:
+                    raise ValueError(
+                        "DNSE get_ohlc failed with "
+                        f"status={status}, symbol={query['symbol']}, "
+                        f"resolution={resolution}, body={body}",
+                    )
+
+                bars = dnse_ohlc_body_to_nautilus_bars(
+                    body=body,
+                    symbol=query["symbol"],
+                    resolution=resolution,
+                    venue=self._config.venue,
+                    price_precision=self._config.price_precision,
+                    volume_precision=self._config.volume_precision,
+                    timezone_name=self._config.timezone_name,
+                    working_dates=self._market_working_dates,
+                    drop_invalid_trading_days=self._config.drop_weekend_bars,
+                )
+            except Exception:
+                if key in self._recovering_keys:
+                    self._failed_recovery_keys.add(key)
+                    self._buffered_ohlc_by_key.pop(key, None)
+                raise
+
+        if bars and bars[0].bar_type != request.bar_type:
+            bars = [
+                Bar(
+                    request.bar_type,
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.ts_event,
+                    bar.ts_init,
+                )
+                for bar in bars
+            ]
+
+        self._handle_bars(
+            request.bar_type,
+            bars,
+            correlation_id=request.id,
+            start=request.start,
+            end=request.end,
+            params=request.params,
+        )
+        self._log.info(f"Served {len(bars)} bars from {source} for {request.bar_type}")
 
         if key in self._recovering_keys:
             self._complete_bar_recovery(key, bars)
