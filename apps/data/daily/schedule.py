@@ -22,8 +22,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 DEFAULT_CONFIG = HERE / "config" / "pipeline.json"
 LABEL = "io.quant-core.daily-data-etl"
-RUN_HOUR = 17  # after the VN close (14:45) so the day's bars are complete
-RUN_MINUTE = 30
+RUN_HOUR = 16  # after the VN close (14:45) so the day's bars are complete
+RUN_MINUTE = 0
 
 
 def main() -> None:
@@ -33,6 +33,7 @@ def main() -> None:
         type=Path,
         default=Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist",
     )
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
 
@@ -48,6 +49,7 @@ def main() -> None:
         config_path=args.config.resolve(),
     )
     args.launch_agent.parent.mkdir(parents=True, exist_ok=True)
+    (ROOT / "data" / "logs").mkdir(parents=True, exist_ok=True)
     args.launch_agent.write_bytes(plistlib.dumps(payload))
     _unload(args.launch_agent)
     _load(args.launch_agent)
@@ -72,7 +74,10 @@ def _launch_agent(
         "StartCalendarInterval": {
             "Hour": RUN_HOUR,
             "Minute": RUN_MINUTE,
-            "Weekday": [1, 2, 3, 4, 5],  # Mon-Fri (launchd 1=Sunday..7=Saturday)
+            # Mon-Fri only (launchd 1=Sunday..7=Saturday): on non-trading days
+            # DNSE returns no bars and the Mirae fallback has no payload, which
+            # would fail the run and spam alerts every weekend.
+            "Weekday": [1, 2, 3, 4, 5],
         },
         "WorkingDirectory": str(ROOT),
         "StandardOutPath": str(ROOT / "data" / "logs" / "daily-etl.out.log"),
