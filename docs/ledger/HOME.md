@@ -78,6 +78,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-011](observations/OBS-011-canonical-map-binding-nan.md) - canonical_map_py binding rejects warmup NaN the Rust core sanitizes; orchestrator mirrors sanitize_scores on the Python side (parity contract for milestone 1).
 - [OBS-012](observations/OBS-012-stale-pipeline-config-path.md) - daily ETL top-level config still pointed at pre-restructure `applications/` paths; would have crashed the first LaunchAgent 16:00 run, fixed to `apps/`.
 - [OBS-013](observations/OBS-013-silent-alert-failure-gaps.md) - two silent-failure gaps: bootstrap crashes alerted nothing, undeliverable alerts were swallowed with exit 0; closed by DEC-012.
+- [OBS-014](observations/OBS-014-daily-force-close-bug.md) - bridge force-closed the position every day at 14:00 instead of only on the contract expiry day; fixed by DEC-013 expiry semantics.
 
 
 ### Reconciliations
@@ -103,6 +104,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-010](decisions/DEC-010-commit-convention.md) - commit messages follow conventional commits `<type>(<scope>): <imperative summary>` with fixed type and scope vocabulary; amend/squash pre-push only.
 - [DEC-011](decisions/DEC-011-telegram-channel-separation.md) - two Telegram alert channels (DATA_/TRADING_ bot pairs) superseding the shared single pair; no hidden fallback.
 - [DEC-012](decisions/DEC-012-alert-coverage-wave-a.md) - alert coverage wave A: unified HTML alert format, bootstrap failure alerts, fail-loud ETL entrypoint, heartbeat status file + watcher LaunchAgent; baselines deferred to wave B.
+- [DEC-013](decisions/DEC-013-milestone-1-live-corrections.md) - milestone-1 live corrections: expiry-day force-close semantics, VN session windows, warmup from the research catalog, per-bar decision log + risk transition log, Redis state persistence.
 
 
 
@@ -118,6 +120,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [TST-007](tests/TST-007-milestone-1-wiring-contract-tests.md) - milestone-1 wiring contract tests: portfolio orchestrator (8), bridge strategy (23), risk overlay (24) against STG-1/5/6/7 and DEC-006/008.
 - [TST-008](tests/TST-008-data-fallback-and-alert-tests.md) - data fallback and alert tests: daily orchestrator semantics (10) and Telegram transport failure safety (4) per DEC-009.
 - [TST-009](tests/TST-009-alert-coverage-wave-a.md) - alert coverage wave A contract tests: unified format, bootstrap guard, fail-loud entrypoint, heartbeat lifecycle, HTML transport per DEC-012.
+- [TST-010](tests/TST-010-milestone-1-live-corrections.md) - milestone-1 live corrections contract tests: expiry gating, session windows, decision log, catalog warmup, risk transition log per DEC-013.
 
 ## Related notes
 
