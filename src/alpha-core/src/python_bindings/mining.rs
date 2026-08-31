@@ -148,10 +148,123 @@ fn ga_best_expression_py(
     })
 }
 
+/// Breed the genetic algorithm from researcher-provided seed expressions and
+/// return the final population's DSL strings ranked by fitness (best first).
+///
+/// Unlike [`ga_best_expression_py`], the initial population is bred from the
+/// given seeds (WorldQuant-style: only evaluation-passing seeds enter
+/// mining, decision note DEC-017). Fitness is the same mean score x
+/// next-bar-return statistic; a custom fitness remains a Python-side GA
+/// loop (research module).
+///
+/// Raises:
+///     ValueError: If ``seeds`` is empty, an input column is empty or
+///     non-finite, ``population_size`` is 0, or a rate lies outside [0, 1].
+#[pyfunction]
+#[pyo3(signature = (seeds, close, volume, population_size, generations, seed, elite_count=None, tournament_size=None, crossover_rate=None, mutation_rate=None, max_tree_depth=None))]
+fn ga_breed_py(
+    py: Python<'_>,
+    seeds: Vec<String>,
+    close: Vec<f64>,
+    volume: Vec<f64>,
+    population_size: usize,
+    generations: usize,
+    seed: u64,
+    elite_count: Option<usize>,
+    tournament_size: Option<usize>,
+    crossover_rate: Option<f64>,
+    mutation_rate: Option<f64>,
+    max_tree_depth: Option<usize>,
+) -> PyResult<Vec<String>> {
+    if seeds.is_empty() {
+        return Err(PyValueError::new_err("`seeds` must contain at least one expression"));
+    }
+    ensure_non_empty("close", &close)?;
+    ensure_all_finite("close", &close)?;
+    ensure_non_empty("volume", &volume)?;
+    ensure_all_finite("volume", &volume)?;
+    ensure_positive_usize("population_size", population_size)?;
+    if let Some(rate) = crossover_rate {
+        if !(0.0..=1.0).contains(&rate) {
+            return Err(PyValueError::new_err("crossover_rate must be in [0, 1]"));
+        }
+    }
+    if let Some(rate) = mutation_rate {
+        if !(0.0..=1.0).contains(&rate) {
+            return Err(PyValueError::new_err("mutation_rate must be in [0, 1]"));
+        }
+    }
+
+    py.detach(|| {
+        let seed_asts = seeds
+            .iter()
+            .enumerate()
+            .map(|(index, dsl)| {
+                parse(dsl)
+                    .map_err(|err| PyValueError::new_err(format!("seed at index {index}: {err}")))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut returns = vec![0.0; close.len()];
+        for t in 1..close.len() {
+            returns[t] = close[t] / close[t - 1] - 1.0;
+        }
+        let forward_returns = returns[1..].to_vec();
+        let data = {
+            let mut map = HashMap::new();
+            map.insert("close".to_string(), close);
+            map.insert("volume".to_string(), volume);
+            map
+        };
+        let config = GaConfig {
+            population_size,
+            elite_count: elite_count.unwrap_or(4).min(population_size),
+            tournament_size: tournament_size.unwrap_or(3),
+            crossover_rate: crossover_rate.unwrap_or(0.75),
+            mutation_rate: mutation_rate.unwrap_or(0.3),
+            max_generations: generations,
+            max_tree_depth: max_tree_depth.unwrap_or(6),
+        };
+        let evaluate = |population: &[Individual]| {
+            population
+                .iter()
+                .map(|individual| {
+                    let ast = match parse(&individual.dsl_string) {
+                        Ok(ast) => ast,
+                        Err(_) => return f64::NEG_INFINITY,
+                    };
+                    let dag = build_dag(std::slice::from_ref(&ast));
+                    let rows = execute_batch(&dag, &data, &dag.roots);
+                    let n = rows[0].len().min(forward_returns.len());
+                    let mut total = 0.0;
+                    let mut count = 0usize;
+                    for t in 0..n {
+                        if rows[0][t].is_finite() && forward_returns[t].is_finite() {
+                            total += rows[0][t] * forward_returns[t];
+                            count += 1;
+                        }
+                    }
+                    if count == 0 {
+                        -1.0
+                    } else {
+                        total / count as f64
+                    }
+                })
+                .collect::<Vec<f64>>()
+        };
+        let final_population =
+            crate::strategies::mining::run_ga(&seed_asts, &config, evaluate, &mut XorShift::new(seed));
+        Ok(final_population
+            .into_iter()
+            .map(|individual| individual.dsl_string)
+            .collect())
+    })
+}
+
 /// Register Component 0 bindings onto the extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_expression_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_batch_py, m)?)?;
     m.add_function(wrap_pyfunction!(ga_best_expression_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ga_breed_py, m)?)?;
     Ok(())
 }
