@@ -79,6 +79,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-012](observations/OBS-012-stale-pipeline-config-path.md) - daily ETL top-level config still pointed at pre-restructure `applications/` paths; would have crashed the first LaunchAgent 16:00 run, fixed to `apps/`.
 - [OBS-013](observations/OBS-013-silent-alert-failure-gaps.md) - two silent-failure gaps: bootstrap crashes alerted nothing, undeliverable alerts were swallowed with exit 0; closed by DEC-012.
 - [OBS-014](observations/OBS-014-daily-force-close-bug.md) - bridge force-closed the position every day at 14:00 instead of only on the contract expiry day; fixed by DEC-013 expiry semantics.
+- [OBS-015](observations/OBS-015-north-star-approval-breach.md) - decision-authority breach: north-star charter applied with revised wording before a second approval round; mitigation: content re-presented, no commit, note open until owner decides.
 
 
 ### Reconciliations
@@ -105,6 +106,10 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-011](decisions/DEC-011-telegram-channel-separation.md) - two Telegram alert channels (DATA_/TRADING_ bot pairs) superseding the shared single pair; no hidden fallback.
 - [DEC-012](decisions/DEC-012-alert-coverage-wave-a.md) - alert coverage wave A: unified HTML alert format, bootstrap failure alerts, fail-loud ETL entrypoint, heartbeat status file + watcher LaunchAgent; baselines deferred to wave B.
 - [DEC-013](decisions/DEC-013-milestone-1-live-corrections.md) - milestone-1 live corrections: expiry-day force-close semantics, VN session windows, warmup from the research catalog, per-bar decision log + risk transition log, Redis state persistence.
+- [DEC-014](decisions/DEC-014-project-north-star.md) - project north star: the product is a replicable systematic-trading framework across assets and strategy styles, not one instrument; five correctness invariants; anchor rule for agents; supersedes milestone-only goal framings.
+- [DEC-015](decisions/DEC-015-agents-md-instruction-style-v2.md) - AGENTS.md instruction style v2: plain Purpose section at end-state level plus Ground-truth authority order and discovery rule; replaces the north-star section presentation; DEC-014 unchanged.
+- [DEC-016](decisions/DEC-016-purpose-loop-vocabulary.md) - Purpose wording corrected to loop vocabulary ("continuous loop ... recalibrate", not "pipeline that turns ... into"); supersedes the DEC-015 section-3 quote.
+- [DEC-017](decisions/DEC-017-quant-api-role-modules.md) - quant_api role-scoped Python API: one module per practitioner role, core with catalog/artifacts/pool/registries, additive ga_breed_py binding; sizing owned by the risk role; Nautilus backtest reused for execution.
 
 
 
@@ -121,6 +126,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [TST-008](tests/TST-008-data-fallback-and-alert-tests.md) - data fallback and alert tests: daily orchestrator semantics (10) and Telegram transport failure safety (4) per DEC-009.
 - [TST-009](tests/TST-009-alert-coverage-wave-a.md) - alert coverage wave A contract tests: unified format, bootstrap guard, fail-loud entrypoint, heartbeat lifecycle, HTML transport per DEC-012.
 - [TST-010](tests/TST-010-milestone-1-live-corrections.md) - milestone-1 live corrections contract tests: expiry gating, session windows, decision log, catalog warmup, risk transition log per DEC-013.
+- [TST-011](tests/TST-011-quant-api-contract-tests.md) - quant_api role-module contract tests: 48 tests + integration chain over the four role modules and shared core per DEC-017.
 
 ## Related notes
 
