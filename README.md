@@ -1,6 +1,6 @@
 # quantcore
 
-quantcore is a production-grade systematic-trading framework for VN30F1M intraday futures, with a Rust engine exposed to Python via PyO3; every pipeline stage is callable from Python notebooks.
+quantcore is a production-grade systematic-trading framework for VN30F1M intraday futures, with a Rust engine exposed to Python via PyO3; every component is callable from Python notebooks.
 
 ## Requirements
 
