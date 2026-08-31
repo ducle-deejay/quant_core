@@ -37,6 +37,7 @@ from .alpha_core import (
     # Component 0 - mining
     execute_batch_py,
     ga_best_expression_py,
+    ga_breed_py,
     validate_expression_py,
     # Components 3-5 - portfolio construction and sizing
     composite_score_py,
@@ -61,6 +62,7 @@ __all__ = [
     "drawdown_multiplier_py",
     "execute_batch_py",
     "ga_best_expression_py",
+    "ga_breed_py",
     "ic_ladder_py",
     "inverse_vol_combine_py",
     "max_drawdown_py",
