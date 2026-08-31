@@ -2,6 +2,25 @@
 
 Routing rules for any agent working in this repository (Claude Code, Codex, DSH, or others). Read once at session start; follow without re-deriving.
 
+## Purpose
+
+> Owner-authored goal slot: replace the draft below with your wording when you have it.
+
+This repo builds a systematic trading framework: a continuous loop in which market data feeds tested strategies that are executed and whose live results recalibrate the system itself - designed to be replicated across markets and strategy styles, not tied to one instrument. The current build targets VN30F1M (Vietnamese index futures) intraday trading and sits at the paper-trading phase; the goal is the framework itself, not the current instrument or any single milestone.
+
+When asked what the project is, what it is for, or what its goal is, answer at this end-state level. Milestones, sessions, and handoff notes describe where the project is now, not what it is for.
+
+## Ground truth - verify before you trust
+
+Statements about this project have an authority order; the first match you find is not necessarily the answer:
+
+1. `docs/enhanced/` - frozen design canon. States intent, formulas, contracts; never changes. Design and goal questions end here.
+2. `docs/ledger/` - living records (observations, reconciliations, decisions, test mappings). Notes are claims to read, not ground truth: they can contradict the canon or each other, and old notes may be superseded.
+3. `docs/handoffs/` - session snapshots: current milestone, pending work, system state. Volatile by design; never a source for what the goal is.
+4. Code - what the system actually does. Final arbiter for behaviour, not for intent.
+
+Discovery rule: if your task depends on the goal, the design, or a contract, and you have not read the relevant canon document, you have not finished exploring. Do not stop at the first plausible-looking answer - a milestone table, a handoff section, or a README line is a snapshot, not ground truth. If canon and code disagree, say so explicitly and record it per the rules below; do not silently pick a side. If a question's expected answer level is ambiguous (goal vs current state), state which level you are answering at.
+
 ## Project map
 
 - `docs/enhanced/` - **frozen design canon**. States intent, formulas, contracts. NEVER edit, never delete. There is no exception for agents.

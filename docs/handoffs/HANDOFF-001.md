@@ -17,7 +17,9 @@ Branch: `feat/nautilus-live-wiring` (HEAD: clean tree, all work committed).
 - Tiến độ: cập nhật Progress tracker (section 2) khi trạng thái đổi; tạo HANDOFF mới khi có thay đổi vật chất.
 - Owner quyết định ưu tiên; agent hỏi khi mơ hồ thay vì đoán ý.
 
-**Overarching goal**: run quant_core in production per the frozen lifecycle
+**Ultimate goal (north star, decision note DEC-014)**: a replicable, production-grade systematic-trading framework across assets and strategy styles - the framework is the product, VN30F1M is the current instantiation. Five invariants + anchor rule: top of AGENTS.md.
+
+**Current instantiation path**: run quant_core in production per the frozen lifecycle
 (`docs/enhanced/framework-lifecycle.md`) - Phase 4 (paper execution) then
 Phase 5 (live small + risk minimum). Components 0-5 (research engine) are
 done; Components 6-7 infrastructure is wired; the remaining work is
@@ -71,6 +73,7 @@ automatically:
 | Acceptance checklist discussion | DONE | 6-layer checklist finalized 2026-08-30: parity (data, signal) vs engine audit (execution, position, cost, risk); owner-approved wording |
 | Milestone-1 live corrections (DEC-013) | DONE | expiry-day force-close + 09-03 fake date, session windows, catalog warmup (7200/8000), decision log + risk transition log, Redis installed + backend verified (wheel has RedisCacheDatabase - no source build) |
 | Acceptance implementation (decision log + acceptance.py) | DONE | bridge decision log + risk transition log + acceptance.py 6 checks + paper wiring (streaming/Redis/save-load); 178 tests green; runbook ready |
+| North-star charter (AGENTS.md + DEC-014) | DONE | 2026-08-31: ultimate goal generalised to replicable framework across assets/strategy styles; five invariants + anchor rule; handoff protocol updated |
 | Cost calibration (7->1) | PENDING | after M1 |
 | Live preparation (Phase 5) | FUTURE | C7 already live-standard |
 
@@ -112,6 +115,8 @@ automatically:
 ## 5. Session start protocol (self-check before trusting this note)
 
 ```sh
+# 0. Grounding check: read AGENTS.md Purpose + Ground truth sections; verify
+#    goal statements against docs/enhanced/ before trusting any snapshot.
 git status --short                     # expect empty
 git log --oneline -4                   # expect c0efe02 ... (DEC-010 format)
 python3 scripts/sweep_ledger.py        # expect SWEEP OK, 0 drift
