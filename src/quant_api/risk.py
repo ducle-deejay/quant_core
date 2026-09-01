@@ -98,16 +98,21 @@ def _trigger_matrix_policy(policy_input: dict) -> dict:
 
     if state.status == "HALTED":
         allowed = 0  # flatten
+        reason = state.reason
     elif state.status == "REDUCING":
         allowed = min(abs(current), ledger.config.max_contracts) * (1 if current >= 0 else -1)
+        reason = state.reason
     else:
-        allowed_ok, reason = ledger.gate(target, current)
+        allowed_ok, gate_reason = ledger.gate(target, current)
         allowed = target if allowed_ok else current
+        # Surface gate denials (exceeds-max-contracts / reducing-only) so
+        # trigger_counts reflects every intervention, not just status changes.
+        reason = gate_reason or state.reason
 
     delta = allowed - current
     if delta != 0:
         ledger.record_fill(price, delta, ts)
-    return {"status": state.status, "reason": state.reason, "allowed_position": allowed}
+    return {"status": state.status, "reason": reason, "allowed_position": allowed}
 
 
 risk_policies.register(
@@ -183,18 +188,26 @@ def _drawdowns_from_pnl(pnl: list[float], close: list[float], capital_vnd: float
 
 
 def _to_contracts(z_series: list[float], close: list[float], cfg: RiskBacktestConfig) -> list[int]:
-    """DEC-008 conversion: L_max = floor(capital*safety/(margin*price*100k)),
-    contracts = round(z/cap*L_max) clipped to +/-max_contracts."""
+    """DEC-008 conversion with the CANON no-trade band (Component 1 step C:
+    dead-zone WITH hysteresis - hold the previous position while
+    |new - prev| <= band; canonical_map applies the same rule in z units,
+    this mirrors it in contract units). L_max =
+    floor(capital*safety/(margin*price*100k)); contracts =
+    round(z/cap*L_max) clipped to +/-max_contracts."""
     out: list[int] = []
+    prev = 0
     for z, price in zip(z_series, close):
         if not math.isfinite(z) or price <= 0.0:
-            out.append(0)
+            out.append(prev)
             continue
         l_max = math.floor(
             cfg.capital_vnd * cfg.safety_factor / (cfg.margin_rate * price * 100_000.0)
         )
-        raw = z / cfg.harness.cap * l_max
-        out.append(max(-cfg.max_contracts, min(cfg.max_contracts, round(raw))))
+        band_c = max(1, round(cfg.harness.band / cfg.harness.cap * l_max))
+        raw = round(z / cfg.harness.cap * l_max)
+        if abs(raw - prev) > band_c:
+            prev = max(-cfg.max_contracts, min(cfg.max_contracts, raw))
+        out.append(prev)
     return out
 
 
@@ -229,6 +242,11 @@ def backtest_portfolio(
     cfg = config or RiskBacktestConfig()
     eff_data = data or cfg.data or DataConfig()
     h = cfg.harness
+    try:
+        sizing_methods.get(sizing)
+        risk_policies.get(policy)
+    except KeyError as exc:
+        raise ValueError(str(exc)) from None
 
     df = load_bars(eff_data)
     close, _ = close_volume(df)
@@ -243,81 +261,105 @@ def backtest_portfolio(
     returns = _close_returns(close)
     vol_est = _rolling_vol(close, 20, h.bars_per_day)
 
-    # Sizing -> z, then raw contracts ("before" = sizing only).
+    # Sizing pass 1 (no overlay): position proxy for the drawdown estimate.
     z = sizing_methods.call(sizing, list(composite), vol_est, cfg.vol_target, None, cfg.vol_floor)
     if len(z) != n:
         raise ValueError(f"sizing method {sizing!r} returned {len(z)} values (expected {n})")
-    before = _to_contracts(z, close, cfg)
-    before_pnl = alpha_core.compute_pnl_py(before, returns, h.cost_per_side, h.bars_per_day).net
-    dd = _drawdowns_from_pnl(list(before_pnl), close, cfg.capital_vnd)
+    proxy = _to_contracts(z, close, cfg)
+    proxy_pnl = alpha_core.compute_pnl_py(proxy, returns, h.cost_per_side, h.bars_per_day).net
+    dd = _drawdowns_from_pnl(list(proxy_pnl), close, cfg.capital_vnd)
 
-    # Re-apply sizing WITH drawdowns (the overlay needs the PnL proxy).
+    # Sizing pass 2 WITH the drawdown overlay: the full sizing stack is
+    # "before" (what the portfolio would do, no risk policy).
     z2 = sizing_methods.call(
         sizing, list(composite), vol_est, cfg.vol_target, dd, cfg.vol_floor
     )
-    target_series = _to_contracts(z2, close, cfg)
+    before = _to_contracts(z2, close, cfg)
+    before_pnl = alpha_core.compute_pnl_py(before, returns, h.cost_per_side, h.bars_per_day).net
 
-    # Policy pass ("after").
+    # Policy pass ("after"): risk lets a subset of the sized target through.
     ledger = RiskLedger(cfg.risk)
     after: list[int] = []
     interventions: list[dict] = []
+    policy_reasons: Counter = Counter()
     prev_status = "ACTIVE"
     for t in range(n):
         result = risk_policies.call(
             policy,
             {
-                "ledger": ledger,
+                # Documented custom-policy keys (DEC-017 contract):
                 "ts": ts[t],
+                "position": ledger.position,
+                "session_pnl": ledger.realized_pnl_vnd + ledger.marked_pnl_vnd,
+                "target": before[t],
+                "config": asdict(cfg.risk),
+                # Internal keys used by the trigger_matrix policy:
+                "ledger": ledger,
                 "price": close[t],
-                "target": target_series[t],
-                "session_pnl": 0.0,
             },
         )
+        if result["reason"]:
+            policy_reasons[result["reason"]] += 1
         if result["status"] != prev_status:
             interventions.append(
                 {
                     "ts": ts[t].isoformat(),
                     "previous": prev_status,
                     "current": result["status"],
-                    "reason": result["reason"],
+                    "reason": result["reason"] or "recovered",
                 }
             )
             prev_status = result["status"]
         after.append(result["allowed_position"])
-    if interventions and interventions[-1]["reason"] == "":
-        interventions[-1]["reason"] = "startup" if len(interventions) == 1 else ""
 
     after_pnl = alpha_core.compute_pnl_py(after, returns, h.cost_per_side, h.bars_per_day).net
 
-    # Risk-process metrics.
+    # Risk-process metrics (practitioner-review fixes):
+    # - tracking error = |after - before| (policy-driven deviation),
+    # - trigger counts = EVERY policy reason (status changes AND gate
+    #   denials like exceeds-max-contracts / reducing-only),
+    # - intervention cost = actual fill deltas of the after series
+    #   (sum |after[t] - after[t-1]| over changes, priced at cost_per_side),
+    # - max_abs_position per side.
     tracking = [abs(a - b) for a, b in zip(after, before)]
-    triggers = Counter(i["reason"] for i in interventions if i["reason"])
-    policy_cost = sum(
-        abs(a - b) * h.cost_per_side * close[t] * 100_000.0
-        for t, (a, b) in enumerate(zip(after, before))
+    fill_deltas = [
+        abs(after[t] - after[t - 1])
+        for t in range(1, len(after))
+        if after[t] != after[t - 1]
+    ]
+    policy_cost = (
+        sum(d * h.cost_per_side * close[t] * 100_000.0 for d, t in zip(fill_deltas, range(1, len(after))))
     )
 
-    def _side(pnl_series) -> dict:
+    def _side(pnl_series, series, is_after: bool) -> dict:
         return {
             "performance": _performance(list(pnl_series), h.bars_per_day),
             "risk_process": {
-                "n_interventions": len(interventions),
-                "intervention_cost_estimate_vnd": policy_cost,
-                "mean_abs_tracking_error": float(np.mean(tracking)) if tracking else 0.0,
-                "max_abs_position": max((abs(p) for p in after), default=0),
-                "trigger_counts": dict(triggers),
+                "n_interventions": len(interventions) if is_after else 0,
+                "intervention_cost_estimate_vnd": policy_cost if is_after else 0.0,
+                "mean_abs_tracking_error": (
+                    float(np.mean(tracking)) if (is_after and tracking) else 0.0
+                ),
+                "max_abs_position": max((abs(p) for p in series), default=0),
+                "trigger_counts": dict(policy_reasons) if is_after else {},
             },
         }
 
     report = {
-        "before": _side(before_pnl),
-        "after": _side(after_pnl),
+        "before": _side(before_pnl, before, is_after=False),
+        "after": _side(after_pnl, after, is_after=True),
         "interventions": interventions,
         "metrics_before_after_diff": {
-            "net_sharpe": _side(after_pnl)["performance"]["net_sharpe"]
-            - _side(before_pnl)["performance"]["net_sharpe"],
-            "max_drawdown": _side(after_pnl)["performance"]["max_drawdown"]
-            - _side(before_pnl)["performance"]["max_drawdown"],
+            "net_sharpe": _side(after_pnl, after, True)["performance"]["net_sharpe"]
+            - _side(before_pnl, before, False)["performance"]["net_sharpe"],
+            "max_drawdown": _side(after_pnl, after, True)["performance"]["max_drawdown"]
+            - _side(before_pnl, before, False)["performance"]["max_drawdown"],
+        },
+        "units": {
+            "performance": "canonical PnL units (position x return per bar);"
+            " net_sharpe/max_drawdown are scale-free ratios",
+            "risk_process": "VND for costs; contracts for positions; counts for"
+            " interventions/triggers",
         },
         "provenance": {
             "sizing": sizing,
@@ -334,41 +376,71 @@ def divergence_gauges(expected: dict, live: dict) -> dict:
     """Component 7 - Risk Overlay and Monitoring gauges (section 3.4).
 
     Each gauge is computed only from the inputs present; missing inputs
-    yield None with a reason. First-pass bands (documented heuristics):
-    warning when |value - expected| > 0.5 * expected, critical when
-    > 1.0 * expected (absolute bands when expected is 0).
+    yield None with a reason. Bands (practitioner-review redesign):
+    gauge 1 uses standard-error bands (warning |v-e| > 2.5*se, critical
+    > 4*se, se = 1/sqrt(n)) so the monitor's noise floor tracks the
+    estimator's sampling noise; gauge 2 uses ratio bands vs the cost model;
+    gauge 3 treats the bound as an UPPER LIMIT (healthy = value <= bound);
+    gauge 4 is a LOWER-bound fill rate (0 fills = critical).
     """
     gauges: dict[str, dict] = {}
 
-    # Gauge 1: rolling IC vs spec expectation.
+    # Gauge 1: rolling PREDICTIVE IC vs spec expectation (spec-sheet IC is
+    # score_t vs forward returns t+1..t+h, per the engine ic_ladder; a
+    # contemporaneous correlation would false-critical healthy signals).
     score = live.get("score")
     returns = live.get("returns")
+    horizon = int(expected.get("ic_horizon", 1))
     if score is not None and returns is not None and len(score) == len(returns):
-        window = min(480, len(score))
-        x = np.asarray(score[-window:], dtype=float)
-        y = np.asarray(returns[-window:], dtype=float)
-        finite = np.isfinite(x) & np.isfinite(y)
-        if int(finite.sum()) >= 8:
-            rx = np.argsort(np.argsort(x[finite])).astype(float)
-            ry = np.argsort(np.argsort(y[finite])).astype(float)
-            rx -= rx.mean()
-            ry -= ry.mean()
-            denom = math.sqrt(float((rx * rx).sum() * (ry * ry).sum()))
-            value = float((rx * ry).sum()) / denom if denom else 0.0
-            exp = float(expected.get("spec_ic", 0.0))
-            gauges["gauge_1"] = _gauge("rolling IC", value, exp)
+        if len(score) - horizon < 8:
+            gauges["gauge_1"] = {
+                "value": None,
+                "status": "n/a",
+                "note": "series too short for the requested horizon",
+            }
         else:
-            gauges["gauge_1"] = {"value": None, "status": "n/a", "note": "too few finite pairs"}
+            # Window: at least 480 bars, growing with the series so longer
+            # samples reduce sampling noise (canon: multiple of holding
+            # period / 10 sessions).
+            window = min(len(score) - horizon, max(480, (len(score) - horizon) // 4))
+            x = np.asarray(score[-window:], dtype=float)
+            y = np.asarray(returns[-window + horizon :], dtype=float)
+            x = x[: len(y)]
+            finite = np.isfinite(x) & np.isfinite(y)
+            if int(finite.sum()) >= 8:
+                rx = np.argsort(np.argsort(x[finite])).astype(float)
+                ry = np.argsort(np.argsort(y[finite])).astype(float)
+                rx -= rx.mean()
+                ry -= ry.mean()
+                denom = math.sqrt(float((rx * rx).sum() * (ry * ry).sum()))
+                value = float((rx * ry).sum()) / denom if denom else 0.0
+                exp = float(expected.get("spec_ic", 0.0))
+                n = int(finite.sum())
+                se = 1.0 / math.sqrt(n) if n > 0 else 1.0
+                diff = abs(value - exp)
+                status = "ok" if diff <= 2.5 * se else ("warning" if diff <= 4.0 * se else "critical")
+                gauges["gauge_1"] = {
+                    "value": value,
+                    "expected": exp,
+                    "status": status,
+                    "note": f"se={se:.4f} (n={n})",
+                }
+            else:
+                gauges["gauge_1"] = {"value": None, "status": "n/a", "note": "too few finite pairs"}
     else:
         gauges["gauge_1"] = {"value": None, "status": "n/a", "note": "score/returns missing"}
 
-    # Gauge 2: implementation shortfall vs cost model.
+    # Gauge 2: implementation shortfall vs cost model, in basis points of the
+    # reference price (shortfall = (fill - mid) * side / mid * 10000).
     fills = live.get("fills")
     if fills:
         shortfalls = [
-            (float(f["price"]) - float(f["decision_mid"])) * (1 if f["side"] > 0 else -1) * 10_000.0
+            (float(f["price"]) - float(f["decision_mid"]))
+            / float(f["decision_mid"])
+            * (1 if f["side"] > 0 else -1)
+            * 10_000.0
             for f in fills
-            if "decision_mid" in f
+            if f.get("decision_mid")
         ]
         if shortfalls:
             value = float(np.mean(shortfalls))
@@ -380,28 +452,44 @@ def divergence_gauges(expected: dict, live: dict) -> dict:
     else:
         gauges["gauge_2"] = {"value": None, "status": "n/a", "note": "fills missing"}
 
-    # Gauge 3: position tracking error vs design bound.
+    # Gauge 3: position tracking error vs design bound (UPPER limit).
     current = live.get("current_positions")
     target = live.get("target_positions")
     if current is not None and target is not None and len(current) == len(target):
         value = float(np.mean([abs(c - t) for c, t in zip(current, target)]))
-        gauges["gauge_3"] = _gauge(
-            "position tracking error (contracts)", value, float(expected.get("tracking_error_bound", 1.0))
-        )
+        bound = float(expected.get("tracking_error_bound", 1.0))
+        status = "ok" if value <= bound else ("warning" if value <= 2.0 * bound else "critical")
+        gauges["gauge_3"] = {"value": value, "expected": bound, "status": status, "note": "bound is an upper limit"}
     else:
         gauges["gauge_3"] = {"value": None, "status": "n/a", "note": "position series missing"}
 
-    # Gauge 4: fill rate / rejects / latency / feed gaps.
+    # Gauge 4: fill rate (LOWER limit): 0 fills = critical operational
+    # failure; below half the expected rate = critical.
     orders = live.get("orders")
     feed_gaps = int(live.get("feed_gaps", 0))
     if orders:
         n_orders = len(orders)
         n_fills = int(live.get("n_fills", sum(1 for f in fills or [])))
-        value = n_fills / n_orders if n_orders else None
         exp = float(expected.get("fill_rate_expected", 0.95))
-        g4 = _gauge("fill rate", value, exp)
-        g4["feed_gaps"] = feed_gaps
-        gauges["gauge_4"] = g4
+        if n_orders == 0:
+            gauges["gauge_4"] = {"value": None, "status": "n/a", "note": "no orders"}
+        else:
+            value = n_fills / n_orders
+            if value <= 0.0:
+                status = "critical"
+            elif value < 0.5 * exp:
+                status = "critical"
+            elif value < exp:
+                status = "warning"
+            else:
+                status = "ok"
+            gauges["gauge_4"] = {
+                "value": value,
+                "expected": exp,
+                "status": status,
+                "note": "fill rate is a lower limit",
+                "feed_gaps": feed_gaps,
+            }
     else:
         gauges["gauge_4"] = {"value": None, "status": "n/a", "note": "orders missing"}
 

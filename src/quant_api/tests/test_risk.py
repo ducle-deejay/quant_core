@@ -169,6 +169,124 @@ def test_build_overlay_config_saves() -> None:
     assert saved == payload
 
 
+def test_backtest_portfolio_before_after_risk_process_distinct() -> None:
+    """UAT fix: the sizing-only side must not carry the after-pass metrics."""
+    import math as m
+    composite = [m.sin(i / 60.0) for i in range(NBARS)]
+    cfg = RiskBacktestConfig(harness=HarnessParams(cost_per_side=0.0001), data=WINDOW)
+    report = backtest_portfolio(composite, data=WINDOW, config=cfg)
+    before_rp = report["before"]["risk_process"]
+    after_rp = report["after"]["risk_process"]
+    assert before_rp["n_interventions"] == 0
+    assert before_rp["intervention_cost_estimate_vnd"] == 0.0
+    assert before_rp["trigger_counts"] == {}
+    assert after_rp["n_interventions"] >= before_rp["n_interventions"]
+
+
+def test_custom_policy_documented_contract_keys() -> None:
+    """UAT fix: custom policies written per the documented contract
+    {ts, position, session_pnl, target, config} must not KeyError."""
+    import math as m
+
+    def doc_policy(policy_input: dict) -> dict:
+        assert "position" in policy_input and "target" in policy_input
+        assert "config" in policy_input and "ts" in policy_input
+        return {"status": "ACTIVE", "reason": "", "allowed_position": policy_input["target"]}
+
+    risk_policies.register("doc_probe", doc_policy, source="python", description="uat", replace=True)
+    composite = [m.sin(i / 60.0) for i in range(NBARS)]
+    cfg = RiskBacktestConfig(harness=HarnessParams(cost_per_side=0.0001), data=WINDOW)
+    report = backtest_portfolio(composite, data=WINDOW, policy="doc_probe", config=cfg)
+    assert report["after"]["risk_process"]["n_interventions"] == 0
+    assert report["after"]["performance"]["net_sharpe"] == report["before"]["performance"]["net_sharpe"]
+
+
+def test_no_trade_band_contracts() -> None:
+    """UAT fix: |z| below harness.band -> 0 contracts (no churn)."""
+    from quant_api.risk import _to_contracts
+
+    cfg = RiskBacktestConfig()
+    out = _to_contracts([0.1, 0.5, 2.0], [1000.0, 1000.0, 1000.0], cfg)
+    assert out[0] == 0  # |z|=0.1 < band=0.35
+    assert out[2] > 0
+
+
+def test_gauge1_predictive_alignment() -> None:
+    """UAT fix: gauge 1 pairs score_t with forward returns (predictive IC),
+    not same-bar returns."""
+    n = 200
+    rng = [((i * 2654435761) % (2**31)) / (2**31) for i in range(n)]
+    score = rng
+    returns = [0.0] + rng[:-1]  # returns[t] = score[t-1]: score predicts next bar
+    out = divergence_gauges({"spec_ic": 0.05}, {"score": score, "returns": returns})
+    value = out["gauges"]["gauge_1"]["value"]
+    assert value is not None and abs(value - 1.0) < 1e-6, f"predictive IC should be ~1, got {value}"
+
+
+def test_drawdown_boundary_exact() -> None:
+    """UAT fix: exact band boundaries roll to the band above; the kill line
+    fires at exactly 20% (canon CON-CB-DRAWDOWN-OVERLAY reproducible rule)."""
+    import alpha_core
+
+    assert alpha_core.drawdown_multiplier_py([0.10]) == [0.5]
+    assert alpha_core.drawdown_multiplier_py([0.20]) == [0.0]
+    assert alpha_core.drawdown_multiplier_py([0.05]) == [0.75]
+    assert alpha_core.drawdown_multiplier_py([0.15]) == [0.25]
+
+
+def test_before_max_position_nonzero() -> None:
+    """UAT fix: the before side reports its own max |position|, not 0."""
+    import math as m
+    composite = [2.0 * m.sin(i / 60.0) for i in range(NBARS)]
+    cfg = RiskBacktestConfig(harness=HarnessParams(cost_per_side=0.0001), data=WINDOW)
+    report = backtest_portfolio(composite, data=WINDOW, config=cfg)
+    assert report["before"]["risk_process"]["max_abs_position"] > 0
+
+
+def test_gate_denials_surfaced() -> None:
+    """UAT fix: exceeds-max-contracts denials appear in trigger_counts."""
+    import math as m
+    composite = [5.0 * m.sin(i / 30.0) for i in range(NBARS)]
+    cfg = RiskBacktestConfig(
+        harness=HarnessParams(cost_per_side=0.0001),
+        risk=RiskConfig(max_contracts=2),
+        data=WINDOW,
+    )
+    report = backtest_portfolio(composite, data=WINDOW, config=cfg)
+    counts = report["after"]["risk_process"]["trigger_counts"]
+    assert counts.get("exceeds-max-contracts", 0) > 0
+
+
+def test_gauge2_units_basis_points() -> None:
+    """UAT fix: gauge 2 shortfall is in bp of the reference price, so healthy
+    fills land near the cost model instead of 1700."""
+    fills = [
+        {"price": 1500.1718, "decision_mid": 1500.0, "side": 1},
+        {"price": 1499.8282, "decision_mid": 1500.0, "side": -1},
+    ]
+    out = divergence_gauges({"cost_model_bps": 2.294}, {"fills": fills})
+    v = out["gauges"]["gauge_2"]["value"]
+    assert v is not None and v < 10.0, f"shortfall should be ~1.15 bp, got {v}"
+
+
+def test_gauge3_bound_upper_limit() -> None:
+    """UAT fix: tracking error <= bound is healthy (bound is an upper limit)."""
+    out = divergence_gauges(
+        {"tracking_error_bound": 1.0},
+        {"current_positions": [1, 1, 1], "target_positions": [1, 1, 1]},
+    )
+    assert out["gauges"]["gauge_3"]["status"] == "ok"
+
+
+def test_gauge4_zero_fill_critical() -> None:
+    """UAT fix: zero fills with orders present = critical operational failure."""
+    out = divergence_gauges(
+        {"fill_rate_expected": 0.95},
+        {"orders": [{}] * 100, "n_fills": 0},
+    )
+    assert out["gauges"]["gauge_4"]["status"] == "critical"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

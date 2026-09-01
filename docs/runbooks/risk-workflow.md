@@ -12,7 +12,10 @@ Vocabulary: the risk role runs PORTFOLIO BACKTESTS, never "replays".
      engine defaults: vol_target, drawdown_overlay, vol_target_drawdown.
    - `risk_policies.register(name, fn)` - contract
      `fn(policy_input: dict) -> dict` returning
-     {"status", "reason", "allowed_position"}; default "trigger_matrix"
+     {"status", "reason", "allowed_position"}; policy_input carries the
+     documented keys {ts, position, session_pnl, target, config} (the
+     trigger_matrix default additionally receives the internal ledger/price
+     keys - custom policies must not rely on them); default "trigger_matrix"
      reuses the live RiskLedger (trading.risk.state).
 2. Backtest the model: `backtest_portfolio(composite, sizing=..., policy=...,
    config=...)` -> report with BEFORE (sizing only) and AFTER (policy
