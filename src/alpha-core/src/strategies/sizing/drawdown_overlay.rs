@@ -209,7 +209,11 @@ impl DrawdownLadder {
         }
         // Peak is strictly positive by construction and equity is below it,
         // so numerator and denominator are positive: result is never negative.
-        (self.equity_peak - current_equity) / self.equity_peak
+        // Snap to 12 decimals so equity inputs derived from decimal drawdowns
+        // (`1.0 - dd`) hit exact band boundaries instead of landing epsilon
+        // below them (0.10 -> 0.0999... would miss the band-above roll and
+        // the kill line would not fire at exactly 20%).
+        ((self.equity_peak - current_equity) / self.equity_peak * 1e12).round() / 1e12
     }
 }
 
