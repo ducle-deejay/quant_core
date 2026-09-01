@@ -123,19 +123,36 @@ fn ga_best_expression_py(
                     let dag = build_dag(std::slice::from_ref(&ast));
                     let rows = execute_batch(&dag, &data, &dag.roots);
                     let n = rows[0].len().min(forward_returns.len());
-                    let mut total = 0.0;
-                    let mut count = 0usize;
+                    // Scale-free fitness: z-score the score row before the
+                    // mean score x next-bar-return product, so the GA breeds
+                    // INFORMATION, not magnitude monsters (practitioner
+                    // review: raw fitness made ts_sum^2*close^3 products win).
+                    let mut xs: Vec<f64> = Vec::new();
+                    let mut ys: Vec<f64> = Vec::new();
                     for t in 0..n {
                         if rows[0][t].is_finite() && forward_returns[t].is_finite() {
-                            total += rows[0][t] * forward_returns[t];
-                            count += 1;
+                            xs.push(rows[0][t]);
+                            ys.push(forward_returns[t]);
                         }
                     }
-                    if count == 0 {
-                        -1.0
-                    } else {
-                        total / count as f64
+                    if xs.len() < 2 {
+                        return -1.0;
                     }
+                    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+                    let var = xs
+                        .iter()
+                        .map(|x| (x - mean) * (x - mean))
+                        .sum::<f64>()
+                        / xs.len() as f64;
+                    if var == 0.0 {
+                        return 0.0;
+                    }
+                    let std = var.sqrt();
+                    xs.iter()
+                        .zip(ys.iter())
+                        .map(|(x, y)| (x - mean) / std * y)
+                        .sum::<f64>()
+                        / xs.len() as f64
                 })
                 .collect::<Vec<f64>>()
         };
@@ -235,19 +252,36 @@ fn ga_breed_py(
                     let dag = build_dag(std::slice::from_ref(&ast));
                     let rows = execute_batch(&dag, &data, &dag.roots);
                     let n = rows[0].len().min(forward_returns.len());
-                    let mut total = 0.0;
-                    let mut count = 0usize;
+                    // Scale-free fitness: z-score the score row before the
+                    // mean score x next-bar-return product, so the GA breeds
+                    // INFORMATION, not magnitude monsters (practitioner
+                    // review: raw fitness made ts_sum^2*close^3 products win).
+                    let mut xs: Vec<f64> = Vec::new();
+                    let mut ys: Vec<f64> = Vec::new();
                     for t in 0..n {
                         if rows[0][t].is_finite() && forward_returns[t].is_finite() {
-                            total += rows[0][t] * forward_returns[t];
-                            count += 1;
+                            xs.push(rows[0][t]);
+                            ys.push(forward_returns[t]);
                         }
                     }
-                    if count == 0 {
-                        -1.0
-                    } else {
-                        total / count as f64
+                    if xs.len() < 2 {
+                        return -1.0;
                     }
+                    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+                    let var = xs
+                        .iter()
+                        .map(|x| (x - mean) * (x - mean))
+                        .sum::<f64>()
+                        / xs.len() as f64;
+                    if var == 0.0 {
+                        return 0.0;
+                    }
+                    let std = var.sqrt();
+                    xs.iter()
+                        .zip(ys.iter())
+                        .map(|(x, y)| (x - mean) / std * y)
+                        .sum::<f64>()
+                        / xs.len() as f64
                 })
                 .collect::<Vec<f64>>()
         };
