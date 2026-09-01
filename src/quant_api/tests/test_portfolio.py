@@ -77,12 +77,15 @@ def test_equal_weight_defaults_and_explicit() -> None:
     r = p.combine(scores, method="equal_weight")
     assert r["weights"] == {0: 0.5, 1: 0.5}
     assert r["provenance"] == {"method": "equal_weight", "source": "engine"}
-    assert all(abs(v - 2.0) < 1e-12 for v in r["composite"])
+    # Canon REC-009: weights are applied to STANDARDIZED rows.
+    std = p._standardize(scores)
+    expected = [0.5 * a + 0.5 * b for a, b in zip(*std)]
+    assert all(abs(a - b) < 1e-12 for a, b in zip(r["composite"], expected))
 
     r2 = p.combine(scores, method="equal_weight", weights=[0.25, 0.75])
-    expected = [0.25 * a + 0.75 * b for a, b in zip(*scores)]
+    expected2 = [0.25 * a + 0.75 * b for a, b in zip(*std)]
     assert r2["weights"] == {0: 0.25, 1: 0.75}
-    assert all(abs(a - b) < 1e-12 for a, b in zip(r2["composite"], expected))
+    assert all(abs(a - b) < 1e-12 for a, b in zip(r2["composite"], expected2))
 
     # Wrong arity must raise before touching the engine.
     try:
@@ -98,7 +101,8 @@ def test_combine_dict_input_keys_sorted() -> None:
     r = p.combine(scores, method="equal_weight")
     assert list(r["weights"]) == ["a_alpha", "z_alpha"]
     assert r["weights"] == {"a_alpha": 0.5, "z_alpha": 0.5}
-    assert r["composite"] == [1.5, 0.5]
+    # a_alpha is constant -> standardized row is zeros; z_alpha -> [-1, 1].
+    assert r["composite"] == [0.5, -0.5]
 
 
 def test_combine_rejects_bad_input() -> None:
@@ -135,7 +139,7 @@ def test_custom_python_method_provenance() -> None:
         r = p.combine([[1.0, 2.0], [3.0, 4.0]], method="test_halve")
         assert r["composite"] == [0.5, 1.0]
         assert r["provenance"] == {"method": "test_halve", "source": "python"}
-        assert r["weights"] == {}
+        assert r["weights"] is None
     finally:
         # replace=True so re-runs stay idempotent.
         p.combine_methods.register(
@@ -154,7 +158,8 @@ def test_inverse_vol_composite_matches_manual_weights() -> None:
     r = p.combine(scores, method="inverse_vol")
     w = [r["weights"][i] for i in range(3)]
     assert abs(sum(w) - 1.0) < 1e-9
-    manual = [sum(wi * s[t] for wi, s in zip(w, scores)) for t in range(64)]
+    std = p._standardize(scores)
+    manual = [sum(wi * s[t] for wi, s in zip(w, std)) for t in range(64)]
     assert all(abs(a - b) < 1e-9 for a, b in zip(r["composite"], manual))
 
 
@@ -208,14 +213,18 @@ def test_orthogonalize_redundant_when_in_span() -> None:
 
 def test_orthogonalize_incremental_with_residual_signal() -> None:
     # Candidate = pool + positive-trend residual: the orthogonalized part
-    # keeps a positive mean, so its annualized Sharpe is positive.
-    n = 128
+    # keeps a positive mean, so its annualized Sharpe is positive. The
+    # residual Sharpe is computed on DAILY aggregation, so the sample must
+    # span >= 2 days (n >= 2 * bars_per_day).
+    n = 960
     pool_col = [math.sin(t * 0.3) for t in range(n)]
     trend = [0.05 * t for t in range(n)]
     candidate = [a + b for a, b in zip(pool_col, trend)]
     r = p.orthogonalize(candidate, [pool_col])
     assert r["verdict"] == "INCREMENTAL"
     assert math.isfinite(r["residual_sharpe"]) and r["residual_sharpe"] > 0.0
+    assert len(r["residual"]) == n and len(r["betas"]) == 1
+    assert math.isfinite(r["r_squared"])
 
 
 def test_orthogonalize_requires_finite_input() -> None:
@@ -229,30 +238,30 @@ def test_orthogonalize_requires_finite_input() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pool_scores / pool I/O
+# score_pool / pool I/O
 # ---------------------------------------------------------------------------
 
-def test_pool_scores_small_window() -> None:
+def test_score_pool_small_window() -> None:
     # One engine batch call over the small catalog window; sanitized rows.
     with tempfile.TemporaryDirectory() as tmp:
         entries = _pool_two(tmp)
-        scores = p.pool_scores(entries, data=SMALL)
+        scores = p.score_pool(entries, data=SMALL)
     assert set(scores) == {"a_001", "a_002"}
     for s in scores.values():
         assert len(s) == 241
         assert all(math.isfinite(v) for v in s)
 
 
-def test_pool_scores_empty_pool() -> None:
-    assert p.pool_scores([], data=SMALL) == {}
+def test_score_pool_empty_pool() -> None:
+    assert p.score_pool([], data=SMALL) == {}
 
 
-def test_pool_scores_invalid_dsl_raises() -> None:
+def test_score_pool_invalid_dsl_raises() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         bad = [PoolEntry(alpha_id="bad_1", dsl="close +")]
         write_pool_entry(bad[0], root=tmp)
         try:
-            p.pool_scores(bad, data=SMALL)
+            p.score_pool(bad, data=SMALL)
             raise AssertionError("invalid DSL must raise from the engine")
         except ValueError:
             pass
@@ -352,7 +361,7 @@ def test_portfolio_health_report_structure() -> None:
         "full_sample_sharpe",
         "max_drawdown",
         "last_window_sharpe",
-        "monthly_return_30d",
+        "window_return",
         "rolling_mean_ic",
     ):
         assert math.isfinite(rep[key]), key
@@ -363,7 +372,7 @@ def test_portfolio_health_report_structure() -> None:
     assert rep["full_sample_sharpe"] == 0.0
     assert rep["max_drawdown"] == 0.0
     assert rep["last_window_sharpe"] == 0.0
-    assert rep["monthly_return_30d"] == 0.0
+    assert rep["window_return"] == 0.0
     # Verdict rule: refit when window sharpe < 0 or mean IC < 0.05.
     expected = "refit" if (rep["last_window_sharpe"] < 0.0 or rep["rolling_mean_ic"] < 0.05) else "ok"
     assert rep["verdict"] == expected
@@ -407,6 +416,17 @@ def _run_all() -> None:
     print(f"\n{passed} passed, {failed} failed, {len(tests)} total")
     if failed:
         raise SystemExit(1)
+
+
+def test_pool_pnl_helper() -> None:
+    """UAT fix (REC-008): pool_pnl builds the canonical per-bar net PnL input
+    for orthogonalize."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entries = _pool_two(tmp)
+        pnl = p.pool_pnl(entries, data=SMALL)
+    assert set(pnl) == {"a_001", "a_002"}
+    assert all(len(v) == 241 for v in pnl.values())
+    assert all(all(math.isfinite(x) for x in v) for v in pnl.values())
 
 
 if __name__ == "__main__":
