@@ -43,7 +43,7 @@ Run the in-memory review of the composite allocation:
 ```python
 report = pf.portfolio_health_report(pool, window_days=30)
 # -> full_sample_sharpe, max_drawdown, last_window_sharpe,
-#    monthly_return_30d, rolling_mean_ic, verdict
+#    window_return, rolling_mean_ic, verdict
 ```
 
 - The report is never auto-saved (DEC-017 artifact discipline); export it
@@ -58,12 +58,14 @@ report = pf.portfolio_health_report(pool, window_days=30)
 ## 3. Orthogonalization of new candidates (on demand)
 
 Before a new alpha enters the pool, check whether it adds anything beyond
-the existing members (Component 3 - Orthogonalization):
+the existing members (Component 3 - Orthogonalization). The canonical input
+is per-bar NET PnL (reconciliation note REC-008 - score series give a
+different, non-canonical verdict):
 
 ```python
-scores = pf.pool_scores(pool)              # one engine batch call
-candidate = <new alpha's score series>     # from quant_api.research
-rest = [scores[k] for k in scores]
+pnl = pf.pool_pnl(pool)                    # canonical net PnL per pool alpha
+candidate = <new alpha's canonical net PnL series>   # same pipeline (pool_pnl on a 1-entry pool)
+rest = [pnl[k] for k in pnl]
 verdict = pf.orthogonalize(candidate, rest)
 # verdict["verdict"] == "INCREMENTAL" -> additive; "REDUNDANT" -> skip
 ```
