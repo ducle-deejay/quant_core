@@ -116,6 +116,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-016](decisions/DEC-016-purpose-loop-vocabulary.md) - Purpose wording corrected to loop vocabulary ("continuous loop ... recalibrate", not "pipeline that turns ... into"); supersedes the DEC-015 section-3 quote.
 - [DEC-017](decisions/DEC-017-quant-api-role-modules.md) - quant_api role-scoped Python API: one module per practitioner role, core with catalog/artifacts/pool/registries, additive ga_breed_py binding; sizing owned by the risk role; Nautilus backtest reused for execution.
 - [DEC-018](decisions/DEC-018-quant-api-naming-revision.md) - quant_api module naming revision: research renamed to alpha (AlphaConfig, score_pool, test/notebook/runbook renames); supersedes DEC-017/TST-011 name references.
+- [DEC-019](decisions/DEC-019-systematic-trading-lifecycle-operating-model.md) - systematic-trading operating model: vocabulary, module ownership, data/storage, alpha lifecycle, operating invariants, lifecycle algorithm and method table.
 
 
 
