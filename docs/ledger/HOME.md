@@ -80,6 +80,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-013](observations/OBS-013-silent-alert-failure-gaps.md) - two silent-failure gaps: bootstrap crashes alerted nothing, undeliverable alerts were swallowed with exit 0; closed by DEC-012.
 - [OBS-014](observations/OBS-014-daily-force-close-bug.md) - bridge force-closed the position every day at 14:00 instead of only on the contract expiry day; fixed by DEC-013 expiry semantics.
 - [OBS-015](observations/OBS-015-north-star-approval-breach.md) - decision-authority breach: north-star charter applied with revised wording before a second approval round; mitigation: content re-presented, no commit, note open until owner decides.
+- [OBS-016](observations/OBS-016-vol-estimate-annualization-convention.md) - vol estimate scaled by sqrt(bars_per_day) is per-day, not per-year (~15.8x); parity with live orchestrator kept, label/calibration tracked for harness review.
+- [OBS-017](observations/OBS-017-drawdown-boundary-roundtrip.md) - drawdown ladder exact-boundary round-trip missed the kill line at exactly 20% (1-dd inexact); engine raw_drawdown snapped to 12 decimals; boundaries verified 0.05/0.10/0.15/0.20.
 
 
 ### Reconciliations
@@ -91,6 +93,9 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [REC-005](reconciliations/REC-005-research-to-examples.md) - demonstration scripts moved to examples/; frozen docs keep old paths, this note is the authoritative pointer.
 - [REC-006](reconciliations/REC-006-uat-fix-wave.md) - user-acceptance fix wave closes Python boundary, Rust panic and packaging blockers; accepted gaps remain explicit.
 - [REC-007](reconciliations/REC-007-relocation-src-monorepo.md) - engine and bindings relocated under src/ per DEC-007; earlier ledger code paths are historical; verification chain re-passed.
+- [REC-008](reconciliations/REC-008-orthogonalization-pnl-input.md) - orthogonalize input contract reconciled: per-bar net PnL is canonical (canon Component 3), score-series docstring/runbook amended; pool_pnl helper added.
+- [REC-009](reconciliations/REC-009-combination-standardized-scores.md) - combination weights apply to standardized scores (canon stage-4 section 2); API standardizes rows before combining, weights from raw risk; engine raw variant retained for parity.
+- [REC-010](reconciliations/REC-010-execution-consistency.md) - execution consistency findings: urgency gap-scaled convention (worked-example interpretation), order-state gaps + pessimistic fill stance deferred, provenance honesty, catalog-leak guard, realized-PnL stats, TWAP time-gating.
 
 ### Decisions
 
@@ -110,6 +115,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-015](decisions/DEC-015-agents-md-instruction-style-v2.md) - AGENTS.md instruction style v2: plain Purpose section at end-state level plus Ground-truth authority order and discovery rule; replaces the north-star section presentation; DEC-014 unchanged.
 - [DEC-016](decisions/DEC-016-purpose-loop-vocabulary.md) - Purpose wording corrected to loop vocabulary ("continuous loop ... recalibrate", not "pipeline that turns ... into"); supersedes the DEC-015 section-3 quote.
 - [DEC-017](decisions/DEC-017-quant-api-role-modules.md) - quant_api role-scoped Python API: one module per practitioner role, core with catalog/artifacts/pool/registries, additive ga_breed_py binding; sizing owned by the risk role; Nautilus backtest reused for execution.
+- [DEC-018](decisions/DEC-018-quant-api-naming-revision.md) - quant_api module naming revision: research renamed to alpha (AlphaConfig, score_pool, test/notebook/runbook renames); supersedes DEC-017/TST-011 name references.
 
 
 
