@@ -30,7 +30,7 @@ SEEDS = ("close - ewma(close, 8)", "ts_returns(close, 8)", "-ts_returns(close, 5
 
 def _permissive_config():
     """Chain-mechanics config: every finite-metric candidate passes the gate."""
-    from quant_api.research import GateCriteria, ResearchConfig
+    from quant_api.alpha import GateCriteria, AlphaConfig
 
     gate = GateCriteria(
         min_abs_ic=0.0,
@@ -40,7 +40,7 @@ def _permissive_config():
         min_positive_blocks_pct=0.0,
         walk_forward_block_days=5,
     )
-    return ResearchConfig(
+    return AlphaConfig(
         harness=HarnessParams(),
         gate=gate,
         data=WINDOW,
@@ -51,7 +51,7 @@ def _permissive_config():
 
 
 def test_full_chain() -> None:
-    from quant_api.research import (
+    from quant_api.alpha import (
         build_spec_sheet,
         deliver_to_pool,
         evaluate_candidate,
@@ -92,9 +92,9 @@ def test_full_chain() -> None:
     assert len(pool) == 1 and pool[0].alpha_id == entry.alpha_id
 
     # 5. Portfolio: pool scores -> combine -> refit weights.
-    from quant_api.portfolio import combine, pool_scores, refit_weights
+    from quant_api.portfolio import combine, score_pool, refit_weights
 
-    scores = pool_scores(pool, data=WINDOW)
+    scores = score_pool(pool, data=WINDOW)
     assert set(scores) == {entry.alpha_id}
     combined = combine(scores, method="inverse_vol")
     assert len(combined["composite"]) == len(bars)
