@@ -6,11 +6,12 @@ Scheduling, feedback edge 7->1 (slippage -> cost model).
 ## Weekly: slippage review (the 7->1 feedback)
 
 1. Collect the week's session fills: `slippage_report(session_dir=...)`
-   reads data/logs/sessions/<date>/decisions.jsonl, or pass explicit fills
-   / decision-log records.
-2. The report decomposes implementation shortfall by session hour, size
-   bucket and vol regime, and reports the excess versus the milestone-1
-   cost model (2.294 bp per side, DEC-006).
+   reads `<session_dir>/fills.jsonl` (fill artifacts). The bridge decision
+   log alone has no fill prices - pass `fills=` explicitly or use an
+   artifact that includes fills.jsonl (decision note REC-010).
+2. The report decomposes implementation shortfall by session hour (Hanoi
+   local), fill-size bucket and vol regime, and reports the excess versus
+   the milestone-1 cost model (2.294 bp per side, DEC-006).
 3. With `save=True` the summary lands in
    data/research/slippage_<week>.json - the handoff artifact consumed by
    cost-model recalibration (updating `HarnessParams.cost_per_side`) and
