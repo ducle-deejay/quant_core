@@ -1,6 +1,5 @@
 """quant_api.core - shared foundation for the four role modules (DEC-017)."""
 from quant_api.core.artifacts import (  # noqa: F401
-    DEFAULT_POOL_DIR,
     DEFAULT_RESEARCH_DIR,
     DEFAULT_STATE_DIR,
     append_trial_ledger,
@@ -17,7 +16,7 @@ from quant_api.core.config import (  # noqa: F401
 )
 from quant_api.core.data import close_volume, load_bars  # noqa: F401
 from quant_api.core.pool import (  # noqa: F401
-    DEFAULT_POOL_DIR as POOL_DIR,
+    DEFAULT_POOL_DIR,
     PoolEntry,
     load_index,
     load_pool,

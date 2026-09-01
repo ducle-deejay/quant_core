@@ -1,4 +1,4 @@
-"""quant_api.research - Quantitative Researcher module (decision note DEC-017).
+"""quant_api.alpha - Quantitative Researcher module (decision note DEC-017).
 
 WorldQuant-style workflow: hand-written seed -> single-alpha evaluation
 (Component 1 - Canonical Simulation + Component 2 - Evaluation and
@@ -67,13 +67,14 @@ class GateCriteria:
     min_positive_blocks_pct: float = 60.0
     ic_horizons: tuple[int, ...] = (1, 5, 15)
     ic_window: int = 480
-    walk_forward_block_days: int = 20
+    walk_forward_block_days: int = 5
     ann_factor: float = 250.0  # daily-observation annualization
     bars_per_day: int = 240
+    sharpe_variance: float = 0.25  # trial-Sharpe variance for deflation
 
 
 @dataclass(frozen=True)
-class ResearchConfig:
+class AlphaConfig:
     """Everything one research call needs; every field has a default."""
 
     harness: HarnessParams = field(default_factory=HarnessParams)
@@ -82,6 +83,7 @@ class ResearchConfig:
     ga_population_size: int = 100
     ga_generations: int = 20
     ga_seed: int = 42
+    n_trials: int = 0  # effective trial count; >0 wires the deflated-Sharpe check
 
 
 # --------------------------------------------------------------------------- #
@@ -96,7 +98,8 @@ ga_fitness.register(
     source="engine",
     description="engine GA, fixed fitness mean score x next-bar return;"
     " custom fitness = python fn(seeds, close, volume, population_size,"
-    " generations, seed) -> list[str]",
+    " generations, seed) -> list[str]; use quant_api.alpha.score() as the"
+    " scoring primitive inside custom fitnesses",
 )
 
 
@@ -190,7 +193,7 @@ def validate_seed(dsl: str) -> str:
     return alpha_core.validate_expression_py(dsl)
 
 
-def _resolve_data(config: ResearchConfig | None, data: DataConfig | None) -> DataConfig:
+def _resolve_data(config: AlphaConfig | None, data: DataConfig | None) -> DataConfig:
     if data is not None:
         return data
     if config is not None and config.data is not None:
@@ -200,11 +203,12 @@ def _resolve_data(config: ResearchConfig | None, data: DataConfig | None) -> Dat
 
 def evaluate_seed(
     dsl: str,
-    config: ResearchConfig | None = None,
+    config: AlphaConfig | None = None,
     data: DataConfig | None = None,
     record_trial: bool = False,
     trial_root=None,
     source: str = "seed",
+    bars_df=None,
 ) -> TearSheet:
     """Single-alpha evaluation: Component 1 + Component 2 -> TearSheet.
 
@@ -214,17 +218,23 @@ def evaluate_seed(
     With ``record_trial=True`` the evaluation is appended to the trial
     ledger (mandatory trial accounting, canon Component 2 section 3.4).
     """
-    cfg = config or ResearchConfig()
+    cfg = config or AlphaConfig()
     gate = cfg.gate
     h = cfg.harness
     eff_data = _resolve_data(cfg, data)
     dsl_canonical = validate_seed(dsl)
 
-    df = load_bars(eff_data)
+    df = bars_df if bars_df is not None else load_bars(eff_data)
     close, volume = close_volume(df)
     bpd = h.bars_per_day
 
     matrix = alpha_core.execute_batch_py([dsl_canonical], close, volume)
+    if not any(math.isfinite(v) for v in matrix[0]):
+        raise ValueError(
+            f"expression {dsl_canonical!r} produces no finite values: it"
+            " references fields absent from the data (only close/volume are"
+            " available in the research catalog)"
+        )
     sane = _sanitize_scores(matrix[0])
     position = alpha_core.canonical_map_py(
         sane,
@@ -242,7 +252,12 @@ def evaluate_seed(
     daily_gross = _daily(gross, bpd)
     net_sum = sum(daily_net)
     gross_sum = sum(daily_gross)
-    cost_drag_pct = 100.0 * (1.0 - net_sum / gross_sum) if gross_sum != 0.0 else math.inf
+    # Engine convention (canonical pnl.rs): drag = cost / |gross|, always
+    # non-negative; the naive 1 - net/gross goes negative when gross < 0 and
+    # silently passes the gate (practitioner-review finding).
+    cost_drag_pct = (
+        100.0 * (gross_sum - net_sum) / abs(gross_sum) if gross_sum != 0.0 else math.inf
+    )
 
     net_sharpe = alpha_core.sharpe_py(daily_net, bars_per_day=bpd)
     max_drawdown = alpha_core.max_drawdown_py(daily_net)
@@ -257,6 +272,7 @@ def evaluate_seed(
     icir = _icir(sane, returns, int(best["horizon"]), gate.ic_window)
 
     wf = alpha_core.walk_forward_py(daily_net, gate.walk_forward_block_days, gate.ann_factor)
+    wf_blocks = len(wf.blocks)
 
     metrics = {
         "net_sharpe": net_sharpe,
@@ -270,19 +286,40 @@ def evaluate_seed(
         "walk_forward": {
             "positive_pct": wf.positive_pct,
             "worst_block_sharpe": wf.worst_block_sharpe,
+            "n_blocks": wf_blocks,
         },
+        "hints": [],
     }
+    if icir is not None and icir < gate.min_icir and best_abs_ic > gate.min_abs_ic:
+        metrics["hints"].append(
+            "icir is signed: a strong INVERSE signal fails it. "
+            "Try negating the expression (e.g. '-(' + dsl_canonical + ')')."
+        )
+    if wf_blocks < 2:
+        metrics["hints"].append(
+            f"walk-forward had only {wf_blocks} block(s); stability check not applicable"
+            " (increase the sample or lower walk_forward_block_days)."
+        )
 
     checks = [
-        ("ic", best_abs_ic >= gate.min_abs_ic),
-        ("cost_drag", cost_drag_pct <= gate.max_cost_drag_pct),
-        ("net_sharpe", math.isfinite(net_sharpe) and net_sharpe >= gate.min_net_sharpe),
+        ("ic", best_abs_ic > gate.min_abs_ic),
+        ("cost_drag", cost_drag_pct < gate.max_cost_drag_pct),
+        ("net_sharpe", math.isfinite(net_sharpe) and net_sharpe > gate.min_net_sharpe),
         (
             "walk_forward",
-            wf.positive_pct >= gate.min_positive_blocks_pct,
+            wf_blocks < 2 or wf.positive_pct > gate.min_positive_blocks_pct,
         ),
-        ("icir", icir is None or icir >= gate.min_icir),
+        ("icir", icir is None or icir > gate.min_icir),
     ]
+    if cfg.n_trials > 0:
+        # Canon Component 2 section 3.4: the bar rises with the effective
+        # trial count (deflated-Sharpe logic). Wired in the API now that the
+        # ledger exists (practitioner-review finding); trial count is the
+        # caller's responsibility (screen_batch accounting).
+        deflated = alpha_core.deflated_threshold_py(cfg.n_trials, gate.sharpe_variance)
+        checks.append(
+            ("deflated_sharpe", math.isfinite(net_sharpe) and net_sharpe > deflated)
+        )
     reasons = tuple(name for name, ok in checks if not ok)
     verdict = "IN" if not reasons else "OUT"
 
@@ -324,7 +361,7 @@ def evaluate_seed(
 
 def evaluate_candidate(
     dsl: str,
-    config: ResearchConfig | None = None,
+    config: AlphaConfig | None = None,
     data: DataConfig | None = None,
     record_trial: bool = False,
     trial_root=None,
@@ -340,9 +377,16 @@ def evaluate_candidate(
     )
 
 
+def score(expressions: list[str], close: list[float], volume: list[float]) -> list[list[float]]:
+    """Batch-score expressions over close/volume — the scoring primitive for
+    custom ``ga_fitness`` functions (DEC-017; UAT finding: the extension
+    contract previously forced writers to import raw ``alpha_core``)."""
+    return alpha_core.execute_batch_py(list(expressions), list(close), list(volume))
+
+
 def mine_seeds(
     seeds: list[str],
-    config: ResearchConfig | None = None,
+    config: AlphaConfig | None = None,
     data: DataConfig | None = None,
     fitness: str = "engine",
     population_size: int | None = None,
@@ -357,12 +401,12 @@ def mine_seeds(
     """
     if not seeds:
         raise ValueError("seeds must be non-empty")
-    cfg = config or ResearchConfig()
+    cfg = config or AlphaConfig()
     eff_data = _resolve_data(cfg, data)
     canonical = [validate_seed(s) for s in seeds]
     df = load_bars(eff_data)
     close, volume = close_volume(df)
-    return ga_fitness.call(
+    result = ga_fitness.call(
         fitness,
         canonical,
         close,
@@ -371,24 +415,49 @@ def mine_seeds(
         generations or cfg.ga_generations,
         seed if seed is not None else cfg.ga_seed,
     )
+    # Custom fitnesses are not trusted: validate + canonicalize every element
+    # (the engine path is idempotent here) and dedupe so trial accounting and
+    # deflated-threshold priors are not inflated by duplicates (UAT findings).
+    validated: list[str] = []
+    for i, dsl in enumerate(result):
+        if not isinstance(dsl, str):
+            raise ValueError(
+                f"fitness {fitness!r} returned non-string at index {i}: {dsl!r}"
+            )
+        validated.append(validate_seed(dsl))
+    seen: set[str] = set()
+    out: list[str] = []
+    for dsl in validated:
+        if dsl not in seen:
+            seen.add(dsl)
+            out.append(dsl)
+    return out
 
 
 def screen_batch(
     expressions: list[str],
-    config: ResearchConfig | None = None,
+    config: AlphaConfig | None = None,
     data: DataConfig | None = None,
     record_trials: bool = True,
     trial_root=None,
+    source: str = "seed",
 ) -> dict:
     """Evaluate a batch and report the screening funnel (canon 3.1-3.5).
 
     Every candidate is recorded in the trial ledger when
     ``record_trials=True`` (the funnel is where trials are counted).
-    Returns {"funnel": {...counts}, "tear_sheets": [...], "survivors": [...]}.
+    ``source`` tags provenance ("seed" or "ga") for GA-bred batches so the
+    trial ledger is not misattributed (UAT finding).
+    Returns {"funnel": {...counts}, "tear_sheets": [...], "survivors": [...]}
+    where ``survivor_count`` counts FULL-gate survivors (verdict IN), while
+    ``ic_pass_count``/``drag_pass_count`` are the forecast- and cost-gate
+    counts from the engine screening.
     """
     if not expressions:
         raise ValueError("expressions must be non-empty")
-    cfg = config or ResearchConfig()
+    cfg = config or AlphaConfig()
+    eff_data = _resolve_data(cfg, data)
+    df = load_bars(eff_data)  # loaded ONCE for the whole batch (perf finding)
     tears = [
         evaluate_seed(
             e,
@@ -396,6 +465,8 @@ def screen_batch(
             data=data,
             record_trial=record_trials,
             trial_root=trial_root,
+            source=source,
+            bars_df=df,
         )
         for e in expressions
     ]
@@ -411,7 +482,7 @@ def screen_batch(
             "total_candidates": funnel.total_candidates,
             "ic_pass_count": funnel.ic_pass_count,
             "drag_pass_count": funnel.drag_pass_count,
-            "survivor_count": funnel.survivor_count,
+            "survivor_count": len(survivors),
         },
         "tear_sheets": tears,
         "survivors": survivors,
@@ -421,7 +492,7 @@ def screen_batch(
 def build_spec_sheet(
     tear_sheet: TearSheet,
     data: DataConfig | None = None,
-    config: ResearchConfig | None = None,
+    config: AlphaConfig | None = None,
 ) -> SpecSheet:
     """Component 2 PASS artifact (canon section 3.5): expectations consumed by
     the Portfolio Researcher, the divergence gauges and live kill criteria.
@@ -435,7 +506,7 @@ def build_spec_sheet(
     holding = int(best["horizon"]) if best else 1
     expected_sharpe = float(tear_sheet.metrics.get("net_sharpe", 0.0))
 
-    cfg = config or ResearchConfig()
+    cfg = config or AlphaConfig()
     eff_data = _resolve_data(cfg, data)
     df = load_bars(eff_data)
     mean_daily_volume = float(df.groupby(df["ts"].dt.date)["volume"].sum().mean())
