@@ -1,10 +1,10 @@
-"""Unit tests for the quant_api research module (decision note DEC-017).
+"""Unit tests for the quant_api alpha module (decision note DEC-017).
 
 Gate selectivity is tested with synthetic series; chain mechanics with the
 real catalog window. Governing notes: DEC-017, canon Component 1 - Canonical
 Simulation, Component 2 - Evaluation and Screening.
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_research.py` (repo root).
+Run: `.venv/bin/python3 src/quant_api/tests/test_alpha.py` (repo root).
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import math
 
-from quant_api.research import (
+from quant_api.alpha import (
     GateCriteria,
-    ResearchConfig,
+    AlphaConfig,
     build_spec_sheet,
     deliver_to_pool,
     evaluate_seed,
@@ -67,7 +67,7 @@ def test_validate_seed_canonicalizes() -> None:
 
 def test_evaluate_seed_verdicts_synthetic() -> None:
     close, volume = _synthetic()
-    cfg = ResearchConfig(harness=HarnessParams(cost_per_side=0.0001, bars_per_day=240))
+    cfg = AlphaConfig(harness=HarnessParams(cost_per_side=0.0001, bars_per_day=240))
 
     # Inject synthetic bars through a temp DataConfig-like path: the API
     # reads from the catalog, so use a windowed catalog run for mechanics
@@ -81,7 +81,7 @@ def test_evaluate_seed_verdicts_synthetic() -> None:
 
 def test_evaluate_seed_rejects_invalid() -> None:
     try:
-        evaluate_seed("close +(", ResearchConfig())
+        evaluate_seed("close +(", AlphaConfig())
         raise AssertionError("invalid dsl accepted")
     except ValueError:
         pass
@@ -94,7 +94,7 @@ def test_ga_fitness_registry_engine_default() -> None:
 
 
 def test_mine_seeds_deterministic() -> None:
-    cfg = ResearchConfig(
+    cfg = AlphaConfig(
         harness=HarnessParams(),
         data=DataConfig(start="2026-07-15", end="2026-08-28"),
         ga_population_size=8,
@@ -109,7 +109,7 @@ def test_mine_seeds_deterministic() -> None:
 
 
 def test_mine_seeds_rejects_empty_and_invalid() -> None:
-    cfg = ResearchConfig(data=DataConfig(start="2026-07-15", end="2026-08-28"))
+    cfg = AlphaConfig(data=DataConfig(start="2026-07-15", end="2026-08-28"))
     try:
         mine_seeds([], cfg)
         raise AssertionError("empty seeds accepted")
@@ -124,7 +124,7 @@ def test_mine_seeds_rejects_empty_and_invalid() -> None:
 
 def test_screen_batch_records_trials() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="qa_research_"))
-    cfg = ResearchConfig(
+    cfg = AlphaConfig(
         harness=HarnessParams(cost_per_side=0.0001),
         data=DataConfig(start="2026-07-15", end="2026-08-28"),
     )
@@ -138,11 +138,11 @@ def test_screen_batch_records_trials() -> None:
 
 def test_deliver_to_pool_round_trip() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="qa_research_"))
-    cfg = ResearchConfig(
+    cfg = AlphaConfig(
         harness=HarnessParams(cost_per_side=0.0001),
         data=DataConfig(start="2026-07-15", end="2026-08-28"),
     )
-    permissive = ResearchConfig(
+    permissive = AlphaConfig(
         harness=HarnessParams(cost_per_side=0.0001),
         gate=GateCriteria(
             min_abs_ic=0.0,
@@ -178,7 +178,7 @@ def test_deliver_to_pool_round_trip() -> None:
 
 
 def test_build_spec_sheet_fields() -> None:
-    permissive = ResearchConfig(
+    permissive = AlphaConfig(
         harness=HarnessParams(cost_per_side=0.0001),
         gate=GateCriteria(
             min_abs_ic=0.0,
@@ -204,6 +204,84 @@ def test_catalog_window_loads() -> None:
     assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
 
 
+
+def test_screen_batch_funnel_survivor_semantics() -> None:
+    """UAT fix: survivor_count counts FULL-gate survivors (== len(survivors))."""
+    permissive = AlphaConfig(
+        harness=HarnessParams(cost_per_side=0.0001),
+        gate=GateCriteria(
+            min_abs_ic=0.0,
+            max_cost_drag_pct=1e9,
+            min_net_sharpe=-100.0,
+            min_icir=-100.0,
+            min_positive_blocks_pct=0.0,
+            walk_forward_block_days=5,
+        ),
+        data=DataConfig(start="2026-07-15", end="2026-08-28"),
+    )
+    exprs = ["close - ewma(close, 8)", "ts_returns(close, 8)"]
+    result = screen_batch(exprs, permissive, record_trials=False)
+    assert result["funnel"]["survivor_count"] == len(result["survivors"]) == 2
+
+
+def test_screen_batch_source_ga_provenance() -> None:
+    """UAT fix: screen_batch tags GA-bred batches so trial accounting is not
+    misattributed as seeds."""
+    permissive = AlphaConfig(
+        harness=HarnessParams(cost_per_side=0.0001),
+        gate=GateCriteria(
+            min_abs_ic=0.0,
+            max_cost_drag_pct=1e9,
+            min_net_sharpe=-100.0,
+            min_icir=-100.0,
+            min_positive_blocks_pct=0.0,
+            walk_forward_block_days=5,
+        ),
+        data=DataConfig(start="2026-07-15", end="2026-08-28"),
+    )
+    result = screen_batch(["ts_returns(close, 8)"], permissive, source="ga", record_trials=False)
+    assert result["tear_sheets"][0].provenance["source"] == "ga"
+
+
+def test_mine_seeds_custom_fitness_validation_and_dedupe() -> None:
+    """UAT fix: custom-fitness output is validated + canonicalized + deduped."""
+    from quant_api.alpha import ga_fitness
+
+    def fit_bad(seeds, close, volume, population_size, generations, seed):
+        return ["ts_returns(close, 8)", "ts_returns(close, 8)", 123, "not valid !!!"]
+
+    ga_fitness.register("fit_bad", fit_bad, source="python", description="uat", replace=True)
+    cfg = AlphaConfig(data=DataConfig(start="2026-07-15", end="2026-08-28"))
+    try:
+        mine_seeds(["ts_returns(close, 8)"], cfg, fitness="fit_bad")
+        raise AssertionError("garbage custom-fitness output accepted")
+    except ValueError as exc:
+        assert "non-string" in str(exc)
+
+    def fit_dup(seeds, close, volume, population_size, generations, seed):
+        return ["ts_returns(close, 8)", "ts_returns(close, 8)", "close - ewma(close, 8)"]
+
+    ga_fitness.register("fit_dup", fit_dup, source="python", description="uat", replace=True)
+    out = mine_seeds(["ts_returns(close, 8)"], cfg, fitness="fit_dup")
+    assert out == ["ts_returns(close,8)", "close-ewma(close,8)"]
+
+
+def test_walk_forward_not_applicable_on_short_sample() -> None:
+    """UAT fix: fewer than 2 walk-forward blocks -> stability check n/a
+    instead of a 0%/100% coin-flip fail."""
+    cfg = AlphaConfig(data=DataConfig(start="2026-08-24", end="2026-08-28"))
+    tear = evaluate_seed("ts_returns(close, 8)", cfg)
+    assert "walk_forward" not in tear.reasons
+    assert any("walk-forward" in h for h in tear.metrics["hints"])
+
+
+def test_score_helper() -> None:
+    from quant_api.alpha import score
+
+    rows = score(["close - ewma(close, 8)"], [100.0 + i for i in range(500)], [1.0] * 500)
+    assert len(rows) == 1 and len(rows[0]) == 500
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
@@ -214,5 +292,5 @@ if __name__ == "__main__":
         except Exception as exc:  # noqa: BLE001
             failed += 1
             print(f"[FAIL] {fn.__name__}: {type(exc).__name__}: {exc}")
-    print(f"RESEARCH TESTS: {len(fns) - failed}/{len(fns)} passed")
+    print(f"ALPHA TESTS: {len(fns) - failed}/{len(fns)} passed")
     raise SystemExit(1 if failed else 0)

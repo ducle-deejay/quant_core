@@ -2,7 +2,7 @@
 
 One module per practitioner role (decision note DEC-017):
 
-- ``quant_api.research``      Quantitative Researcher: seed -> single-alpha
+- ``quant_api.alpha``      Quantitative Researcher: seed -> single-alpha
                               evaluation -> GA breeding -> pool delivery.
 - ``quant_api.portfolio``     Portfolio Researcher: pool, orthogonalization,
                               combination, weight refit, health report.
