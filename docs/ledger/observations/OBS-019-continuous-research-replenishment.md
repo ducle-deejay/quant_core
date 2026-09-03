@@ -9,7 +9,7 @@ components: [0, 1, 2, 3, 4, 5, 6, 7]
 tags: [operating-model, feedback, research-replenishment, extension-points]
 source: "owner discussion 2026-09-03: define how four researcher roles continuously replenish and recalibrate the operating model"
 design: [OV-LIFECYCLE, STG-0-ALPHA-MINING, STG-1-CANONICAL-SIM, STG-2-EVALUATION, STG-3-ORTHOGONALIZATION, STG-4-COMBINATION, STG-5-POSITION-CONSTRUCTION, STG-6-TRADE-SCHEDULING, STG-7-RISK-OVERLAY]
-code: [docs/ledger/decisions/DEC-021-actor-artifact-capability-operating-model.md]
+code: [docs/ledger/decisions/DEC-021-actor-artifact-capability-operating-model.md, docs/ledger/decisions/DEC-024-continuous-research-replenishment-operating-model.md]
 test: []
 ---
 
@@ -220,6 +220,7 @@ This observation remains open until the owner approves the continuous replenishm
 ## Related Notes
 
 - [DEC-021](../decisions/DEC-021-actor-artifact-capability-operating-model.md) - current resolved operating model whose research feedback semantics require this extension.
+- [DEC-024](../decisions/DEC-024-continuous-research-replenishment-operating-model.md) - proposed complete DEC-021 copy-patch adding the correction recorded by this observation.
 - [OBS-018](OBS-018-operating-model-contract-leakage.md) - prior correction separating researcher activities from implementation contracts.
 - [alpha mining](../../enhanced/stages/stage-0-alpha-mining.md) - frozen boundary where humans supply seeds and machines enumerate or genetically breed expressions.
 - [framework lifecycle](../../enhanced/framework-lifecycle.md) - frozen continuous-loop and feedback-cadence model.
