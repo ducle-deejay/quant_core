@@ -84,6 +84,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-017](observations/OBS-017-drawdown-boundary-roundtrip.md) - drawdown ladder exact-boundary round-trip missed the kill line at exactly 20% (1-dd inexact); engine raw_drawdown snapped to 12 decimals; boundaries verified 0.05/0.10/0.15/0.20.
 - [OBS-018](observations/OBS-018-operating-model-contract-leakage.md) - DEC-019/DEC-020 expressed researcher activities and component flows as premature implementation methods; resolved by DEC-021's actor-, artifact-, and capability-level operating model.
 - [OBS-019](observations/OBS-019-continuous-research-replenishment.md) - open operating-model gap: define continuous replenishment and recalibration across four researcher roles, including the seed-expression input boundary and validated promotion of candidate artifacts.
+- [OBS-020](observations/OBS-020-artifact-criticality-taxonomy.md) - open artifact-taxonomy gap: separate required operating evidence, non-blocking supporting artifacts, authoritative data sources, and authoritative mutable runtime state; governance-artifact classification is outside DEC-025 scope.
 
 
 ### Reconciliations
@@ -124,6 +125,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-022](decisions/DEC-022-consistent-unambiguous-notation.md) - initial detailed notation policy; normative AGENTS.md wording superseded by DEC-023 to remove project-specific prompt bias.
 - [DEC-023](decisions/DEC-023-prompt-neutral-notation-policy.md) - prompt-neutral notation policy: within a defined scope, one concept has one stable name and one name has one meaning; task-specific examples stay outside always-loaded context.
 - [DEC-024](decisions/DEC-024-continuous-research-replenishment-operating-model.md) - triaged DEC-021 copy-patch adding continuous replenishment and recalibration across four researcher roles, explicit seed-expression inputs, and validated promotion of candidate artifacts.
+- [DEC-025](decisions/DEC-025-required-operating-supporting-artifacts.md) - triaged DEC-024 copy-patch classifying Required Operating and Supporting Artifacts across ownership, lifecycle, algorithm, capability coverage, and implementation boundaries.
 
 
 
