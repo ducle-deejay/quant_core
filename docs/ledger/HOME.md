@@ -83,6 +83,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-016](observations/OBS-016-vol-estimate-annualization-convention.md) - vol estimate scaled by sqrt(bars_per_day) is per-day, not per-year (~15.8x); parity with live orchestrator kept, label/calibration tracked for harness review.
 - [OBS-017](observations/OBS-017-drawdown-boundary-roundtrip.md) - drawdown ladder exact-boundary round-trip missed the kill line at exactly 20% (1-dd inexact); engine raw_drawdown snapped to 12 decimals; boundaries verified 0.05/0.10/0.15/0.20.
 - [OBS-018](observations/OBS-018-operating-model-contract-leakage.md) - DEC-019/DEC-020 expressed researcher activities and component flows as premature implementation methods; resolved by DEC-021's actor-, artifact-, and capability-level operating model.
+- [OBS-019](observations/OBS-019-continuous-research-replenishment.md) - open operating-model gap: define continuous replenishment and recalibration across four researcher roles, including the seed-expression input boundary and validated promotion of candidate artifacts.
 
 
 ### Reconciliations
