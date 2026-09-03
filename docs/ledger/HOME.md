@@ -120,6 +120,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-019](decisions/DEC-019-systematic-trading-lifecycle-operating-model.md) - systematic-trading operating model: vocabulary, module ownership, data/storage, alpha lifecycle, operating invariants, lifecycle algorithm and method table.
 - [DEC-020](decisions/DEC-020-systematic-trading-operating-model-correction.md) - runtime-ownership correction that delegated existing primitives to Rust and runtime state to Nautilus; superseded by DEC-021 after its method-shaped operating model exposed contract leakage.
 - [DEC-021](decisions/DEC-021-actor-artifact-capability-operating-model.md) - approved operating model: actors, activities, artifacts, capability ownership, lifecycle, and feedback without premature API contracts; supersedes DEC-020.
+- [DEC-022](decisions/DEC-022-consistent-unambiguous-notation.md) - initial detailed notation policy; normative AGENTS.md wording superseded by DEC-023 to remove project-specific prompt bias.
+- [DEC-023](decisions/DEC-023-prompt-neutral-notation-policy.md) - prompt-neutral notation policy: within a defined scope, one concept has one stable name and one name has one meaning; task-specific examples stay outside always-loaded context.
 
 
 

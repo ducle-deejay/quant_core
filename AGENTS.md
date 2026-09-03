@@ -21,6 +21,10 @@ Statements about this project have an authority order; the first match you find 
 
 Discovery rule: if your task depends on the goal, the design, or a contract, and you have not read the relevant canon document, you have not finished exploring. Do not stop at the first plausible-looking answer - a milestone table, a handoff section, or a README line is a snapshot, not ground truth. If canon and code disagree, say so explicitly and record it per the rules below; do not silently pick a side. If a question's expected answer level is ambiguous (goal vs current state), state which level you are answering at.
 
+## Consistent and unambiguous notation
+
+Treat notation as a correctness boundary. Within a defined scope, use one stable name for one concept and one meaning for one name. Define non-obvious symbols, units, conventions, and namespaces before use; qualify collisions by owner, layer, or namespace. When established vocabularies differ, state their mapping and authority rather than silently renaming them. Resolve any plausible ambiguity before designing, implementing, or testing.
+
 ## Project map
 
 - `docs/enhanced/` - **frozen design canon**. States intent, formulas, contracts. NEVER edit, never delete. There is no exception for agents.
@@ -61,6 +65,8 @@ You are working in a repo with governance:
   use. Pair any artifact identifier with a word for what it is at
   least once (pattern: "<kind> <identifier>"; kinds live in
   ledger.config.json).
+- Notation discipline: within a defined scope, one concept has one stable
+  name and one name has one meaning; define or qualify ambiguity before use.
 ```
 
 ## Decision authority
