@@ -82,6 +82,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-015](observations/OBS-015-north-star-approval-breach.md) - decision-authority breach: north-star charter applied with revised wording before a second approval round; mitigation: content re-presented, no commit, note open until owner decides.
 - [OBS-016](observations/OBS-016-vol-estimate-annualization-convention.md) - vol estimate scaled by sqrt(bars_per_day) is per-day, not per-year (~15.8x); parity with live orchestrator kept, label/calibration tracked for harness review.
 - [OBS-017](observations/OBS-017-drawdown-boundary-roundtrip.md) - drawdown ladder exact-boundary round-trip missed the kill line at exactly 20% (1-dd inexact); engine raw_drawdown snapped to 12 decimals; boundaries verified 0.05/0.10/0.15/0.20.
+- [OBS-018](observations/OBS-018-operating-model-contract-leakage.md) - DEC-019/DEC-020 expressed researcher activities and component flows as premature implementation methods; resolved by DEC-021's actor-, artifact-, and capability-level operating model.
 
 
 ### Reconciliations
@@ -117,7 +118,8 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [DEC-017](decisions/DEC-017-quant-api-role-modules.md) - quant_api role-scoped Python API: one module per practitioner role, core with catalog/artifacts/pool/registries, additive ga_breed_py binding; sizing owned by the risk role; Nautilus backtest reused for execution.
 - [DEC-018](decisions/DEC-018-quant-api-naming-revision.md) - quant_api module naming revision: research renamed to alpha (AlphaConfig, score_pool, test/notebook/runbook renames); supersedes DEC-017/TST-011 name references.
 - [DEC-019](decisions/DEC-019-systematic-trading-lifecycle-operating-model.md) - systematic-trading operating model: vocabulary, module ownership, data/storage, alpha lifecycle, operating invariants, lifecycle algorithm and method table.
-- [DEC-020](decisions/DEC-020-systematic-trading-operating-model-correction.md) - corrected operating model: keeps the alpha lifecycle and research extension points, delegates existing quant primitives to Rust and runtime/execution state to Nautilus, and supersedes draft DEC-019.
+- [DEC-020](decisions/DEC-020-systematic-trading-operating-model-correction.md) - runtime-ownership correction that delegated existing primitives to Rust and runtime state to Nautilus; superseded by DEC-021 after its method-shaped operating model exposed contract leakage.
+- [DEC-021](decisions/DEC-021-actor-artifact-capability-operating-model.md) - approved operating model: actors, activities, artifacts, capability ownership, lifecycle, and feedback without premature API contracts; supersedes DEC-020.
 
 
 

@@ -3,7 +3,7 @@ doc_id: DEC-020
 title: Systematic trading lifecycle operating model - corrected runtime ownership
 type: decision
 owner: research
-status: triaged
+status: superseded
 version: 1.0
 components: [0, 1, 2, 3, 4, 5, 6, 7]
 tags: [operating-model, lifecycle, module-ownership, live-trading]
@@ -27,6 +27,10 @@ test: []
 ---
 
 # DEC-020 — Systematic trading lifecycle operating model
+
+## Supersession
+
+DEC-021 supersedes this decision as the implementation guide. DEC-020 remains the historical record of the Rust and Nautilus runtime-ownership correction that exposed the operating-model contract leakage recorded by OBS-018; its substantive content is unchanged.
 
 ## Correction scope
 
@@ -924,3 +928,8 @@ END ALGORITHM
 | `ExecutionEngine` / `ExecutionClient` | Nautilus | Manage order events, fills, positions, accounts, and venue routing |
 | startup and continuous reconciliation | Nautilus | Restore and align cached execution state with venue reports |
 | `Portfolio` | Nautilus | Hold realized position, exposure, PnL, balance, margin, and equity state |
+
+## Related notes
+
+- [DEC-021](DEC-021-actor-artifact-capability-operating-model.md) - approved actor-, artifact-, and capability-level successor.
+- [OBS-018](../observations/OBS-018-operating-model-contract-leakage.md) - finding that this method-shaped algorithm leaked operating activities into implementation contracts.
