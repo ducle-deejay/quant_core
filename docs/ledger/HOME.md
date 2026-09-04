@@ -86,6 +86,7 @@ The sweep script lives at `scripts/sweep_ledger.py` and exits non-zero when any 
 - [OBS-019](observations/OBS-019-continuous-research-replenishment.md) - open operating-model gap: define continuous replenishment and recalibration across four researcher roles, including the seed-expression input boundary and validated promotion of candidate artifacts.
 - [OBS-020](observations/OBS-020-artifact-criticality-taxonomy.md) - open artifact-taxonomy gap: separate required operating evidence, non-blocking supporting artifacts, authoritative data sources, and authoritative mutable runtime state; governance-artifact classification is outside DEC-025 scope.
 - [OBS-021](observations/OBS-021-agentic-requirements-engineering.md) - open methodology proposal: derive DEC-025 through outcome-first behavioral contracts, vertical slices, selective Test-Driven Development, continuous evaluation, and independent evidence-based verification.
+- [OBS-022](observations/OBS-022-task-dependency-orchestration.md) - open task-planning workflow: derive tasks and dependencies with the owner, coordinate agent execution through GitHub Issues, GitHub Projects, and Symphony, and validate completion before releasing dependent work.
 
 
 ### Reconciliations
