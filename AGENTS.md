@@ -33,6 +33,9 @@ Treat notation as a correctness boundary. Within a defined scope, use one stable
 - `ledger.config.json` - kit parameters (protected paths, note classes, statuses).
 - `scripts/canon_guard.py` - PreToolUse guard blocking edits into the canon.
 - `scripts/sweep_ledger.py` - drift-debt report; must pass before every commit.
+- `tasks/` - repository-native task board; each status directory is one Kanban bucket and the authoritative task status.
+- `tracker.config.json` - task statuses, priorities, dependency gates, and exclusive-resource rules.
+- `scripts/task_tracker.py` - task DAG, guarded transition, assignment, collision, and evidence checker.
 
 ## Rules (condensed from docs/ledger/HOME.md)
 
@@ -41,6 +44,15 @@ Treat notation as a correctness boundary. Within a defined scope, use one stable
 3. Ledger notes are append-only after resolution: supersede with a new note, never rewrite history.
 4. Tests derived from design intent, never from current behaviour. Cite the governing note id in a source comment near the test.
 5. Run `python3 scripts/sweep_ledger.py` before committing; a failing sweep is a blocked commit.
+
+## Task tracker rules
+
+1. A task's directory under `tasks/` is its only status; never add a duplicate `status` field to task front matter.
+2. Only the Human Owner opens tasks to `ready`, accepts tasks, requests rework, or cancels tasks. Only `accepted` satisfies a downstream dependency.
+3. For tracker-governed implementation, a main agent must successfully run `python3 scripts/task_tracker.py start <task-id> --actor <actor>` before editing or delegating. When continuing an already started task after a handover or context reset, run `verify-assignment` with its recorded actor instead. Never spawn an agent for a task that the tracker refuses to start or resume.
+4. A delegated agent must receive the task id and actor name, then successfully run `python3 scripts/task_tracker.py verify-assignment <task-id> --actor <actor>` before editing. A failed verification means stop, not work around the tracker.
+5. Tasks sharing an `exclusive_resources` value must not run concurrently. `human_review`, `rework`, and `blocked` tasks retain their resources until accepted or cancelled.
+6. Run `python3 scripts/task_tracker.py check` before committing; an integrity failure is a blocked commit. Pending or externally blocked work alone is not a failure.
 
 ## Communication style
 
@@ -58,6 +70,9 @@ You are working in a repo with governance:
 - Behaviour/design conflicts go to docs/ledger/ as notes
   (see docs/ledger/HOME.md for anatomy).
 - Run python3 scripts/sweep_ledger.py before any commit.
+- Run python3 scripts/task_tracker.py check before any commit.
+- For tracker-governed implementation, do not edit until the task id and actor
+  pass scripts/task_tracker.py start or, for resumed work, verify-assignment.
 - Reply style: first sentence answers the question; no filler, no
   restating the request, no invented shorthand. Abbreviation tiers:
   universal engineering shorthand and tool proper nouns stand as-is;
@@ -81,4 +96,4 @@ You are working in a repo with governance:
 
 - Codex reads this file natively. Claude Code imports it via `CLAUDE.md`.
 - The file-level guard runs on Claude Code and on DSH through the official `dsh-hooks-claude-code` bridge (both consume `.claude/hooks.json`). Codex uses its own `[hooks]` config pointing at the same script.
-- The git pre-commit hook (`.githooks/pre-commit`) is the final backstop on every harness: it rejects staged canon changes and failing sweeps regardless of model behaviour.
+- The git pre-commit hook (`.githooks/pre-commit`) is the final backstop on every harness: it rejects staged canon changes and failing ledger or task-tracker checks regardless of model behaviour.
