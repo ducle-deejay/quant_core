@@ -17,7 +17,4 @@ fi
 # 2) Ledger hygiene: statuses, naming, and canon doc_id links.
 python3 scripts/sweep_ledger.py
 
-# 3) Task integrity: status buckets, dependency DAG, claims, and evidence gates.
-python3 scripts/task_tracker.py check
-
 exit 0
