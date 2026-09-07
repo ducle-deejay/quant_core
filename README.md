@@ -50,10 +50,8 @@ print(q.sharpe_py(daily, bars_per_day=240))
 - `src/trading/` — live platform wiring: entrade/dnse adapters, trading node composition (Nautilus v1.231).
 - `apps/` — entrypoints: `apps/data/` (daily ETL), trading/research entrypoints to follow.
 - `operations/` — retained acceptance tooling.
-- `verification/` — gitignored; broker export files with personal identifiers (aggregates live in ledger notes).
+- `verification/` — gitignored; broker export files with personal identifiers.
 
 Each `src/*` package is an independent uv-workspace member with its own pyproject (distributions `alpha-core`, `market-data`, `trading`) so a future microservice split is a packaging-only change.
-
-The design canon is frozen under `docs/enhanced`; the living decision ledger is under `docs/ledger`. Run `python3 scripts/sweep_ledger.py` before committing.
 
 License: TBD
