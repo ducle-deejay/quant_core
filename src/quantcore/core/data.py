@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 
-from quant_api.core.config import DEFAULT_CATALOG_PATH, DataConfig
+from quantcore.core.config import DEFAULT_CATALOG_PATH, DataConfig
 
 
 def load_bars(config: DataConfig | None = None) -> pd.DataFrame:

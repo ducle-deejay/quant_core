@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
-from quant_api.core.config import REPO_ROOT
+from quantcore.core.config import REPO_ROOT
 
 #: Default pool folder (<repo>/data/pool).
 DEFAULT_POOL_DIR = REPO_ROOT / "data" / "pool"

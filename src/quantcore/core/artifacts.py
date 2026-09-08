@@ -1,7 +1,7 @@
 """Handoff artifact writers (DEC-017).
 
 Only artifacts consumed by another role or by the live system are
-auto-saved: trial ledger, pool (see ``quant_api.core.pool``), weights,
+auto-saved: trial ledger, pool (see ``quantcore.core.pool``), weights,
 weekly slippage summary, risk overlay config. Researcher-facing reports
 (tear sheets, backtest reports, gauge reports, post-mortems) are NOT
 written here - they stay in-memory and are exported on demand.
@@ -13,7 +13,7 @@ import json
 from datetime import date
 from pathlib import Path
 
-from quant_api.core.config import REPO_ROOT
+from quantcore.core.config import REPO_ROOT
 
 #: Default artifact roots (all under <repo>/data).
 DEFAULT_RESEARCH_DIR = REPO_ROOT / "data" / "research"

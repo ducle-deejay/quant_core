@@ -1,6 +1,6 @@
-"""Contract tests for quant_api.portfolio (Portfolio Researcher API).
+"""Contract tests for quantcore.portfolio (Portfolio Researcher API).
 
-Governing notes (ledger rule M4): decision note DEC-017 (quant_api role
+Governing notes (ledger rule M4): decision note DEC-017 (quantcore role
 modules - portfolio role scope, registry/provenance, artifact discipline) and
 the canon stage names Component 3 - Orthogonalization / Component 4 -
 Combination, with the capped-simplex algorithm documented in
@@ -25,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import alpha_core  # noqa: E402
 import numpy as np  # noqa: E402
 
-from quant_api.core.config import DataConfig, HarnessParams  # noqa: E402
-from quant_api.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index  # noqa: E402
-from quant_api import portfolio as p  # noqa: E402
+from quantcore.core.config import DataConfig, HarnessParams  # noqa: E402
+from quantcore.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index  # noqa: E402
+from quantcore import portfolio as p  # noqa: E402
 
 #: Small catalog window: 241 bars (one trading day, 2026-08-28).
 SMALL = DataConfig(start="2026-08-28", end="2026-08-29")
@@ -268,7 +268,7 @@ def test_score_pool_invalid_dsl_raises() -> None:
 
 
 def test_load_pool_roundtrip() -> None:
-    # Re-export of quant_api.core.pool.load_pool; folder is the source of
+    # Re-export of quantcore.core.pool.load_pool; folder is the source of
     # truth for the pool (DEC-017).
     with tempfile.TemporaryDirectory() as tmp:
         _pool_two(tmp)

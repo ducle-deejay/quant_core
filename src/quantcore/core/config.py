@@ -16,7 +16,7 @@ from trading.risk.state import RiskConfig  # noqa: F401
 #: Catalog key for the default instrument/resolution (research catalog).
 DEFAULT_BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
 
-#: Repository root (src/quant_api/core/config.py -> parents[3]).
+#: Repository root (src/quantcore/core/config.py -> parents[3]).
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: Default research catalog root.

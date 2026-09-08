@@ -1,9 +1,9 @@
-"""Unit tests for quant_api.core (decision note DEC-017).
+"""Unit tests for quantcore.core (decision note DEC-017).
 
 Covers the shared foundation the four role modules build on: registry
 semantics, pool folder round-trip, artifact writers, catalog data access.
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_core.py` (repo root).
+Run: `.venv/bin/python3 src/quantcore/tests/test_core.py` (repo root).
 """
 
 from __future__ import annotations
@@ -15,22 +15,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from quant_api.core.artifacts import (
+from quantcore.core.artifacts import (
     append_trial_ledger,
     write_risk_overlay_config,
     write_slippage_summary,
     write_weights,
 )
-from quant_api.core.config import DataConfig, DEFAULT_BAR_TYPE
-from quant_api.core.data import close_volume, load_bars
-from quant_api.core.pool import (
+from quantcore.core.config import DataConfig, DEFAULT_BAR_TYPE
+from quantcore.core.data import close_volume, load_bars
+from quantcore.core.pool import (
     PoolEntry,
     load_index,
     load_pool,
     write_pool_entry,
     write_pool_index,
 )
-from quant_api.core.registry import Registry
+from quantcore.core.registry import Registry
 
 
 def test_registry_semantics() -> None:

@@ -1,10 +1,10 @@
-"""Unit tests for the quant_api alpha module (decision note DEC-017).
+"""Unit tests for the quantcore alpha module (decision note DEC-017).
 
 Gate selectivity is tested with synthetic series; chain mechanics with the
 real catalog window. Governing notes: DEC-017, canon Component 1 - Canonical
 Simulation, Component 2 - Evaluation and Screening.
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_alpha.py` (repo root).
+Run: `.venv/bin/python3 src/quantcore/tests/test_alpha.py` (repo root).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import math
 
-from quant_api.alpha import (
+from quantcore.alpha import (
     GateCriteria,
     AlphaConfig,
     build_spec_sheet,
@@ -28,8 +28,8 @@ from quant_api.alpha import (
     screen_batch,
     validate_seed,
 )
-from quant_api.core import DataConfig, HarnessParams, PoolEntry, load_bars
-from quant_api.core.pool import load_pool
+from quantcore.core import DataConfig, HarnessParams, PoolEntry, load_bars
+from quantcore.core.pool import load_pool
 
 
 def _synthetic(seed: int = 7, n: int = 3000):
@@ -165,7 +165,7 @@ def test_deliver_to_pool_round_trip() -> None:
     assert entry.alpha_id in idx
 
     out_tear = None  # OUT guard covered by the mock below (DSL grammar has no %).
-    from quant_api.core.report import TearSheet
+    from quantcore.core.report import TearSheet
 
     fake_out = TearSheet(
         alpha_id="x", dsl="close", metrics={}, verdict="OUT", reasons=("ic",)
@@ -245,7 +245,7 @@ def test_screen_batch_source_ga_provenance() -> None:
 
 def test_mine_seeds_custom_fitness_validation_and_dedupe() -> None:
     """UAT fix: custom-fitness output is validated + canonicalized + deduped."""
-    from quant_api.alpha import ga_fitness
+    from quantcore.alpha import ga_fitness
 
     def fit_bad(seeds, close, volume, population_size, generations, seed):
         return ["ts_returns(close, 8)", "ts_returns(close, 8)", 123, "not valid !!!"]
@@ -276,7 +276,7 @@ def test_walk_forward_not_applicable_on_short_sample() -> None:
 
 
 def test_score_helper() -> None:
-    from quant_api.alpha import score
+    from quantcore.alpha import score
 
     rows = score(["close - ewma(close, 8)"], [100.0 + i for i in range(500)], [1.0] * 500)
     assert len(rows) == 1 and len(rows[0]) == 500

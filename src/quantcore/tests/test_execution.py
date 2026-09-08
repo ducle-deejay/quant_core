@@ -1,9 +1,9 @@
-"""Unit tests for the quant_api execution module (decision note DEC-017).
+"""Unit tests for the quantcore execution module (decision note DEC-017).
 
 Governing notes: DEC-017; canon Component 6 - Trade Scheduling (urgency,
 order discipline), feedback 7->1 (slippage -> cost model).
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_execution.py` (repo root).
+Run: `.venv/bin/python3 src/quantcore/tests/test_execution.py` (repo root).
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import pandas as pd
-from quant_api.core import DataConfig
-from quant_api.execution import (
+from quantcore.core import DataConfig
+from quantcore.execution import (
     ExecutionConfig,
     backtest_execution,
     execution_algorithms,
@@ -103,7 +103,7 @@ def test_slippage_report_synthetic() -> None:
 
 def test_backtest_execution_smoke() -> None:
     """End-to-end Nautilus backtest on a 1-day catalog window (241 bars)."""
-    from quant_api.core import load_bars
+    from quantcore.core import load_bars
 
     window = DataConfig(start="2026-08-28", end="2026-08-29")
     df = load_bars(window)
@@ -152,7 +152,7 @@ def test_backtest_execution_tick_mode() -> None:
     if not nox.exists():
         print("[SKIP] test_backtest_execution_tick_mode: nox catalog not present")
         return
-    from quant_api.core import DataConfig
+    from quantcore.core import DataConfig
 
     nox_cfg = DataConfig(catalog_path=str(nox))
     target_df = pd.DataFrame({
@@ -180,7 +180,7 @@ def test_backtest_execution_tick_mode_l1_no_depth() -> None:
     if not nox.exists():
         print("[SKIP] test_backtest_execution_tick_mode_l1_no_depth: nox catalog not present")
         return
-    from quant_api.core import DataConfig
+    from quantcore.core import DataConfig
 
     nox_cfg = DataConfig(catalog_path=str(nox))
     target_df = pd.DataFrame({

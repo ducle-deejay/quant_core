@@ -1,4 +1,4 @@
-"""quant_api.risk - Quant Risk Researcher module (decision note DEC-017).
+"""quantcore.risk - Quant Risk Researcher module (decision note DEC-017).
 
 The risk role OWNS the sizing model (vol-target stack + leverage cap +
 drawdown overlay -> target position) and the risk-overlay policies. The
@@ -26,10 +26,10 @@ from pathlib import Path
 import alpha_core
 import numpy as np
 
-from quant_api.core.artifacts import write_risk_overlay_config
-from quant_api.core.config import DataConfig
-from quant_api.core.data import close_volume, load_bars
-from quant_api.core.registry import Registry
+from quantcore.core.artifacts import write_risk_overlay_config
+from quantcore.core.config import DataConfig
+from quantcore.core.data import close_volume, load_bars
+from quantcore.core.registry import Registry
 from trading.contracts import HarnessParams
 from trading.risk.state import RiskConfig, RiskLedger
 
@@ -601,7 +601,7 @@ def build_overlay_config(
         "generated": datetime.now(timezone.utc).isoformat(),
         "provenance": {
             "engine_version": getattr(alpha_core, "__version__", "unknown"),
-            "source": "quant_api.risk.build_overlay_config",
+            "source": "quantcore.risk.build_overlay_config",
         },
     }
     if save:

@@ -1,4 +1,4 @@
-"""quant_api.execution - Execution Researcher module (decision note DEC-017).
+"""quantcore.execution - Execution Researcher module (decision note DEC-017).
 
 Offline execution research reusing the Nautilus native machinery where
 feasible (decision note DEC-017; Nautilus v1.231.0): ``backtest_execution``
@@ -34,9 +34,9 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.trading.strategy import Strategy
 
-from quant_api.core.artifacts import write_slippage_summary
-from quant_api.core.config import DEFAULT_BAR_TYPE, DataConfig, REPO_ROOT
-from quant_api.core.registry import Registry
+from quantcore.core.artifacts import write_slippage_summary
+from quantcore.core.config import DEFAULT_BAR_TYPE, DataConfig, REPO_ROOT
+from quantcore.core.registry import Registry
 from trading.contracts import HarnessParams
 from trading.instruments import build_continuous_futures_contract, load_futures_instrument_spec
 

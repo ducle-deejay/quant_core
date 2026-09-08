@@ -1,4 +1,4 @@
-"""Full-chain integration test for the quant_api role modules (DEC-017).
+"""Full-chain integration test for the quantcore role modules (DEC-017).
 
 Chain: seed -> single-alpha evaluation -> GA mining -> pool delivery ->
 pool scores -> combination -> portfolio backtest (sizing + risk policy).
@@ -9,7 +9,7 @@ handoff mechanics between the four role modules, not gate selectivity
 (gate selectivity is unit-tested with synthetic data in each module's
 tests). Governing note: DEC-017; canon names in full where cited.
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_integration.py` (repo root).
+Run: `.venv/bin/python3 src/quantcore/tests/test_integration.py` (repo root).
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import tempfile
 
-from quant_api.core import DataConfig, HarnessParams, load_bars
-from quant_api.core.pool import load_pool
+from quantcore.core import DataConfig, HarnessParams, load_bars
+from quantcore.core.pool import load_pool
 
 WINDOW = DataConfig(start="2026-07-15", end="2026-08-28")
 SEEDS = ("close - ewma(close, 8)", "ts_returns(close, 8)", "-ts_returns(close, 5)")
@@ -30,7 +30,7 @@ SEEDS = ("close - ewma(close, 8)", "ts_returns(close, 8)", "-ts_returns(close, 5
 
 def _permissive_config():
     """Chain-mechanics config: every finite-metric candidate passes the gate."""
-    from quant_api.alpha import GateCriteria, AlphaConfig
+    from quantcore.alpha import GateCriteria, AlphaConfig
 
     gate = GateCriteria(
         min_abs_ic=0.0,
@@ -51,7 +51,7 @@ def _permissive_config():
 
 
 def test_full_chain() -> None:
-    from quant_api.alpha import (
+    from quantcore.alpha import (
         build_spec_sheet,
         deliver_to_pool,
         evaluate_candidate,
@@ -92,7 +92,7 @@ def test_full_chain() -> None:
     assert len(pool) == 1 and pool[0].alpha_id == entry.alpha_id
 
     # 5. Portfolio: pool scores -> combine -> refit weights.
-    from quant_api.portfolio import combine, score_pool, refit_weights
+    from quantcore.portfolio import combine, score_pool, refit_weights
 
     scores = score_pool(pool, data=WINDOW)
     assert set(scores) == {entry.alpha_id}
@@ -104,7 +104,7 @@ def test_full_chain() -> None:
     assert abs(sum(w.values()) - 1.0) < 1e-6, f"weights must sum to 1: {w}"
 
     # 6. Risk: portfolio backtest with sizing + trigger-matrix policy.
-    from quant_api.risk import RiskBacktestConfig, backtest_portfolio
+    from quantcore.risk import RiskBacktestConfig, backtest_portfolio
 
     risk_cfg = RiskBacktestConfig(data=WINDOW)
     report = backtest_portfolio(combined["composite"], data=WINDOW, config=risk_cfg)
@@ -119,7 +119,7 @@ def tmp(sub: str) -> str:
     """One shared temp root per test run (created lazily)."""
     global _TMP_ROOT
     if _TMP_ROOT is None:
-        _TMP_ROOT = Path(tempfile.mkdtemp(prefix="quant_api_integration_"))
+        _TMP_ROOT = Path(tempfile.mkdtemp(prefix="quantcore_integration_"))
     root = _TMP_ROOT / sub
     root.mkdir(parents=True, exist_ok=True)
     return str(root)

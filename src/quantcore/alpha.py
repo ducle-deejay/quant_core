@@ -1,4 +1,4 @@
-"""quant_api.alpha - Quantitative Researcher module (decision note DEC-017).
+"""quantcore.alpha - Quantitative Researcher module (decision note DEC-017).
 
 WorldQuant-style workflow: hand-written seed -> single-alpha evaluation
 (Component 1 - Canonical Simulation + Component 2 - Evaluation and
@@ -23,12 +23,12 @@ from datetime import date
 import alpha_core
 import numpy as np
 
-from quant_api.core.artifacts import append_trial_ledger
-from quant_api.core.config import DataConfig
-from quant_api.core.data import close_volume, load_bars
-from quant_api.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index
-from quant_api.core.registry import Registry
-from quant_api.core.report import SpecSheet, TearSheet
+from quantcore.core.artifacts import append_trial_ledger
+from quantcore.core.config import DataConfig
+from quantcore.core.data import close_volume, load_bars
+from quantcore.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index
+from quantcore.core.registry import Registry
+from quantcore.core.report import SpecSheet, TearSheet
 
 try:  # trading.contracts is the live wiring contract source (DEC-017)
     from trading.contracts import HarnessParams
@@ -98,7 +98,7 @@ ga_fitness.register(
     source="engine",
     description="engine GA, fixed fitness mean score x next-bar return;"
     " custom fitness = python fn(seeds, close, volume, population_size,"
-    " generations, seed) -> list[str]; use quant_api.alpha.score() as the"
+    " generations, seed) -> list[str]; use quantcore.alpha.score() as the"
     " scoring primitive inside custom fitnesses",
 )
 

@@ -1,10 +1,10 @@
-"""Unit tests for the quant_api risk module (decision note DEC-017).
+"""Unit tests for the quantcore risk module (decision note DEC-017).
 
 Governing notes: DEC-017; canon Component 5 - Position Construction
 (sizing ownership), Component 7 - Risk Overlay and Monitoring (trigger
 matrix, gauges). Vocabulary: portfolio backtest, never "replay".
 
-Run: `.venv/bin/python3 src/quant_api/tests/test_risk.py` (repo root).
+Run: `.venv/bin/python3 src/quantcore/tests/test_risk.py` (repo root).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import math
 
-from quant_api.risk import (
+from quantcore.risk import (
     RiskBacktestConfig,
     backtest_portfolio,
     build_overlay_config,
@@ -27,7 +27,7 @@ from quant_api.risk import (
     risk_policies,
     sizing_methods,
 )
-from quant_api.core import DataConfig, HarnessParams, RiskConfig, load_bars
+from quantcore.core import DataConfig, HarnessParams, RiskConfig, load_bars
 from trading.risk.state import RiskLedger
 
 WINDOW = DataConfig(start="2026-07-15", end="2026-08-28")
@@ -203,7 +203,7 @@ def test_custom_policy_documented_contract_keys() -> None:
 
 def test_no_trade_band_contracts() -> None:
     """UAT fix: |z| below harness.band -> 0 contracts (no churn)."""
-    from quant_api.risk import _to_contracts
+    from quantcore.risk import _to_contracts
 
     cfg = RiskBacktestConfig()
     out = _to_contracts([0.1, 0.5, 2.0], [1000.0, 1000.0, 1000.0], cfg)

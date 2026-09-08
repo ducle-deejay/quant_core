@@ -1,4 +1,4 @@
-"""quant_api.portfolio - Portfolio Researcher API (decision note DEC-017).
+"""quantcore.portfolio - Portfolio Researcher API (decision note DEC-017).
 
 Role: Portfolio Researcher. Consumes the research pool (per-alpha files with
 canonical DSL + metadata), orthogonalizes new candidates against it, combines
@@ -43,11 +43,11 @@ import alpha_core
 import numpy as np
 import pandas as pd
 
-from quant_api.core.artifacts import write_weights
-from quant_api.core.config import DataConfig, HarnessParams
-from quant_api.core.data import close_volume, load_bars
-from quant_api.core.pool import PoolEntry, load_pool
-from quant_api.core.registry import Registry
+from quantcore.core.artifacts import write_weights
+from quantcore.core.config import DataConfig, HarnessParams
+from quantcore.core.data import close_volume, load_bars
+from quantcore.core.pool import PoolEntry, load_pool
+from quantcore.core.registry import Registry
 
 #: Capped-simplex bounds for inverse-volatility weights, mirroring
 #: ``InverseVol::default`` in src/alpha-core/src/strategies/combination/
@@ -493,7 +493,7 @@ def refit_weights(
     ``1/std`` (mirror of inverse_vol.rs). Returns
     ``{"generated": ISO date, "method", "weights": {alpha_id: w},
     "provenance": {"method", "source"}}``. With ``save=True`` the result is
-    persisted via ``quant_api.core.artifacts.write_weights`` to
+    persisted via ``quantcore.core.artifacts.write_weights`` to
     ``root/weights.json`` (default root ``data/pool``) - the handoff artifact
     consumed by the live ``PortfolioConfig``.
     """
@@ -621,7 +621,7 @@ def portfolio_health_report(
     }
 
 
-# ``load_pool`` is a public-surface re-export of quant_api.core.pool.load_pool
+# ``load_pool`` is a public-surface re-export of quantcore.core.pool.load_pool
 # (already imported at the top of this module).
 __all__ = [
     "combine_methods",
