@@ -118,7 +118,9 @@ def test_make_node_config_wires_streaming_redis_and_state() -> None:
         routing=routing,
         data_client_config=data_client_config,
         exec_client_config=exec_client_config,
+        persistence=True,
     )
+    _assert(cfg.environment == paper.NAUTILUS_RUNTIME, str(cfg.environment))
 
     # Feather streaming: catalog path + the verified include_types subset.
     _assert(
@@ -148,6 +150,10 @@ def test_make_node_config_wires_streaming_redis_and_state() -> None:
 
 def test_build_composition_dry_run_succeeds_and_wires_session() -> None:
     node = paper.build_composition(dry_run=True)
+    _assert(node._config.cache.database is None, "dry-run connected persistence")
+    _assert(node._config.streaming is None, "dry-run opened stream persistence")
+    _assert(node._config.load_state is False, "dry-run loads persisted state")
+    _assert(node._config.save_state is False, "dry-run saves persisted state")
 
     strategies = node.trader.strategies()
     bridges = [s for s in strategies if isinstance(s, BridgeStrategy)]
@@ -170,6 +176,7 @@ def test_build_composition_dry_run_succeeds_and_wires_session() -> None:
         actor.config.transition_log_path == str(artifacts / "risk_transitions.jsonl"),
         actor.config.transition_log_path,
     )
+    node.dispose()
 
 
 # --------------------------------------------------------------------------- #

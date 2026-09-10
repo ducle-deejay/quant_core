@@ -30,6 +30,7 @@ from quantcore.core.artifacts import write_risk_overlay_config
 from quantcore.core.config import DataConfig
 from quantcore.core.data import close_volume, load_bars
 from quantcore.core.registry import Registry
+from quantcore.core.extensions import RiskMeasure, _CallableRiskMeasure
 from trading.contracts import HarnessParams
 from trading.risk.state import RiskConfig, RiskLedger
 
@@ -40,7 +41,12 @@ from trading.risk.state import RiskConfig, RiskLedger
 #: Sizing slot. UNIFORM call convention for every method (engine defaults
 #: and python-registered alike):
 #: ``fn(z_scores, vol_est, target_vol, drawdowns=None, floor=None) -> list[float]``
-sizing_methods = Registry("sizing_methods")
+sizing_methods = Registry(
+    "sizing_methods",
+    contract=RiskMeasure,
+    capability="adjust",
+    adapter=_CallableRiskMeasure,
+)
 
 
 def _vol_target(z_scores, vol_est, target_vol, drawdowns=None, floor=None):
@@ -265,6 +271,8 @@ def backtest_portfolio(
     z = sizing_methods.call(sizing, list(composite), vol_est, cfg.vol_target, None, cfg.vol_floor)
     if len(z) != n:
         raise ValueError(f"sizing method {sizing!r} returned {len(z)} values (expected {n})")
+    if not all(math.isfinite(value) for value in z):
+        raise ValueError(f"sizing method {sizing!r} returned non-finite values")
     proxy = _to_contracts(z, close, cfg)
     proxy_pnl = alpha_core.compute_pnl_py(proxy, returns, h.cost_per_side, h.bars_per_day).net
     dd = _drawdowns_from_pnl(list(proxy_pnl), close, cfg.capital_vnd)
@@ -274,6 +282,10 @@ def backtest_portfolio(
     z2 = sizing_methods.call(
         sizing, list(composite), vol_est, cfg.vol_target, dd, cfg.vol_floor
     )
+    if len(z2) != n:
+        raise ValueError(f"sizing method {sizing!r} returned {len(z2)} values (expected {n})")
+    if not all(math.isfinite(value) for value in z2):
+        raise ValueError(f"sizing method {sizing!r} returned non-finite values")
     before = _to_contracts(z2, close, cfg)
     before_pnl = alpha_core.compute_pnl_py(before, returns, h.cost_per_side, h.bars_per_day).net
 

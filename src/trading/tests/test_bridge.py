@@ -272,6 +272,30 @@ def test_has_working_orders():
     assert has_working_orders(2, 1)
 
 
+def test_working_order_check_is_instrument_wide():
+    calls = []
+
+    class Cache:
+        def orders_open(self, **kwargs):
+            calls.append(("open", kwargs))
+            return [object()]
+
+        def orders_inflight(self, **kwargs):
+            calls.append(("inflight", kwargs))
+            return []
+
+    class Bridge:
+        cache = Cache()
+        _instrument_id = "VN30F1M.HNX"
+        _pending_client_order_ids = set()
+
+    assert BridgeStrategy._working_order_exists(Bridge())
+    assert calls == [
+        ("open", {"instrument_id": "VN30F1M.HNX"}),
+        ("inflight", {"instrument_id": "VN30F1M.HNX"}),
+    ]
+
+
 def test_order_side_for_delta():
     assert order_side_for_delta(2) == "BUY"
     assert order_side_for_delta(-3) == "SELL"

@@ -3,7 +3,7 @@
 Composes the three wiring workstreams into one Nautilus TradingNode:
 
     DNSE live bars (1-min) --> BridgeStrategy (alpha_core decisions)
-                                  |  target -> gate -> orders (LO/MAK)
+                                  |  desired target -> risk decision -> orders
                                   v
                           entrade demo execution client
                                   ^
@@ -43,6 +43,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from nautilus_trader.common import Environment
 from nautilus_trader.common.config import LoggingConfig
 from nautilus_trader.config import CacheConfig
 from nautilus_trader.config import DatabaseConfig
@@ -87,6 +88,12 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_PATH = ROOT / ".env"
 INSTRUMENT_NAME = "VN30F1M"
 TRADER_ID = "TRADER-001"
+# The paper composition is deliberately explicit: Nautilus always runs its
+# LIVE runtime, while Entrade is selected at its external DEMO account
+# boundary.  A production account must be composed through trading.node's
+# guarded live configuration, not by changing this paper constant.
+NAUTILUS_RUNTIME = Environment.LIVE
+ENTRADE_ACCOUNT_ENVIRONMENT = EntradeEnvironment.DEMO
 # Bridge id formula (v1): f"{component_id}-{order_id_tag}" -> "BridgeStrategy-bridge";
 # the risk overlay subscribes to the bridge's order topic under this exact id.
 BRIDGE_STRATEGY_ID = "BridgeStrategy-bridge"
@@ -175,7 +182,7 @@ def _client_configs(
         investor_id=(
             int(entrade_investor_id) if entrade_investor_id is not None else None
         ),
-        environment=EntradeEnvironment.DEMO,
+        environment=ENTRADE_ACCOUNT_ENVIRONMENT,
         routing=routing,
     )
     return instrument_spec, bar_type, routing, data_client_config, exec_client_config
@@ -186,6 +193,7 @@ def make_node_config(
     routing: RoutingConfig,
     data_client_config: DnseDataClientConfig,
     exec_client_config: EntradeExecClientConfig,
+    persistence: bool,
 ) -> TradingNodeConfig:
     """The full milestone-1 node config for the 2026-09-03 session.
 
@@ -200,9 +208,12 @@ def make_node_config(
       ``on_load``/``on_save`` hooks via ``Trader.load/save``.
 
     Extracted from :func:`build_composition` so tests can assert the wired
-    values before the node is constructed.
+    values before the node is constructed. ``persistence=False`` is reserved
+    for dry-run construction: it uses the in-memory cache and does not try to
+    connect to Redis.
     """
     return TradingNodeConfig(
+        environment=NAUTILUS_RUNTIME,
         trader_id=TRADER_ID,
         logging=LoggingConfig(log_level=os.getenv("LOG_LEVEL", "INFO"), log_colors=False),
         data_engine=LiveDataEngineConfig(validate_data_sequence=True),
@@ -211,13 +222,17 @@ def make_node_config(
             snapshot_positions=True,  # risk overlay seeds position from cache on start
             snapshot_orders=True,  # order state snapshots -> Redis on every update
         ),
-        cache=CacheConfig(database=CACHE_DATABASE),
-        streaming=StreamingConfig(
-            catalog_path=str(ROOT / "data" / "live"),
-            include_types=STREAMABLE_TYPES,
+        cache=CacheConfig(database=CACHE_DATABASE if persistence else None),
+        streaming=(
+            StreamingConfig(
+                catalog_path=str(ROOT / "data" / "live"),
+                include_types=STREAMABLE_TYPES,
+            )
+            if persistence
+            else None
         ),
-        load_state=True,  # bridge/overlay on_load hooks run before start
-        save_state=True,  # bridge/overlay on_save hooks run at stop
+        load_state=persistence,  # bridge/overlay on_load hooks run before start
+        save_state=persistence,  # bridge/overlay on_save hooks run at stop
         strategies=[],  # both strategies are added programmatically below
         data_clients={DNSE_DATA_CLIENT_NAME: data_client_config},
         exec_clients={DNSE_EXECUTION_CLIENT_NAME: exec_client_config},
@@ -232,6 +247,7 @@ def build_composition(dry_run: bool) -> TradingNode:
         routing=routing,
         data_client_config=data_client_config,
         exec_client_config=exec_client_config,
+        persistence=not dry_run,
     )
 
     node = TradingNode(config=node_config)
@@ -292,16 +308,17 @@ def main() -> None:
 
     if args.dry_run:
         print("DRY RUN: composition built successfully")
+        print(f"  runtime    : Nautilus {NAUTILUS_RUNTIME.value}")
         print(f"  instrument : {INSTRUMENT_NAME} (5% entrade margin, DEMO env)")
         print(f"  session    : {SESSION_DATE} (VN expiry force-close day)")
         print("  strategies : RiskOverlayActor, BridgeStrategy")
         print("  data       : DNSE live 1-min bars (warmup then live)")
         print("  execution  : entrade demo (LO/MAK), reconciliation on")
-        print(f"  streaming  : {ROOT / 'data' / 'live'} "
+        print(f"  streaming  : disabled for dry-run; paper path {ROOT / 'data' / 'live'} "
               f"(feather, {len(STREAMABLE_TYPES)} types)")
-        print("  cache      : Redis 127.0.0.1:6379 "
-              "(order/position snapshots, strategy save/load)")
+        print("  cache      : in-memory for dry-run; paper uses Redis 127.0.0.1:6379")
         print(f"  artifacts  : {session_artifacts_dir(SESSION_DATE)}")
+        node.dispose()
         return
 
     node.build()

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
-from trading.contracts import RiskState
+from trading.contracts import RiskDecision, RiskState, TargetPosition
 
 # --- status vocabulary (canon STG-7 layer 3, shutdown out of scope) ---------
 ACTIVE = "ACTIVE"
@@ -258,6 +258,46 @@ class RiskLedger:
         if abs(target_contracts) <= self.config.max_contracts:
             return True, ""
         return False, REASON_EXCEEDS_MAX
+
+    def decide_target(
+        self,
+        target: TargetPosition,
+        current_contracts: int | None = None,
+    ) -> RiskDecision:
+        """Map the existing gate and trigger matrix to the canonical decision.
+
+        ``current_contracts`` may be supplied by the Nautilus cache; the
+        ledger position remains the fallback for pure/offline callers.
+        Existing loss and stale-feed halts are emergency force-flat actions.
+        Other denials retain the actual position as a blocked target.
+        """
+        if not isinstance(target, TargetPosition):
+            raise TypeError("target must be a TargetPosition")
+        current = self.position if current_contracts is None else current_contracts
+        if isinstance(current, bool) or not isinstance(current, int):
+            raise TypeError("current_contracts must be an integer")
+        # Refresh status before mapping so a decision cannot observe stale
+        # trigger state.  The overlay's latch is applied outside this pure
+        # ledger method.
+        state = self.decide()
+        if state.status == HALTED and state.reason in (REASON_LOSS, REASON_STALE):
+            return RiskDecision(target, 0, "force-flat", state.reason, current)
+        allowed, gate_reason = self.gate(target.target_contracts, current)
+        if allowed:
+            return RiskDecision(
+                target,
+                target.target_contracts,
+                "approve",
+                state.reason or "within-risk-limits",
+                current,
+            )
+        return RiskDecision(
+            target,
+            current,
+            "block",
+            gate_reason or state.reason or "risk-policy-denied",
+            current,
+        )
 
     # -- internals -----------------------------------------------------------
 

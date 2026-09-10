@@ -24,4 +24,10 @@ from quantcore.core.pool import (  # noqa: F401
     write_pool_index,
 )
 from quantcore.core.registry import Method, Registry  # noqa: F401
+from quantcore.core.extensions import (  # noqa: F401
+    ExecutionAlgorithm,
+    PortfolioOptimizer,
+    QuantitativeModel,
+    RiskMeasure,
+)
 from quantcore.core.report import SpecSheet, TearSheet  # noqa: F401

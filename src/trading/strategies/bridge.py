@@ -28,8 +28,8 @@ Decision path (per bar, in this order)
 4. Expiry day before the force-close time: only orders that reduce the
    absolute position are allowed (``is_expiry_day_entry_blocked``).
 5. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition`` (contracts.py).
-6. ``risk.gate(target)`` -> ``(allowed, reason)``; denied targets are logged
-   and skipped.
+6. ``risk.decide(target)`` -> ``RiskDecision``; execution only pursues its
+   approved target. Blocked targets are logged and skipped.
 7. Cooldown: skip when less than ``cooldown_secs`` elapsed since the last
    order submission.
 8. Gap: skip when ``abs(target - current) < min_gap_contracts``.
@@ -103,6 +103,9 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.strategy import Strategy
 
+from trading.contracts import Portfolio
+from trading.contracts import RiskController
+from trading.contracts import RiskDecision
 from trading.contracts import TargetPosition
 from trading.notify import format_force_close
 from trading.notify import format_order_outcome
@@ -388,8 +391,8 @@ class BridgeConfig:
 
     instrument_id: str
     bar_type: str
-    portfolio: Any  # implements trading.contracts.Portfolio
-    risk: Any  # implements trading.contracts.RiskController
+    portfolio: Portfolio
+    risk: RiskController
     order_style: str = "LO"  # "LO" | "MAK"
     cooldown_secs: float = 5.0
     min_gap_contracts: int = 1
@@ -599,30 +602,55 @@ class BridgeStrategy(Strategy):
                 f"portfolio.compute_target must return TargetPosition, got {type(target).__name__}",
             )
 
-        allowed, reason = self.bridge_config.risk.gate(target)
-        if not allowed:
+        risk = self.bridge_config.risk
+        if risk is None:
+            raise RuntimeError("BridgeConfig.risk must provide canonical decide(target)")
+        if callable(getattr(risk, "decide", None)):
+            decision = risk.decide(target)
+        else:
+            # Narrow migration adapter for older external controllers. New
+            # bridge code always consumes RiskDecision.
+            legacy_gate = getattr(risk, "gate", None)
+            if not callable(legacy_gate):
+                raise TypeError("risk must implement decide(target) -> RiskDecision")
+            allowed, legacy_reason = legacy_gate(target)
+            decision = RiskDecision(
+                target,
+                target.target_contracts if allowed else self._current_position_contracts(),
+                "approve" if allowed else "block",
+                legacy_reason or ("within-risk-limits" if allowed else "risk-policy-denied"),
+                self._current_position_contracts(),
+            )
+        if not isinstance(decision, RiskDecision):
+            raise TypeError(
+                f"risk.decide must return RiskDecision, got {type(decision).__name__}"
+            )
+        if decision.action == "block":
             self.log.info(
-                f"Bridge {self.id} target denied by risk controller: {reason} "
+                f"Bridge {self.id} target denied by risk controller: {decision.reason} "
                 f"(target={target.target_contracts})",
             )
             self._log_decision(
                 bar,
                 now_ns,
                 "skip-denied",
-                reason=reason,
+                reason=decision.reason,
                 target=target.target_contracts,
             )
             return
 
+        # Risk may cap or force-flat a desired target.  Every scheduling and
+        # order-construction decision below uses the approved target only.
+        approved_target = decision.approved_target_contracts
         current_contracts = self._current_position_contracts()
-        delta = target_delta(target.target_contracts, current_contracts)
+        delta = target_delta(approved_target, current_contracts)
 
         if on_expiry_day and is_expiry_day_entry_blocked(current_contracts, delta):
             self._log_decision(
                 bar,
                 now_ns,
                 "skip-expiry-day-entry",
-                target=target.target_contracts,
+                target=approved_target,
                 current=current_contracts,
             )
             return
@@ -636,7 +664,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-cooldown",
-                target=target.target_contracts,
+                target=approved_target,
                 current=current_contracts,
             )
             return
@@ -646,7 +674,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-gap",
-                target=target.target_contracts,
+                target=approved_target,
                 current=current_contracts,
             )
             return
@@ -656,7 +684,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-working",
-                target=target.target_contracts,
+                target=approved_target,
                 current=current_contracts,
             )
             return
@@ -666,7 +694,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-instrument-not-ready",
-                target=target.target_contracts,
+                target=approved_target,
                 current=current_contracts,
             )
             return
@@ -676,7 +704,7 @@ class BridgeStrategy(Strategy):
             bar,
             now_ns,
             "submit",
-            target=target.target_contracts,
+            target=approved_target,
             current=current_contracts,
         )
 
@@ -848,17 +876,15 @@ class BridgeStrategy(Strategy):
         return quantity if position.is_long else -quantity
 
     def _working_order_exists(self) -> bool:
-        """True when any non-terminal order exists (open, inflight, or pending)."""
+        """True for an instrument-wide non-terminal order or pending bridge order."""
         open_count = len(
             self.cache.orders_open(
                 instrument_id=self._instrument_id,
-                strategy_id=self.id,
             ),
         )
         inflight_count = len(
             self.cache.orders_inflight(
                 instrument_id=self._instrument_id,
-                strategy_id=self.id,
             ),
         )
         return has_working_orders(open_count, inflight_count) or bool(

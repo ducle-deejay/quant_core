@@ -48,6 +48,7 @@ from quantcore.core.config import DataConfig, HarnessParams
 from quantcore.core.data import close_volume, load_bars
 from quantcore.core.pool import PoolEntry, load_pool
 from quantcore.core.registry import Registry
+from quantcore.core.extensions import PortfolioOptimizer, _CallablePortfolioOptimizer
 
 #: Capped-simplex bounds for inverse-volatility weights, mirroring
 #: ``InverseVol::default`` in src/alpha-core/src/strategies/combination/
@@ -236,7 +237,12 @@ def _mean_ic(composite: list[float], rets: list[float], start: int) -> float:
 # combine_methods registry (Component 4 - Combination, DEC-017)
 # ---------------------------------------------------------------------------
 
-combine_methods = Registry("combine_methods")
+combine_methods = Registry(
+    "combine_methods",
+    contract=PortfolioOptimizer,
+    capability="optimize",
+    adapter=_CallablePortfolioOptimizer,
+)
 
 
 def equal_weight(
@@ -464,7 +470,14 @@ def combine(
             raise ValueError(
                 f"weights are only honored by equal_weight (got method={method!r})"
             )
-        composite = method_entry.fn(matrix)
+        composite = combine_methods.call(method, matrix)
+        if len(composite) != n_bars:
+            raise ValueError(
+                f"combine method {method!r} returned {len(composite)} values "
+                f"for {n_bars} bars"
+            )
+        if not all(math.isfinite(value) for value in composite):
+            raise ValueError(f"combine method {method!r} returned non-finite values")
         derived = None  # custom research methods: implicit weights unrecoverable
 
     return {

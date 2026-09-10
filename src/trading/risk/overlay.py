@@ -18,8 +18,8 @@ Integration notes (milestone 1, decision DEC-008):
   via ``ImportableStrategyConfig`` (strategy_path ``trading.risk.overlay:
   RiskOverlayActor``, config_path ``trading.risk.overlay:RiskOverlayConfig``),
   using the same ``bar_type`` as the bridge. The bridge calls
-  ``risk.gate(target)`` before every order and reads ``risk.status()``
-  (``RiskController`` protocol in ``trading.contracts``).
+  ``risk.decide(target)`` before every order and only pursues the returned
+  approved target (``RiskController`` protocol in ``trading.contracts``).
 - Fill reception (confirmed against v1.231.0): there is NO
   ``subscribe_order_events`` API in v1. A strategy only receives order events
   for orders it submitted itself, routed on the per-strategy topic
@@ -68,7 +68,7 @@ from nautilus_trader.model.events.order import OrderEvent, OrderFilled
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
 
-from trading.contracts import RiskState, TargetPosition
+from trading.contracts import RiskDecision, RiskState, TargetPosition
 from trading.notify import format_flatten_failed
 from trading.notify import format_risk_state
 from trading.notify import notify_or_log
@@ -393,12 +393,33 @@ class RiskOverlayActor(Strategy):
 
     # -- RiskController protocol (trading.contracts) -------------------------
 
-    def gate(self, target: TargetPosition) -> tuple[bool, str]:
-        """Gate one bridge target; re-evaluates risk first so the gate sees
-        the freshest state (a fresh halt also arms the flatten breaker)."""
+    def decide(self, target: TargetPosition) -> RiskDecision:
+        """Return the canonical risk decision for a portfolio target.
+
+        The actual position is read from the Nautilus cache when available;
+        this prevents a stale ledger position from becoming an order target.
+        """
+        if not isinstance(target, TargetPosition):
+            raise TypeError("target must be a TargetPosition")
         self._evaluate()
         current = self._current_contracts()
-        return self._ledger.gate(target.target_contracts, current)
+        if self._halted_latch:
+            return RiskDecision(
+                target,
+                0,
+                "force-flat",
+                self._halted_reason or "halted",
+                current,
+            )
+        return self._ledger.decide_target(target, current)
+
+    def gate(self, target: TargetPosition) -> tuple[bool, str]:
+        """Compatibility gate derived from :meth:`decide`."""
+        decision = self.decide(target)
+        # The legacy boolean contract cannot carry a capped or force-flat
+        # target. Only an unchanged approval is safe to expose as ``True``;
+        # canonical callers consume ``decide`` and its approved target.
+        return decision.action == "approve", decision.reason
 
     def status(self) -> RiskState:
         return RiskState(status=self._ledger.status, reason=self._ledger.reason)

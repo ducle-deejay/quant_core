@@ -37,6 +37,7 @@ from nautilus_trader.trading.strategy import Strategy
 from quantcore.core.artifacts import write_slippage_summary
 from quantcore.core.config import DEFAULT_BAR_TYPE, DataConfig, REPO_ROOT
 from quantcore.core.registry import Registry
+from quantcore.core.extensions import ExecutionAlgorithm, _CallableExecutionAlgorithm
 from trading.contracts import HarnessParams
 from trading.instruments import build_continuous_futures_contract, load_futures_instrument_spec
 
@@ -47,7 +48,12 @@ INSTRUMENT_DEF_PATH = REPO_ROOT / "src" / "market_data" / "instrument_definition
 # --------------------------------------------------------------------------- #
 
 #: Execution-algorithm slot: fn(gap_contracts, config) -> list[int] (signed chunks).
-execution_algorithms = Registry("execution_algorithms")
+execution_algorithms = Registry(
+    "execution_algorithms",
+    contract=ExecutionAlgorithm,
+    capability="plan",
+    adapter=_CallableExecutionAlgorithm,
+)
 
 
 def _marketable_limit_plan(gap_contracts: int, config: "ExecutionConfig") -> list[int]:
@@ -83,6 +89,31 @@ execution_algorithms.register(
     source="python",
     description="even slices over slice_bars bars",
 )
+
+
+def plan_orders(
+    gap_contracts: int,
+    algorithm: str,
+    config: "ExecutionConfig",
+) -> list[int]:
+    """Plan and validate signed child quantities for one position gap."""
+    if isinstance(gap_contracts, bool) or not isinstance(gap_contracts, int):
+        raise TypeError("gap_contracts must be an integer")
+    if not isinstance(config, ExecutionConfig):
+        raise TypeError("config must be an ExecutionConfig")
+    chunks = list(execution_algorithms.call(algorithm, gap_contracts, config))
+    if any(isinstance(chunk, bool) or not isinstance(chunk, int) for chunk in chunks):
+        raise ValueError(f"execution algorithm {algorithm!r} must return integer quantities")
+    if any(chunk == 0 for chunk in chunks):
+        raise ValueError(f"execution algorithm {algorithm!r} returned a zero quantity")
+    if sum(chunks) != gap_contracts:
+        raise ValueError(
+            f"execution algorithm {algorithm!r} quantities sum to {sum(chunks)}, "
+            f"expected {gap_contracts}"
+        )
+    if gap_contracts and any((chunk > 0) != (gap_contracts > 0) for chunk in chunks):
+        raise ValueError(f"execution algorithm {algorithm!r} reversed the gap direction")
+    return chunks
 
 
 # --------------------------------------------------------------------------- #
@@ -206,7 +237,7 @@ class TargetFollowerStrategy(Strategy):
             if elapsed < self._cfg.cooldown_secs:
                 return
 
-        plan = execution_algorithms.call(self._algo, gap, self._cfg)
+        plan = plan_orders(gap, self._algo, self._cfg)
         if not plan:
             return
         self._queue = deque(plan[1:])

@@ -11,7 +11,10 @@ Python method can later be migrated into the Rust traits or live wiring.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar, cast
+
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -19,31 +22,59 @@ class Method:
     """One registered method with provenance."""
 
     name: str
-    fn: Callable[..., Any]
+    fn: object
     source: str  # "engine" (Rust-backed default) | "python" (research)
     description: str = ""
+    capability: str | None = None
 
 
 class Registry:
     """Name -> Method store with strict duplicate handling."""
 
-    def __init__(self, slot: str) -> None:
+    def __init__(
+        self,
+        slot: str,
+        *,
+        contract: type | None = None,
+        capability: str | None = None,
+        adapter: Callable[[Callable[..., Any]], object] | None = None,
+    ) -> None:
         self.slot = slot
+        self.contract = contract
+        self.capability = capability
+        self.adapter = adapter
         self._methods: dict[str, Method] = {}
 
     def register(
         self,
         name: str,
-        fn: Callable[..., Any],
+        fn: T,
         *,
         source: str = "python",
         description: str = "",
         replace: bool = False,
-    ) -> Callable[..., Any]:
+    ) -> T:
         if not name or not isinstance(name, str):
             raise ValueError(f"method name must be a non-empty string (got {name!r})")
-        if not callable(fn):
+        implementation: object = fn
+        if self.contract is not None and not isinstance(fn, self.contract):
+            if not callable(fn) or self.adapter is None:
+                required = self.capability or self.contract.__name__
+                raise ValueError(
+                    f"{self.slot} method {name!r} must implement {required}; "
+                    "register an object with the required method or a callable "
+                    "supported by this registry's narrow adapter"
+                )
+            implementation = self.adapter(cast(Callable[..., Any], fn))
+        if self.contract is None and not callable(fn):
             raise ValueError(f"{self.slot} method {name!r} must be callable")
+        if self.contract is not None:
+            capability = self.capability
+            if capability and not callable(getattr(implementation, capability, None)):
+                raise ValueError(
+                    f"{self.slot} method {name!r} must provide callable {capability}(...); "
+                    f"got {type(fn).__name__}"
+                )
         if source not in ("engine", "python"):
             raise ValueError(f"source must be 'engine' or 'python' (got {source!r})")
         if name in self._methods and not replace:
@@ -51,7 +82,7 @@ class Registry:
                 f"{self.slot} method {name!r} already registered"
                 f" (source={self._methods[name].source})"
             )
-        self._methods[name] = Method(name, fn, source, description)
+        self._methods[name] = Method(name, implementation, source, description, self.capability)
         return fn
 
     def get(self, name: str) -> Method:
@@ -64,7 +95,12 @@ class Registry:
             ) from None
 
     def call(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        return self.get(name).fn(*args, **kwargs)
+        method = self.get(name)
+        if method.capability is not None:
+            return getattr(method.fn, method.capability)(*args, **kwargs)
+        if callable(method.fn):
+            return method.fn(*args, **kwargs)
+        raise TypeError(f"registered {self.slot} method {name!r} is not callable")
 
     def names(self) -> list[str]:
         return sorted(self._methods)

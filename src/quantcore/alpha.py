@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date
 
@@ -28,6 +29,7 @@ from quantcore.core.config import DataConfig
 from quantcore.core.data import close_volume, load_bars
 from quantcore.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index
 from quantcore.core.registry import Registry
+from quantcore.core.extensions import QuantitativeModel, _CallableQuantitativeModel
 from quantcore.core.report import SpecSheet, TearSheet
 
 try:  # trading.contracts is the live wiring contract source (DEC-017)
@@ -101,6 +103,65 @@ ga_fitness.register(
     " generations, seed) -> list[str]; use quantcore.alpha.score() as the"
     " scoring primitive inside custom fitnesses",
 )
+
+
+class EngineQuantitativeModel:
+    """Thin model adapter over the Rust expression evaluator.
+
+    ``dsl`` is explicit because the expression is part of model semantics;
+    no expression is silently selected by a call site.
+    """
+
+    def __init__(self, dsl: str) -> None:
+        self.dsl = alpha_core.validate_expression_py(dsl)
+
+    def score(self, close: Sequence[float], volume: Sequence[float]) -> list[float]:
+        matrix = alpha_core.execute_batch_py([self.dsl], list(close), list(volume))
+        return list(matrix[0])
+
+
+quantitative_models = Registry(
+    "quantitative_models",
+    contract=QuantitativeModel,
+    capability="score",
+    adapter=_CallableQuantitativeModel,
+)
+# This registered built-in names its expression explicitly. Other DSL
+# expressions use ``EngineQuantitativeModel(dsl)`` so no model semantics are
+# selected by an implicit default.
+quantitative_models.register(
+    "engine_close",
+    EngineQuantitativeModel("close"),
+    source="engine",
+    description="Rust alpha expression evaluator; construct with explicit DSL for other expressions",
+)
+
+
+def score_model(
+    model: str | QuantitativeModel,
+    close: list[float],
+    volume: list[float],
+) -> list[float]:
+    """Score one observation window through the quantitative-model contract."""
+    if not close:
+        raise ValueError("close and volume must be non-empty")
+    if len(close) != len(volume):
+        raise ValueError(
+            f"close and volume lengths differ ({len(close)} != {len(volume)})"
+        )
+    if isinstance(model, str):
+        scores = list(quantitative_models.call(model, close, volume))
+    else:
+        if not isinstance(model, QuantitativeModel):
+            raise TypeError("model must be a registered name or implement QuantitativeModel.score")
+        scores = list(model.score(close, volume))
+    if len(scores) != len(close):
+        raise ValueError(
+            f"quantitative model returned {len(scores)} scores for {len(close)} bars"
+        )
+    if not any(math.isfinite(value) for value in scores):
+        raise ValueError("quantitative model returned no finite scores")
+    return scores
 
 
 # --------------------------------------------------------------------------- #

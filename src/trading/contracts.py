@@ -15,9 +15,10 @@ Milestone-1 fee model  : DEC-006 (scalar cost_per_side at reference price)
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -57,13 +58,47 @@ class PortfolioConfig:
 
 @dataclass(frozen=True)
 class TargetPosition:
-    """The bridge contract: one decision per bar, in signed contracts."""
+    """Portfolio's desired signed position for one decision timestamp.
+
+    This is a request from the portfolio, not a risk approval, actual
+    position, Nautilus order, or fill.  Risk may cap, block, or force-flat
+    this desired target before execution.
+    """
 
     ts: datetime
     target_contracts: int  # signed; 0 = flat
     z_target: float  # pre-rounding z-scale target (debug/telemetry)
     reason: str
     components: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.ts, datetime)
+            or self.ts.tzinfo is None
+            or self.ts.utcoffset() is None
+        ):
+            raise ValueError("ts must be a timezone-aware datetime")
+        if isinstance(self.target_contracts, bool) or not isinstance(
+            self.target_contracts, int
+        ):
+            raise ValueError("target_contracts must be an integer")
+        if isinstance(self.z_target, bool) or not isinstance(
+            self.z_target, (int, float)
+        ):
+            raise ValueError("z_target must be a finite number")
+        if not math.isfinite(self.z_target):
+            raise ValueError("z_target must be a finite number")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        if not isinstance(self.components, dict):
+            raise ValueError("components must be a dict")
+        for name, value in self.components.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("component names must be non-empty strings")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"component {name!r} must be a finite number")
+            if not math.isfinite(value):
+                raise ValueError(f"component {name!r} must be a finite number")
 
 
 class Portfolio(Protocol):
@@ -85,8 +120,63 @@ class RiskState:
 
 
 class RiskController(Protocol):
-    """Risk side: gate every target before it becomes an order."""
+    """Risk side: decide how a desired target may proceed."""
 
-    def gate(self, target: TargetPosition) -> tuple[bool, str]: ...
+    def decide(self, target: TargetPosition) -> "RiskDecision": ...
 
-    def status(self) -> RiskState: ...
+
+RiskAction = Literal["approve", "cap", "block", "force-flat"]
+
+
+@dataclass(frozen=True)
+class RiskDecision:
+    """Risk's decision for one portfolio desired target.
+
+    ``approved_target_contracts`` is the target that execution may pursue;
+    ``current_contracts`` is the actual signed position observed by the risk
+    layer.  A blocked decision retains that actual position as its approved
+    target.  A force-flat decision always approves zero.
+    """
+
+    desired: TargetPosition
+    approved_target_contracts: int
+    action: RiskAction
+    reason: str
+    current_contracts: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.desired, TargetPosition):
+            raise ValueError("desired must be a TargetPosition")
+        if isinstance(self.approved_target_contracts, bool) or not isinstance(
+            self.approved_target_contracts, int
+        ):
+            raise ValueError("approved_target_contracts must be an integer")
+        if self.action not in ("approve", "cap", "block", "force-flat"):
+            raise ValueError("action must be approve, cap, block, or force-flat")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("reason must be a non-empty string")
+        if isinstance(self.current_contracts, bool) or not isinstance(
+            self.current_contracts, int
+        ):
+            raise ValueError("current_contracts must be an integer")
+        if (
+            self.action == "approve"
+            and self.approved_target_contracts != self.desired.target_contracts
+        ):
+            raise ValueError("approve decisions must preserve the desired target")
+        if self.action == "cap":
+            desired = self.desired.target_contracts
+            approved = self.approved_target_contracts
+            if approved == desired:
+                raise ValueError("cap decisions must change the desired target")
+            if abs(approved) > abs(desired):
+                raise ValueError("cap decisions cannot increase absolute target exposure")
+            if desired != 0 and approved != 0 and (desired > 0) != (approved > 0):
+                raise ValueError("cap decisions cannot reverse the desired target")
+        if self.action == "force-flat" and self.approved_target_contracts != 0:
+            raise ValueError("force-flat decisions must approve zero contracts")
+        if (
+            self.action == "block"
+            and self.approved_target_contracts != self.current_contracts
+        ):
+            raise ValueError("blocked decisions must retain the actual current position")
