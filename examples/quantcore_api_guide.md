@@ -147,7 +147,7 @@ risk_result = backtest_portfolio(
     composite,
     data=data,
     sizing="vol_target_drawdown",
-    policy="trigger_matrix",
+    apply_policy=True  # policy: "risk_limits",
     config=RiskBacktestConfig(data=data),
 )
 print(risk_result["before"]["performance"])
@@ -174,7 +174,7 @@ custom_risk_result = backtest_portfolio(
     composite,
     data=data,
     sizing="half-exposure",
-    policy="trigger_matrix",
+    apply_policy=True  # policy: "risk_limits",
     config=RiskBacktestConfig(data=data),
 )
 ```

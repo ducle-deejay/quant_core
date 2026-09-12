@@ -101,7 +101,7 @@ def _load_pool_portfolio(runtime_config):
     live path.
     """
     from core.artifacts import AlphaPool, WeightsArtifact
-    from trading.portfolio import portfolio_config_from_pool
+    from strategy.portfolio import portfolio_config_from_pool
 
     try:
         artifact = WeightsArtifact.load()

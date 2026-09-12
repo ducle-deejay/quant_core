@@ -10,6 +10,7 @@ from pathlib import Path
 from core import Account
 from core import AccountLimits
 from core import Instrument
+from trading.safety import SafetyConfig
 
 #: Documented defaults applied when a key is absent from the JSON file.
 DEFAULTS: dict[str, object] = {
@@ -19,6 +20,14 @@ DEFAULTS: dict[str, object] = {
     "broker": "entrade",
     "account": "demo",
     "close_positions_on_expiry_day": True,
+}
+
+#: Allowed keys inside the ``"safety"`` section (with their defaults); the
+#: section itself is optional. ``max_contracts`` is NOT a safety config - it
+#: lives in ``AccountLimits`` and the monitor reads it from there.
+SAFETY_DEFAULTS: dict[str, float] = {
+    "intraday_loss_limit": 0.02,
+    "staleness_secs": 60.0,
 }
 
 #: Allowed environment values (see ``trading.node``: only sandbox and live
@@ -44,8 +53,11 @@ class RuntimeConfig:
     account : Account
         Broker account boundary: ``Account.DEMO`` or ``Account.LIVE``.
     close_positions_on_expiry_day : bool
-        Master switch for the bridge's expiry gate (force-flat at the
-        expiry cutoff, reduce-only before it).
+        Master switch for the target strategy's expiry gate (force-flat at
+        the expiry cutoff, reduce-only before it).
+    safety : SafetyConfig
+        Safety-boundary thresholds (intraday loss limit fraction, staleness
+        seconds) for the live safety monitor.
     """
 
     instrument: Instrument
@@ -54,6 +66,7 @@ class RuntimeConfig:
     broker: str
     account: Account
     close_positions_on_expiry_day: bool
+    safety: SafetyConfig
 
     def limits(self) -> AccountLimits:
         """The account limits implied by ``capital_vnd`` (core defaults otherwise)."""
@@ -88,18 +101,20 @@ def load_runtime(path: Path, *, confirm_live_account: bool = False) -> RuntimeCo
     Raises
     ------
     ValueError
-        When the file is not a JSON object, contains unknown keys, has
-        wrongly typed/out-of-range values, or selects ``account = "live"``
+        When the file is not a JSON object, contains unknown keys (top
+        level or inside the ``safety`` section), has wrongly
+        typed/out-of-range values, or selects ``account = "live"``
         without ``confirm_live_account``.
     """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"runtime config {path} must be a JSON object")
 
-    unknown = sorted(set(payload) - set(DEFAULTS))
+    unknown = sorted(set(payload) - set(DEFAULTS) - {"safety"})
     if unknown:
         raise ValueError(
-            f"unknown runtime config keys {unknown}; allowed keys: {sorted(DEFAULTS)}"
+            f"unknown runtime config keys {unknown}; allowed keys: "
+            f"{sorted(set(DEFAULTS) | {'safety'})}"
         )
     merged = {**DEFAULTS, **payload}
 
@@ -141,6 +156,8 @@ def load_runtime(path: Path, *, confirm_live_account: bool = False) -> RuntimeCo
     if not isinstance(expiry_close, bool):
         raise ValueError("close_positions_on_expiry_day must be a boolean")
 
+    safety = _parse_safety(payload.get("safety"))
+
     return RuntimeConfig(
         instrument=instrument,
         capital_vnd=float(capital_vnd),
@@ -148,6 +165,34 @@ def load_runtime(path: Path, *, confirm_live_account: bool = False) -> RuntimeCo
         broker=broker,
         account=account,
         close_positions_on_expiry_day=expiry_close,
+        safety=safety,
+    )
+
+
+def _parse_safety(section: object) -> SafetyConfig:
+    """Parse the optional ``"safety"`` JSON section into a ``SafetyConfig``.
+
+    Missing section -> defaults; unknown keys inside the section are
+    rejected with ``ValueError``.
+    """
+    if section is None:
+        return SafetyConfig()
+    if not isinstance(section, dict):
+        raise ValueError("safety section must be a JSON object")
+    unknown = sorted(set(section) - set(SAFETY_DEFAULTS))
+    if unknown:
+        raise ValueError(
+            f"unknown safety config keys {unknown}; allowed keys: {sorted(SAFETY_DEFAULTS)}"
+        )
+    merged = {**SAFETY_DEFAULTS, **section}
+    for key, value in merged.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"safety.{key} must be a number")
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(f"safety.{key} must be a positive finite number")
+    return SafetyConfig(
+        intraday_loss_limit=float(merged["intraday_loss_limit"]),
+        staleness_secs=float(merged["staleness_secs"]),
     )
 
 

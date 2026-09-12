@@ -1,175 +1,39 @@
-# Quickstart: Quantitative Developer
+# Quantitative Developer quickstart
 
-A Quantitative Developer wires research output into the live runner: loads
-and validates `runtime.json`, builds the `PortfolioConfig` from the
-research pool weights artifact, composes the Nautilus `TradingNode` (DNSE
-data client, broker execution client, risk overlay, bridge strategy), and
-installs the launchd job so the session starts automatically each VN
-working day.
+Wire research output into the live runner: core contracts, the strategy package, the safety monitor, runtime configuration, and the CLI.
 
-## Prerequisites
-
-- Ready venv; run from the repo root.
-- Research artifacts for the live handoff: `data/pool/alphas/*.json` +
-  `index.json` (`AlphaPool`) and `data/pool/weights.json`
-  (`WeightsArtifact`). The runner refuses to start without them — there is
-  no silent seed fallback.
-- To actually run a session: credentials in the environment (or
-  `<repo>/.env`): `API_KEY`, `API_SECRET`, `ENTRADE_USERNAME`,
-  `ENTRADE_PASSWORD`, optional `ENTRADE_INVESTOR_ID`; optional Telegram
-  tokens for alerts. `build_node` itself needs these, so the script below
-  stops at the config/handoff layer and explains the node composition.
-
-Units, environments/account axes, runtime keys, expiry rule:
-[conventions.md](conventions.md).
-
-## Script
-
-One complete run: load the runtime config, build the live portfolio config
-from pool + weights, show what the node gets.
-
-```bash
-.venv/bin/python - <<'PY'
-"""Quickstart: developer -- runtime config and the research -> live handoff."""
-from pathlib import Path
-
-from core.artifacts import AlphaPool, PoolEntry, WeightsArtifact
-from trading.config_loader import load_runtime
-from trading.portfolio import portfolio_config_from_pool
-
-# 1. Load the runner config (strict: unknown keys are rejected).
-config = load_runtime(Path("apps/trading/config/runtime.json"))
-print("summary:", config.summary())
-print("limits:", config.limits())
-
-# 2. Research -> live handoff: WeightsArtifact weights are keyed by alpha_id;
-#    the runner joins them to DSL through the pool.
-pool = AlphaPool(instrument="VN30F1M")
-pool.add(PoolEntry(alpha_id="alpha-1fc1ca91", dsl="ts_returns(close, 8)"))
-pool.save(Path("tmp/quickstart_live"))
-WeightsArtifact(
-    generated="2026-09-12",
-    method="inverse_vol",
-    weights={"alpha-1fc1ca91": 1.0},
-    window=None,
-).save(Path("tmp/quickstart_live"))
-
-artifact = WeightsArtifact.load(Path("tmp/quickstart_live"))
-portfolio_config = portfolio_config_from_pool(
-    artifact,
-    AlphaPool.load(Path("tmp/quickstart_live")),
-    config.instrument,
-    limits=config.limits(),
-)
-print("expressions:", portfolio_config.expressions)
-print("weights:", portfolio_config.weights)
-PY
-```
-
-## Expected output
-
-```
-summary: VN30F1M capital=100000000VND env=live broker=entrade account=demo expiry_close=on
-limits: AccountLimits(capital_vnd=100000000.0, safety_factor=0.5, margin_rate=0.05, max_contracts=10)
-expressions: ('ts_returns(close, 8)',)
-weights: (1.0,)
-```
-
-In production the pool and weights come from the research flow at
-`data/pool/` (defaults of `AlphaPool.load()` / `WeightsArtifact.load()`); a
-weights key with no matching pool `alpha_id` is a hard error — re-deliver
-the pool or refit the weights.
-
-## Node composition (dry explanation)
-
-`trading.node.build_node(config, portfolio)` composes, but does not start,
-one Nautilus `TradingNode`:
-
-```
-DNSE live bars (1-min) --> BridgeStrategy (core-gated decisions)
-                               |  desired target (PortfolioOrchestrator.compute_target)
-                               |  -> expiry gate -> risk decision -> orders
-                               v
-                       entrade demo/live execution client
-                               ^
-RiskOverlayActor: loss cut, staleness, exposure cap, flatten retry
-```
-
-- Environment mapping: `environment="sandbox"|"live"` in `runtime.json`
-  (see [conventions.md](conventions.md#environments-and-accounts));
-  `"backtest"` raises `NotImplementedError` — researchers use
-  `quantcore.execution`.
-- Persistence: feather stream of bars + order/position/account events to
-  `data/live`; Redis-backed cache on `127.0.0.1:6379`; per-session logs
-  under `data/logs/sessions/<YYYY-MM-DD>/` (`decisions.jsonl` from the
-  bridge, `risk_transitions.jsonl` from the risk overlay).
-- The orchestrator per bar: shape/value guards -> one batch
-  `execute_batch_py` over the buffered bars -> NaN sanitization ->
-  `canonical_map_py` per expression -> `composite_score_py` with the
-  configured weights -> `vol_target_py` -> `to_contracts` (stateless; no
-  hysteresis on the live path). Buffer warm-up (< `z_window + 320` bars)
-  yields a flat `"warmup"` target.
-
-## Running a session
-
-```bash
-.venv/bin/python apps/trading/run.py                # compose and trade the session
-.venv/bin/python apps/trading/run.py --help         # flags
-```
-
-On a non-working day the runner prints one line and exits 0 before touching
-the broker:
-
-```
-Not a VN market working day (source=dnse); nothing to do.
-```
-
-Session behavior:
-
-- The session date is "now" in Asia/Ho_Chi_Minh. A non-working day (DNSE
-  published calendar; falls back to the Mon-Fri heuristic with a warning if
-  the calendar fetch fails) logs one line and exits 0.
-- SIGTERM/SIGINT shut the node down gracefully; the position stays at the
-  broker (overnight holding is intentional — there is NO end-of-day
-  flatten outside the expiry rule).
-- Telegram alerts (when configured) carry session start (config summary)
-  and shutdown; HALT transitions are forwarded by the risk overlay.
-
-### Automatic daily start (launchd)
-
-1. Copy the template:
-   `cp apps/trading/com.quantcore.trading.plist.example ~/Library/LaunchAgents/com.quantcore.trading.plist`
-2. Replace both `<repo>` placeholders with the absolute repo path
-   (`/Users/ducle/repos/quant_core`).
-3. Load it: `launchctl load ~/Library/LaunchAgents/com.quantcore.trading.plist`.
-4. What runs automatically: the runner starts at 08:30 local, Monday to
-   Friday (Weekday 1-5 in the plist). On working days it composes the node
-   and trades the session; on non-working days it exits immediately. Logs:
-   `data/logs/trading-launchd.log`. Unload with
-   `launchctl unload ~/Library/LaunchAgents/com.quantcore.trading.plist`.
-
-### Flipping demo -> live
-
-1. Edit `apps/trading/config/runtime.json`: set `"account": "live"`.
-2. Launchd config alone is not enough — the runner additionally requires
-   the operator flag:
-
-```bash
-.venv/bin/python apps/trading/run.py --confirm-live-account
-```
-
-Without `--confirm-live-account`, `load_runtime` rejects a live-account
-config with `account=live requires --confirm-live-account`. For the launchd
-path, add `<string>--confirm-live-account</string>` to the
-`ProgramArguments` array of the installed plist.
-
-## Where to go next
-
-- Config loader / orchestrator signatures:
-  [reference/core.md](reference/core.md) (contracts the runner consumes:
-  `PortfolioConfig`, `TargetPosition`, `RiskDecision`) and the API surface
-  above.
-- Expiry-day behavior of the bridge: [conventions.md](conventions.md#expiry-rule).
-- Post-session analysis: `post_mortem` and `slippage_report` in
-  [reference/risk.md](reference/risk.md#post_mortem) /
-  [reference/execution.md](reference/execution.md#slippage_report).
+| Method | Module | Role |
+| --- | --- | --- |
+| `Instrument.load(symbol)` | `core.instruments` | Load static reference data (multiplier, tick size). |
+| `BarFrame.from_dataframe(df, *, instrument_id="", bar_type="")` | `core.data` | Wrap a real bar frame for research and live consumers. |
+| `CatalogClient(root=None)` | `core.data` | Read recorded ticks/depth from the data catalog. |
+| `to_contracts(z, price, cap, instrument, limits)` | `core.mapping` | Single score-to-contracts conversion (shared research/live). |
+| `max_contracts_at(price, instrument, limits)` | `core.mapping` | Max leverage headroom at a price. |
+| `hysteresis_band_contracts(band, cap, price, instrument, limits)` | `core.mapping` | No-trade dead-zone width in contracts. |
+| `apply_hysteresis(raw, prev, band_contracts)` | `core.mapping` | Hold-previous rule for contract moves. |
+| `close_returns(close)` / `rolling_vol(close, window, bars_per_day)` / `sanitize_scores(series)` | `core.signal` | Return, volatility, and NaN-sanitization primitives. |
+| `apply_expiry_gate(ts_utc, target_contracts, current_contracts, state, *, enabled, close_time_local="14:00", tz="Asia/Ho_Chi_Minh", working_dates=())` | `core.expiry` | VN30F1M expiry-day force-flat / reduce-only gate. |
+| `vn30_front_month_expiry_date_local(ts_utc, working_dates=())` | `core.expiry` | Front-month expiry date for a timestamp. |
+| `vn30_front_month_expiry_cutoff_utc(ts_utc, working_dates=())` | `core.expiry` | Expiry-day cutoff as a UTC timestamp. |
+| `TargetPosition(ts, target_contracts, z_target, reason, components)` | `core.contracts` | Portfolio's desired signed position (the decision unit). |
+| `AccountLimits(capital_vnd, safety_factor, margin_rate, max_contracts)` | `core.contracts` | Account sizing limits (max_contracts lives here). |
+| `Registry.get/call/register` | `core.registry` | Sizing/policy/algorithm extension registries. |
+| `PortfolioOrchestrator(config, instrument).compute_target(bars, ts)` | `strategy.portfolio` | Bars in, one `TargetPosition` out (pure alpha_core pipeline). |
+| `portfolio_config_from_pool(artifact, pool=None, instrument=None, *, limits=None)` | `strategy.portfolio` | Live portfolio config from the weights artifact. |
+| `TargetPositionStrategy(config, portfolio)` | `strategy.target_position` | The one decision-per-bar strategy; denials arrive as `OrderDenied`. |
+| `SafetyMonitor(instrument_id, bar_type, safety, limits, risk_engine, monitor_strategy_id, bridge_strategy_id, transition_log_path=None, notifier=None)` | `trading.safety` | Drives `RiskEngine.set_trading_state`; flattens on HALTED. |
+| `evaluate_safety(*, session_open, now, last_bar_ts, staleness_secs, position, max_contracts, session_pnl_vnd, capital_vnd, intraday_loss_limit)` | `trading.safety` | Pure safety evaluator: loss > stale > exposure > ACTIVE. |
+| `SessionPnlBook(multiplier).record_fill / .mark / .on_bar` | `trading.safety` | Intraday PnL book; positions carry, PnL resets daily. |
+| `SafetyConfig(intraday_loss_limit=0.02, staleness_secs=60.0)` | `trading.safety` | The two safety knobs (config-driven, no others). |
+| `load_runtime(path, *, confirm_live_account=False)` | `trading.config_loader` | Load and validate `runtime.json` (unknown keys rejected). |
+| `build_node(config, portfolio, *, loop=None)` | `trading.node` | Compose the live TradingNode (DNSE data, entrade execution, both strategies). |
+| `runtime.json` key `instrument` | `apps/trading/config/runtime.json` | Symbol of the traded front month (e.g. `VN30F1M`). |
+| `runtime.json` key `capital_vnd` | `apps/trading/config/runtime.json` | Account capital in VND feeding sizing limits. |
+| `runtime.json` key `environment` | `apps/trading/config/runtime.json` | `backtest` / `sandbox` / `live` (runner rejects backtest). |
+| `runtime.json` key `broker` | `apps/trading/config/runtime.json` | Execution adapter key (`entrade`). |
+| `runtime.json` key `account` | `apps/trading/config/runtime.json` | `demo` or `live` (live needs the CLI confirmation flag). |
+| `runtime.json` key `close_positions_on_expiry_day` | `apps/trading/config/runtime.json` | Master switch for the expiry gate. |
+| `runtime.json` key `safety.intraday_loss_limit` | `apps/trading/config/runtime.json` | Session loss fraction of capital that halts trading (0.02). |
+| `runtime.json` key `safety.staleness_secs` | `apps/trading/config/runtime.json` | Bar-silence seconds (open session) that halt trading (60). |
+| `run.py --config PATH` | `apps/trading/run.py` | Run the live session with a non-default config path. |
+| `run.py --confirm-live-account` | `apps/trading/run.py` | Required confirmation when the config selects `account=live`. |

@@ -5,6 +5,7 @@ exclude = ["src/alpha-core"]
 [tool.uv.sources]
 core = { workspace = true }
 market-data = { workspace = true }
+strategy = { workspace = true }
 trading = { workspace = true }
 quantcore = { workspace = true }
 

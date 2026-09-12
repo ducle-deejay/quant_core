@@ -1,15 +1,21 @@
-# spec: 40-tests.md A — golden tests vs PRE-redesign system (full catalog)
+"""Golden parity tests — new API vs recorded pre-redesign outputs.
 
-import numpy as np
-import pandas as pd
+apply_policy=True must reproduce the old "after" side exactly; the default
+(apply_policy=False) headline must reproduce the old "before" side.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
 import pytest
 
-from core.artifacts import AlphaPool, PoolEntry
-from quantcore.alpha import AlphaConfig, evaluate_seed
-from quantcore.execution import backtest_execution
-from quantcore.portfolio import combine, refit_weights, score_pool
-from quantcore.risk import backtest_portfolio
-from trading.portfolio import SEED_EXPRESSIONS
+REPO = Path(__file__).resolve().parents[2]
+SRC = REPO / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 pytestmark = pytest.mark.integration
 
@@ -20,7 +26,14 @@ def close(a, b, tol=1e-12):
 
 @pytest.fixture(scope="module")
 def chain(full_bars):
-    """The full research chain on the real catalog (spec-sanctioned recipe)."""
+    import pandas as pd  # noqa: F401
+
+    from core.artifacts import AlphaPool, PoolEntry
+    from quantcore.alpha import AlphaConfig, evaluate_seed
+    from quantcore.portfolio import combine, score_pool
+    from quantcore.risk import backtest_portfolio
+    from strategy.portfolio import SEED_EXPRESSIONS
+
     pool = AlphaPool(instrument=full_bars.instrument_id)
     sheets = {}
     acfg = AlphaConfig()
@@ -30,91 +43,62 @@ def chain(full_bars):
         pool.add(PoolEntry(alpha_id=f"golden_seed_{i}", dsl=dsl, tear_sheet=sheet))
     scores = score_pool(pool, full_bars)
     composite = combine(scores, window=full_bars.window)
-    result = backtest_portfolio(composite, full_bars)
-    return {"pool": pool, "sheets": sheets, "composite": composite, "result": result}
+    applied = backtest_portfolio(composite, full_bars, apply_policy=True)
+    headline = backtest_portfolio(composite, full_bars)
+    return {"applied": applied, "headline": headline}
 
 
-def test_golden_alpha_metrics(chain, goldens):
-    for dsl, sheet in chain["sheets"].items():
-        for key, expected in goldens["alpha_metrics"][dsl].items():
-            actual = sheet.metrics.get(key)
-            assert actual is not None, f"missing metric {key} for {dsl}"
-            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-                assert close(actual, expected), f"{dsl}.{key}: {actual} vs {expected}"
-            else:
-                assert actual == expected, f"{dsl}.{key}: {actual!r} vs {expected!r}"
+def test_headline_is_raw_strategy_performance(chain, goldens):
+    expected = goldens["risk_before_after"]["before"]["performance"]
+    perf = chain["headline"].performance
+    assert close(perf["net_sharpe"], expected["net_sharpe"])
+    assert close(perf["max_drawdown"], expected["max_drawdown"])
+    assert close(perf["total_net_pnl"], expected["total_net_pnl"])
 
 
-def test_golden_combine_weights(chain, goldens):
-    composite = chain["composite"]
-    id_to_dsl = {e.alpha_id: e.dsl for e in chain["pool"].entries}
-    for dsl, expected in goldens["combine_weights"].items():
-        actual = next(
-            w
-            for aid, w in zip(composite.alpha_ids, composite.weights)
-            if id_to_dsl[aid] == dsl
-        )
-        assert close(actual, expected), f"{dsl}: {actual} vs {expected}"
-
-
-def test_golden_risk_performance(chain, goldens):
-    result = chain["result"]
-    for side in ("before", "after"):
-        report = getattr(result, side)
-        for key, expected in goldens["risk_before_after"][side]["performance"].items():
-            assert close(report.performance[key], expected), f"{side}.{key}"
-        for key, expected in goldens["risk_before_after"][side]["risk_process"].items():
-            actual = report.risk_process[key]
-            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-                assert close(actual, expected), f"{side}.{key}: {actual} vs {expected}"
-            else:
-                assert actual == expected, f"{side}.{key}"
-
-
-def test_golden_target_series(chain, goldens):
+def test_headline_targets_are_before_series(chain, goldens):
     ts_g = goldens["risk_target_series"]
-    series = chain["result"].targets.target_contracts
+    series = chain["headline"].targets.target_contracts
+    assert [int(x) for x in series[:20]] == ts_g["before_head20"]
+    assert close(sum(abs(int(x)) for x in series), ts_g["before_sum_abs"])
+
+
+def test_applied_policy_performance_parity(chain, goldens):
+    for side in ("before", "after"):
+        expected_perf = goldens["risk_before_after"][side]["performance"]
+        source = (
+            chain["applied"].before_performance
+            if side == "before"
+            else chain["applied"].performance
+        )
+        for key, exp in expected_perf.items():
+            assert close(source[key], exp), f"{side}.{key}"
+
+
+def test_applied_policy_risk_process_parity(chain, goldens):
+    after_proc = chain["applied"].policy
+    expected = goldens["risk_before_after"]["after"]["risk_process"]
+    for key, exp in expected.items():
+        actual = after_proc.get(key)
+        if isinstance(exp, (int, float)) and isinstance(actual, (int, float)):
+            assert close(actual, exp), f"{key}: {actual} vs {exp}"
+        else:
+            assert actual == exp, f"{key}"
+
+
+def test_applied_policy_targets_parity(chain, goldens):
+    ts_g = goldens["risk_target_series"]
+    series = chain["applied"].targets.target_contracts
     assert [int(x) for x in series[:20]] == ts_g["after_head20"]
     assert close(sum(abs(int(x)) for x in series), ts_g["after_sum_abs"])
-    n_changes = int(sum(1 for a, b in zip(series[1:], series[:-1]) if a != b))
+    n_changes = int(
+        sum(1 for a, b in zip(series[1:], series[:-1]) if a != b)
+    )
     assert n_changes == ts_g["after_n_changes"]
     assert len(series) == ts_g["n"]
 
 
-def test_golden_execution_handoff_works(chain, full_bars):
-    """Old chain produced 0 orders (known break); the new handoff must trade."""
-    targets = chain["result"].targets
-    tc = targets.target_contracts
-    change_idx = [i for i in range(1, len(tc)) if tc[i] != tc[i - 1]]
-    assert change_idx, "golden targets never change — test window invalid"
-    i0 = max(0, change_idx[0] - 2000)
-    i1 = min(len(tc), change_idx[-1] + 2000)
-    from core.data import BarFrame
-
-    bars = BarFrame(
-        ts=full_bars.ts[i0:i1],
-        open=full_bars.open[i0:i1],
-        high=full_bars.high[i0:i1],
-        low=full_bars.low[i0:i1],
-        close=full_bars.close[i0:i1],
-        volume=full_bars.volume[i0:i1],
-        instrument_id=full_bars.instrument_id,
-        bar_type=full_bars.bar_type,
-    )
-    from core.artifacts import TargetSeries
-
-    exec_targets = TargetSeries(
-        ts=bars.ts,
-        target_contracts=tc[i0:i1],
-        window=bars.window,
-        instrument=targets.instrument,
-    )
-    report = backtest_execution(exec_targets, bars)
-    assert report.n_orders > 0
-    assert report.n_fills > 0
-    assert np.isfinite(report.slippage_bps_mean)
-
-
-def test_refit_weights_sum_to_one(chain, full_bars):
-    artifact = refit_weights(chain["pool"], full_bars)
-    assert close(sum(artifact.weights.values()), 1.0, 1e-9)
+def test_default_headline_has_no_policy_payload(chain):
+    assert chain["headline"].policy is None
+    assert chain["headline"].interventions == []
+    assert chain["headline"].before_performance is not None

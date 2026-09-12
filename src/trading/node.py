@@ -35,10 +35,12 @@ from core import Account
 from core import AccountLimits
 from core import Instrument
 from core import PortfolioConfig
-from core import RiskConfig
 from market_data.instrument_provider import instrument_definition_path
 from market_data.instruments import load_futures_instrument_spec
 from market_data.notify import trading_notifier_from_env
+from strategy import PortfolioOrchestrator
+from strategy import TargetPositionConfig
+from strategy import TargetPositionStrategy
 from trading.adapters.dnse.config import DNSE_DATA_CLIENT_NAME
 from trading.adapters.dnse.config import DnseDataClientConfig
 from trading.adapters.dnse.data import build_bar_type_for_symbol
@@ -49,10 +51,7 @@ from trading.config_loader import RuntimeConfig
 from trading.credentials import load_credentials
 from trading.credentials import optional_env
 from trading.credentials import require_env
-from trading.portfolio import PortfolioOrchestrator
-from trading.risk.overlay import RiskOverlayActor
-from trading.strategies.bridge import BridgeConfig
-from trading.strategies.bridge import BridgeStrategy
+from trading.safety import SafetyMonitor
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,10 +59,16 @@ TRADER_ID = "TRADER-001"
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 #: Nautilus bar resolution for the live feed (1-minute bars).
 BAR_RESOLUTION = "1"
-#: Bridge id formula (v1): f"{component_id}-{order_id_tag}" ->
-#: "BridgeStrategy-bridge"; the risk overlay subscribes to the bridge's
-#: order topic under this exact id.
-BRIDGE_STRATEGY_ID = "BridgeStrategy-bridge"
+#: Final strategy ids (v1 formula: f"{class name}-{order_id_tag}"). The
+#: safety monitor subscribes to the target strategy's position-event topic
+#: under the exact TARGET_POSITION_STRATEGY_ID string.
+TARGET_POSITION_STRATEGY_ID = "TargetPositionStrategy-target"
+SAFETY_MONITOR_STRATEGY_ID = "SafetyMonitor-risk"
+
+#: Live warmup/buffer sizing: 30 sessions x 241 bars of 1-minute warmup, and
+#: a rolling buffer with headroom above it.
+LIVE_WARMUP_BARS = 7200
+LIVE_BUFFER_BARS = 8000
 
 #: Arrow-serializable stream subset, verified against the installed
 #: nautilus_trader 1.231.0 wheel (persistence/writer.py ``include_types``
@@ -196,7 +201,7 @@ def _make_node_config(
         data_engine=LiveDataEngineConfig(validate_data_sequence=True),
         exec_engine=LiveExecEngineConfig(
             reconciliation=True,
-            snapshot_positions=True,  # risk overlay seeds position from cache on start
+            snapshot_positions=True,  # safety monitor seeds from restored positions
             snapshot_orders=True,  # order state snapshots -> Redis on every update
         ),
         cache=CacheConfig(database=CACHE_DATABASE),
@@ -204,8 +209,8 @@ def _make_node_config(
             catalog_path=str(ROOT / "data" / "live"),
             include_types=STREAMABLE_TYPES,
         ),
-        load_state=True,  # bridge/overlay on_load hooks run before start
-        save_state=True,  # bridge/overlay on_save hooks run at stop
+        load_state=True,  # strategy on_load hooks run before start
+        save_state=True,  # strategy on_save hooks run at stop
         strategies=[],  # both strategies are added programmatically below
         data_clients={DNSE_DATA_CLIENT_NAME: data_client_config},
         exec_clients={DNSE_EXECUTION_CLIENT_NAME: exec_client_config},
@@ -218,17 +223,18 @@ def build_node(
     *,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> TradingNode:
-    """Build the live TradingNode: DNSE data + broker execution + risk + bridge.
+    """Build the live TradingNode: DNSE data + broker execution + safety + target strategy.
 
     Parameters
     ----------
     config : RuntimeConfig
         Runtime selection (instrument, capital, environment, broker,
-        account, expiry close switch) from :mod:`trading.config_loader`.
+        account, safety limits, expiry close switch) from
+        :mod:`trading.config_loader`.
     portfolio : PortfolioConfig
         Portfolio configuration (expressions/weights from the pool weights
         artifact; limits embedded), e.g. via
-        ``trading.portfolio.portfolio_config_from_pool``.
+        ``strategy.portfolio_config_from_pool``.
     loop : asyncio.AbstractEventLoop | None
         Optional event loop handed to the Nautilus TradingNode.
 
@@ -273,40 +279,43 @@ def build_node(
     # Telegram alerting (failure-safe; None when TRADING_TELEGRAM_* unset).
     notifier = trading_notifier_from_env()
 
-    # Risk overlay first so the bridge can reference the instance.
     artifacts = session_artifacts_dir(session_date_iso())
-    risk_config = RiskConfig(
-        limits=AccountLimits(capital_vnd=config.capital_vnd),
-        instrument=config.instrument,
-    )
-    risk_actor = RiskOverlayActor(
-        bar_type=bar_type,
-        risk_config=risk_config,
-        order_id_tag="risk",
-        bridge_strategy_id=BRIDGE_STRATEGY_ID,
-        transition_log_path=str(artifacts / "risk_transitions.jsonl"),
-        notifier=notifier,
-    )
 
     # Portfolio orchestrator (pure alpha_core decisions).
     orchestrator = PortfolioOrchestrator(config=portfolio, instrument=config.instrument)
 
-    # Bridge strategy, constructed directly (BridgeConfig is a plain
-    # dataclass; Nautilus ImportableStrategyConfig cannot round-trip it).
-    bridge = BridgeStrategy(
-        BridgeConfig(
+    # Target-position strategy, constructed directly (TargetPositionConfig
+    # subclasses the Nautilus StrategyConfig, but the injected Portfolio
+    # cannot round-trip through config serialization, so both strategies are
+    # added programmatically below).
+    target_strategy = TargetPositionStrategy(
+        TargetPositionConfig(
             instrument_id=str(bar_type.instrument_id),
             bar_type=str(bar_type),
-            portfolio=orchestrator,
-            risk=risk_actor,
-            notifier=notifier,
+            warmup_bars=LIVE_WARMUP_BARS,
+            buffer_bars=LIVE_BUFFER_BARS,
             expiry_enabled=config.close_positions_on_expiry_day,
             decision_log_path=str(artifacts / "decisions.jsonl"),
         ),
+        orchestrator,
     )
 
-    node.trader.add_strategy(risk_actor)
-    node.trader.add_strategy(bridge)
+    # Safety monitor: drives RiskEngine.set_trading_state (order
+    # enforcement) and flattens on the transition INTO HALTED.
+    safety = SafetyMonitor(
+        instrument_id=str(bar_type.instrument_id),
+        bar_type=str(bar_type),
+        safety=config.safety,
+        limits=AccountLimits(capital_vnd=config.capital_vnd),
+        risk_engine=node.kernel.risk_engine,
+        monitor_strategy_id=SAFETY_MONITOR_STRATEGY_ID,
+        bridge_strategy_id=TARGET_POSITION_STRATEGY_ID,
+        transition_log_path=str(artifacts / "risk_transitions.jsonl"),
+        notifier=notifier,
+    )
+
+    node.trader.add_strategy(safety)
+    node.trader.add_strategy(target_strategy)
 
     if node_config.load_state:
         # The kernel's own trader.load() ran at node construction (kernel.py),

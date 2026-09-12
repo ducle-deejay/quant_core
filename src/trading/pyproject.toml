@@ -23,6 +23,4 @@ packages = [
     "trading.adapters",
     "trading.adapters.dnse",
     "trading.adapters.entrade",
-    "trading.risk",
-    "trading.strategies",
 ]

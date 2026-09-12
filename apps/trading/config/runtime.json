@@ -4,5 +4,9 @@
   "environment": "live",
   "broker": "entrade",
   "account": "demo",
-  "close_positions_on_expiry_day": true
+  "close_positions_on_expiry_day": true,
+  "safety": {
+    "intraday_loss_limit": 0.02,
+    "staleness_secs": 60
+  }
 }

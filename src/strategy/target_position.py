@@ -1,14 +1,11 @@
-"""Bridge strategy: one 1-minute bar in, one target out, one working order at a time.
-Consumes bars (never the book); decision helpers are pure module-level functions.
-"""
+"""Target-position strategy: one 1-minute bar in, one portfolio target out,
+one working order at a time. Consumes bars (never the book)."""
 
 from __future__ import annotations
 
 import json
 import os
 from collections import deque
-from dataclasses import dataclass
-from dataclasses import field
 from datetime import date
 from datetime import datetime
 from datetime import time as local_time
@@ -35,15 +32,9 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.strategy import Strategy
 
 from core import Portfolio
-from core import RiskDecision
 from core import TargetPosition
-from core.contracts import RiskController
 from core.expiry import ExpiryState
 from core.expiry import apply_expiry_gate
-from trading.notify import format_force_close
-from trading.notify import format_order_outcome
-from trading.notify import format_session
-from trading.notify import notify_or_log
 
 #: Local timezone used for the session/expiry rules (VN derivative market).
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -59,6 +50,15 @@ MAK_TIME_IN_FORCE = TimeInForce.IOC
 #: 10.0 adds margin for holidays and partial sessions. The rolling buffer caps
 #: how much is actually retained.
 WARMUP_CALENDAR_MULTIPLE = 10.0
+
+#: Nautilus order_id_tag for every instance of this strategy; the final
+#: strategy id is ``f"{type name}-{order_id_tag}"`` (v1 formula), i.e.
+#: "TargetPositionStrategy-target". Node wiring (the safety monitor's
+#: ``bridge_strategy_id``) must match this exact string.
+ORDER_ID_TAG = "target"
+
+#: Deterministic client-order-id prefix (``<prefix>-<timestamp_ns>``).
+CLIENT_ORDER_ID_PREFIX = "target"
 
 #: Minutes per bar aggregation step (step x unit = bar period in minutes).
 _AGGREGATION_MINUTES = {
@@ -87,7 +87,7 @@ def _parse_local_time(value: str) -> local_time:
 
 def in_session_window(
     now: datetime,
-    windows: list[tuple[str, str]],
+    windows: list[tuple[str, str]] | tuple[tuple[str, str], ...],
     tz: ZoneInfo,
 ) -> bool:
     """True when ``now``'s local time in ``tz`` falls inside a window.
@@ -222,13 +222,13 @@ def vn_today_iso(now_utc: datetime | None = None) -> str:
     return now.astimezone(VN_TZ).date().isoformat()
 
 
-def format_bridge_state(
+def format_target_state(
     session_date: date | None,
     session_closed: bool,
     last_submit_ns: int | None,
     expiry_state: ExpiryState | None = None,
 ) -> dict[str, Any]:
-    """The bridge's persisted session/expiry-state dict (plain values, Redis-safe).
+    """The strategy's persisted session/expiry-state dict (plain values, Redis-safe).
 
     ``session_date`` is ``None`` when no bar has been seen yet (fresh start).
     The ``ExpiryState`` dates are serialized as ISO strings (``None`` when
@@ -313,44 +313,36 @@ def append_decision(path: str, line_dict: str | dict[str, Any]) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class BridgeConfig:
-    """Configuration for :class:`BridgeStrategy`.
+class TargetPositionConfig(StrategyConfig, frozen=True, kw_only=True):
+    """Configuration for :class:`TargetPositionStrategy`.
 
-    ``portfolio`` and ``risk`` are the workstream-A/workstream-C protocol
-    implementations, passed by duck typing (never imported concretely).
+    The portfolio is NOT part of the config: the strategy receives the
+    ``Portfolio`` instance at construction (wired by ``build_node`` or the
+    execution backtest injection), so no config path round-trip is needed.
     """
 
     instrument_id: str
     bar_type: str
-    portfolio: Portfolio
-    risk: RiskController
-    order_style: str = "LO"  # "LO" | "MAK"
+    #: ``"LO"`` (limit at the last close, TimeInForce.DAY) or ``"MAK"``
+    #: (market, TimeInForce.IOC); entrade adapter mapping.
+    order_style: str = "LO"
     cooldown_secs: float = 5.0
     min_gap_contracts: int = 1
-    #: Master switch for the expiry gate (``RuntimeConfig.
-    #: close_positions_on_expiry_day``); False disables expiry handling.
+    #: VN local windows within which NEW orders may be submitted; the
+    #: expiry force-flat branch runs before the window check and is unaffected.
+    session_windows: tuple[tuple[str, str], ...] = (
+        ("09:00", "11:30"),
+        ("13:00", "14:30"),
+    )
+    warmup_bars: int
+    buffer_bars: int = 2000
+    #: Master switch for the expiry gate; False disables expiry handling.
     expiry_enabled: bool = True
     #: VN local cutoff on the front-month expiry day: at/after this time the
     #: gate force-flats; before it only reduce-only targets pass.
     expiry_close_time_local: str = "14:00"
-    #: VN local windows within which NEW orders may be submitted; the
-    #: expiry force-flat branch runs before the window check and is unaffected.
-    session_windows: list[tuple[str, str]] = field(
-        default_factory=lambda: [("09:00", "11:30"), ("13:00", "14:30")],
-    )
     #: JSONL path for the per-bar decision log; None disables logging.
     decision_log_path: str | None = None
-    warmup_bars: int = 7200  # 30 sessions x 241 bars
-    buffer_bars: int = 8000
-    client_order_id_prefix: str = "bridge"
-    #: Nautilus order_id_tag -> strategy id becomes "BridgeStrategy-<tag>"
-    #: (v1 formula: f"{component_id}-{order_id_tag}"); the risk overlay's
-    #: ``bridge_strategy_id`` must match this exactly.
-    order_id_tag: str = "bridge"
-    #: Duck-typed telegram notifier (notify(text) or None); alerting is
-    #: best-effort and never blocks the decision loop.
-    notifier: Any = None
 
 
 # --------------------------------------------------------------------------- #
@@ -358,12 +350,19 @@ class BridgeConfig:
 # --------------------------------------------------------------------------- #
 
 
-class BridgeStrategy(Strategy):
-    """Nautilus strategy bridging bars -> Portfolio target -> gated orders."""
+class TargetPositionStrategy(Strategy):
+    """Nautilus strategy bridging bars -> Portfolio target -> gated orders.
 
-    def __init__(self, config: BridgeConfig) -> None:
-        if not isinstance(config, BridgeConfig):
-            raise TypeError(f"config must be a BridgeConfig, got {type(config).__name__}")
+    Order enforcement is NOT done here: denials arrive as ``OrderDenied``
+    events from the Nautilus ``RiskEngine`` (trading state set by the safety
+    monitor) and are written to the decision log with the reason preserved.
+    """
+
+    def __init__(self, config: TargetPositionConfig, portfolio: Portfolio) -> None:
+        if not isinstance(config, TargetPositionConfig):
+            raise TypeError(
+                f"config must be a TargetPositionConfig, got {type(config).__name__}",
+            )
         if config.order_style not in ("LO", "MAK"):
             raise ValueError(f"order_style must be 'LO' or 'MAK', got {config.order_style!r}")
         if config.warmup_bars < 1 or config.buffer_bars < 1:
@@ -391,10 +390,13 @@ class BridgeStrategy(Strategy):
                 f"{self._bar_type.instrument_id} does not match instrument_id {self._instrument_id}",
             )
 
-        super().__init__(config=StrategyConfig(order_id_tag=config.order_id_tag))
-        # ``self.config`` is owned by the Nautilus Strategy base; keep ours apart.
-        self.bridge_config = config
-        self._notifier = config.notifier
+        super().__init__(
+            config=StrategyConfig(order_id_tag=ORDER_ID_TAG),
+        )
+        # ``self.config`` is owned by the Nautilus Strategy base (and
+        # ``self.portfolio`` by the Actor base); keep ours apart.
+        self.strategy_config = config
+        self._portfolio = portfolio
 
         # Rolling bar buffers (per field, capped at buffer_bars).
         self._closes: deque[float] = deque(maxlen=config.buffer_bars)
@@ -425,16 +427,13 @@ class BridgeStrategy(Strategy):
 
     def on_start(self) -> None:
         """Resolve the instrument, build the order factory, subscribe and warm up."""
-        notify_or_log(
-            self._notifier,
-            format_session(f"session starting | {self._instrument_id}"),
-        )
+        self.log.info(f"TargetPosition {self.id} session starting | {self._instrument_id}")
         instrument = self.cache.instrument(self._instrument_id)
         if instrument is not None:
             self._on_instrument_ready(instrument)
         else:
             self.log.info(
-                f"Bridge {self.id} requesting instrument {self._instrument_id}",
+                f"TargetPosition {self.id} requesting instrument {self._instrument_id}",
             )
             self.request_instrument(self._instrument_id)
 
@@ -454,7 +453,7 @@ class BridgeStrategy(Strategy):
         )
         self._instrument_ready = True
         self.log.info(
-            f"Bridge {self.id} instrument ready: {instrument.id} "
+            f"TargetPosition {self.id} instrument ready: {instrument.id} "
             f"(price_precision={instrument.price_precision}, "
             f"size_precision={instrument.size_precision})",
         )
@@ -467,11 +466,11 @@ class BridgeStrategy(Strategy):
         self._bars_requested = True
         start = warmup_start(
             self.clock.utc_now(),
-            self.bridge_config.bar_type,
-            self.bridge_config.warmup_bars,
+            self.strategy_config.bar_type,
+            self.strategy_config.warmup_bars,
         )
         self.log.info(
-            f"Bridge {self.id} requesting historical bars for warmup "
+            f"TargetPosition {self.id} requesting historical bars for warmup "
             f"since {start.isoformat()}",
         )
         self.request_bars(self._bar_type, start=start)
@@ -481,30 +480,30 @@ class BridgeStrategy(Strategy):
     def on_bar(self, bar: Bar) -> None:
         """One decision per bar; every exit path appends a decision-log line.
 
-        Decision path, in this order:
+        Decision path, in this exact order:
 
         1. Expiry gate (early call with target 0; state persisted in
            ``_expiry_state``): on the VN30 front-month expiry day at/after
            ``expiry_close_time_local`` (Asia/Ho_Chi_Minh) the gate
-           force-flats and blocks re-entry for the rest of the session.
-           This branch runs BEFORE the warmup and session-window checks so
-           the expiry close fires even while warming up.
+           force-flats (cancel + close) and blocks re-entry for the rest of
+           the session. This branch runs BEFORE the warmup and session-window
+           checks so the expiry close fires even while warming up.
         2. Warmup: no decision until ``warmup_bars`` closes are collected.
         3. Session window: new orders only inside ``session_windows``.
         4. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition``.
-        5. ``risk.decide(target)`` -> ``RiskDecision``; execution only
-           pursues the approved target. Blocked targets are logged and
-           skipped.
-        6. Expiry reduce-only clamp: BEFORE the cutoff on an expiry day the
+        5. Expiry reduce-only clamp: BEFORE the cutoff on an expiry day the
            portfolio target is replaced by the gate's
            ``approved_target_contracts`` (no entry/increase may run on an
            expiry day before the close); the gate reason propagates to the
            decision log.
-        7. Cooldown: skip when less than ``cooldown_secs`` elapsed since
+        6. Cooldown: skip when less than ``cooldown_secs`` elapsed since
            the last order submission.
-        8. Gap: skip when ``abs(target - current) < min_gap_contracts``.
-        9. No stacking: skip when a working (non-terminal) order exists
-           for the instrument.
+        7. Gap: skip when ``abs(target - current) < min_gap_contracts``.
+        8. No stacking: skip when a working (non-terminal) order exists
+           for the instrument, then submit.
+
+        RiskEngine denials do not appear here: they arrive asynchronously
+        as ``OrderDenied`` events (see :meth:`on_order_denied`).
         """
         if bar.bar_type != self._bar_type:
             return
@@ -521,7 +520,7 @@ class BridgeStrategy(Strategy):
         # Step 1: expiry gate. The candidate target is not known yet (scoring
         # has not run), so the early call carries 0 and only the force-flat /
         # re-entry branches act here; the reduce-only clamp re-runs the gate
-        # with the real target after scoring (step 6). The gate consumes a
+        # with the real target after scoring (step 5). The gate consumes a
         # pandas UTC timestamp; the Nautilus clock datetime is converted here.
         gate_ts = pd.Timestamp(now)
         gate = apply_expiry_gate(
@@ -529,8 +528,8 @@ class BridgeStrategy(Strategy):
             target_contracts=0,
             current_contracts=self._current_position_contracts(),
             state=self._expiry_state,
-            enabled=self.bridge_config.expiry_enabled,
-            close_time_local=self.bridge_config.expiry_close_time_local,
+            enabled=self.strategy_config.expiry_enabled,
+            close_time_local=self.strategy_config.expiry_close_time_local,
             tz=str(VN_TZ),
         )
         self._expiry_state = gate.state
@@ -550,11 +549,11 @@ class BridgeStrategy(Strategy):
             self._log_decision(bar, now_ns, "skip-warmup")
             return
 
-        if not in_session_window(now, self.bridge_config.session_windows, VN_TZ):
+        if not in_session_window(now, self.strategy_config.session_windows, VN_TZ):
             self._log_decision(bar, now_ns, "skip-window")
             return
 
-        target = self.bridge_config.portfolio.compute_target(
+        target = self._portfolio.compute_target(
             self._bars_snapshot(),
             now,
         )
@@ -563,44 +562,7 @@ class BridgeStrategy(Strategy):
                 f"portfolio.compute_target must return TargetPosition, got {type(target).__name__}",
             )
 
-        risk = self.bridge_config.risk
-        if risk is None:
-            raise RuntimeError("BridgeConfig.risk must provide canonical decide(target)")
-        if callable(getattr(risk, "decide", None)):
-            decision = risk.decide(target)
-        else:
-            # Narrow migration adapter for older external controllers. New
-            # bridge code always consumes RiskDecision.
-            legacy_gate = getattr(risk, "gate", None)
-            if not callable(legacy_gate):
-                raise TypeError("risk must implement decide(target) -> RiskDecision")
-            allowed, legacy_reason = legacy_gate(target)
-            decision = RiskDecision(
-                target,
-                target.target_contracts if allowed else self._current_position_contracts(),
-                "approve" if allowed else "block",
-                legacy_reason or ("within-risk-limits" if allowed else "risk-policy-denied"),
-                self._current_position_contracts(),
-            )
-        if not isinstance(decision, RiskDecision):
-            raise TypeError(
-                f"risk.decide must return RiskDecision, got {type(decision).__name__}"
-            )
-        if decision.action == "block":
-            self.log.info(
-                f"Bridge {self.id} target denied by risk controller: {decision.reason} "
-                f"(target={target.target_contracts})",
-            )
-            self._log_decision(
-                bar,
-                now_ns,
-                "skip-denied",
-                reason=decision.reason,
-                target=target.target_contracts,
-            )
-            return
-
-        # Step 6: clamp the portfolio target through the expiry gate's
+        # Step 5: clamp the portfolio target through the expiry gate's
         # reduce-only result (before the cutoff on an expiry day). The
         # approved target replaces the portfolio target and the gate reason
         # propagates to every subsequent decision-log line.
@@ -610,8 +572,8 @@ class BridgeStrategy(Strategy):
             target_contracts=target.target_contracts,
             current_contracts=current_contracts,
             state=self._expiry_state,
-            enabled=self.bridge_config.expiry_enabled,
-            close_time_local=self.bridge_config.expiry_close_time_local,
+            enabled=self.strategy_config.expiry_enabled,
+            close_time_local=self.strategy_config.expiry_close_time_local,
             tz=str(VN_TZ),
         )
         self._expiry_state = clamp.state
@@ -635,7 +597,7 @@ class BridgeStrategy(Strategy):
         if not is_cooldown_elapsed(
             self._last_submit_ns,
             now_ns,
-            self.bridge_config.cooldown_secs,
+            self.strategy_config.cooldown_secs,
         ):
             self._log_decision(
                 bar,
@@ -647,7 +609,7 @@ class BridgeStrategy(Strategy):
             )
             return
 
-        if is_below_min_gap(delta, self.bridge_config.min_gap_contracts):
+        if is_below_min_gap(delta, self.strategy_config.min_gap_contracts):
             self._log_decision(
                 bar,
                 now_ns,
@@ -702,8 +664,8 @@ class BridgeStrategy(Strategy):
                 appended += 1
         if appended:
             self.log.info(
-                f"Bridge {self.id} appended {appended} historical bars "
-                f"(buffer={len(self._closes)}/{self.bridge_config.buffer_bars})",
+                f"TargetPosition {self.id} appended {appended} historical bars "
+                f"(buffer={len(self._closes)}/{self.strategy_config.buffer_bars})",
             )
 
     # -- order event callbacks ---------------------------------------------- #
@@ -712,7 +674,7 @@ class BridgeStrategy(Strategy):
         self._orders_filled += 1
         self._pending_client_order_ids.discard(event.client_order_id)
         self.log.info(
-            f"Bridge {self.id} order filled: client_order_id={event.client_order_id} "
+            f"TargetPosition {self.id} order filled: client_order_id={event.client_order_id} "
             f"instrument={event.instrument_id} side={event.order_side.name} "
             f"last_qty={event.last_qty} commission={event.commission}",
         )
@@ -721,38 +683,57 @@ class BridgeStrategy(Strategy):
         self._orders_rejected += 1
         self._pending_client_order_ids.discard(event.client_order_id)
         self.log.info(
-            f"Bridge {self.id} order rejected: client_order_id={event.client_order_id} "
+            f"TargetPosition {self.id} order rejected: client_order_id={event.client_order_id} "
             f"reason={event.reason}",
-        )
-        notify_or_log(
-            self._notifier,
-            format_order_outcome("REJECTED", client_order_id=str(event.client_order_id), reason=event.reason),
         )
 
     def on_order_canceled(self, event: OrderCanceled) -> None:
         self._pending_client_order_ids.discard(event.client_order_id)
         self.log.info(
-            f"Bridge {self.id} order canceled: client_order_id={event.client_order_id}",
+            f"TargetPosition {self.id} order canceled: client_order_id={event.client_order_id}",
         )
 
     def on_order_denied(self, event: OrderDenied) -> None:
+        """Record a RiskEngine denial in telemetry and the decision log.
+
+        With order enforcement moved to the RiskEngine (trading state driven
+        by the safety monitor), denied pre-trade checks surface here instead
+        of an inline controller call; the denial reason is preserved.
+        """
         self._orders_denied += 1
         self._pending_client_order_ids.discard(event.client_order_id)
         self.log.info(
-            f"Bridge {self.id} order denied: client_order_id={event.client_order_id} "
+            f"TargetPosition {self.id} order denied: client_order_id={event.client_order_id} "
             f"reason={event.reason}",
         )
-        notify_or_log(
-            self._notifier,
-            format_order_outcome("DENIED", client_order_id=str(event.client_order_id), reason=event.reason),
+        if self.strategy_config.decision_log_path is None:
+            return
+        clock_ns = event.ts_event
+        try:
+            clock_ns = self.clock.timestamp_ns()
+        except Exception:  # noqa: BLE001 - unwired clock in standalone handling
+            pass
+        line = format_decision(
+            ts_event_ns=event.ts_event,
+            clock_ns=clock_ns,
+            close=self._closes[-1] if self._closes else None,
+            target=None,
+            current_contracts=self._current_position_contracts(),
+            action="order-denied",
+            reason=str(event.reason),
         )
+        if not append_decision(self.strategy_config.decision_log_path, line):
+            self.log.warning(
+                f"TargetPosition {self.id} failed to write decision log line "
+                f"(action=order-denied)",
+            )
 
     def on_order_expired(self, event: OrderExpired) -> None:
         # DAY-TIF limit orders expire at the end of the session; clear the
         # pending set so a stale entry cannot lock out later submissions.
         self._pending_client_order_ids.discard(event.client_order_id)
         self.log.info(
-            f"Bridge {self.id} order expired: client_order_id={event.client_order_id}",
+            f"TargetPosition {self.id} order expired: client_order_id={event.client_order_id}",
         )
 
     # -- internals ---------------------------------------------------------- #
@@ -770,7 +751,7 @@ class BridgeStrategy(Strategy):
         return {"close": list(self._closes), "volume": list(self._volumes)}
 
     def _warmed_up(self) -> bool:
-        return len(self._closes) >= self.bridge_config.warmup_bars
+        return len(self._closes) >= self.strategy_config.warmup_bars
 
     def _update_session_date(self, now: datetime) -> None:
         today = now.astimezone(VN_TZ).date()
@@ -783,7 +764,7 @@ class BridgeStrategy(Strategy):
             self._session_closed = False
             if was_closed:
                 self.log.info(
-                    f"Bridge {self.id} session re-armed for {today.isoformat()}",
+                    f"TargetPosition {self.id} session re-armed for {today.isoformat()}",
                 )
 
     def _log_decision(
@@ -800,7 +781,7 @@ class BridgeStrategy(Strategy):
         ``target`` stays null when it was not computed yet; ``current`` and
         ``close`` are read lazily when not supplied.
         """
-        if self.bridge_config.decision_log_path is None:
+        if self.strategy_config.decision_log_path is None:
             return
         if current is None:
             current = self._current_position_contracts()
@@ -814,24 +795,17 @@ class BridgeStrategy(Strategy):
             action=action,
             reason=reason,
         )
-        if not append_decision(self.bridge_config.decision_log_path, line):
+        if not append_decision(self.strategy_config.decision_log_path, line):
             self.log.warning(
-                f"Bridge {self.id} failed to write decision log line "
-                f"(path={self.bridge_config.decision_log_path}, action={action})",
+                f"TargetPosition {self.id} failed to write decision log line "
+                f"(path={self.strategy_config.decision_log_path}, action={action})",
             )
 
     def _force_close(self, now: datetime) -> None:
         """Cancel all orders and close the position (idempotent per session)."""
         self.log.info(
-            f"Bridge {self.id} force-close at {now.isoformat()} "
+            f"TargetPosition {self.id} force-close at {now.isoformat()} "
             f"(local {now.astimezone(VN_TZ).isoformat()})",
-        )
-        notify_or_log(
-            self._notifier,
-            format_force_close(
-                self._current_position_contracts(),
-                time=now.astimezone(VN_TZ).strftime("%H:%M"),
-            ),
         )
         self.cancel_all_orders(self._instrument_id)
         positions = self.cache.positions(
@@ -865,7 +839,7 @@ class BridgeStrategy(Strategy):
         return quantity if position.is_long else -quantity
 
     def _working_order_exists(self) -> bool:
-        """True for an instrument-wide non-terminal order or pending bridge order."""
+        """True for an instrument-wide non-terminal order or pending strategy order."""
         open_count = len(
             self.cache.orders_open(
                 instrument_id=self._instrument_id,
@@ -882,10 +856,10 @@ class BridgeStrategy(Strategy):
 
     def _submit_target_delta(self, delta: int, ts_ns: int) -> None:
         """Submit one signed order for the position gap (deterministic
-        client order id ``f"{prefix}-{timestamp_ns}"``).
+        client order id ``f"{CLIENT_ORDER_ID_PREFIX}-{timestamp_ns}"``).
 
         Reference price is the last trade price = latest bar close (the
-        bridge consumes bars, not the book; marketable side by
+        strategy consumes bars, not the book; marketable side by
         construction). ``order_style="LO"``: limit at the last close with
         ``TimeInForce.DAY`` (entrade adapter maps LIMIT+DAY -> "LO");
         ``order_style="MAK"``: market with ``TimeInForce.IOC`` (entrade
@@ -893,16 +867,16 @@ class BridgeStrategy(Strategy):
         """
         if self._order_factory is None or self._instrument is None:
             self.log.warning(
-                f"Bridge {self.id} cannot submit: instrument not ready",
+                f"TargetPosition {self.id} cannot submit: instrument not ready",
             )
             return
         side = OrderSide.BUY if delta > 0 else OrderSide.SELL
         quantity = self._instrument.make_qty(abs(delta))
         client_order_id = ClientOrderId(
-            client_order_id_for(self.bridge_config.client_order_id_prefix, ts_ns),
+            client_order_id_for(CLIENT_ORDER_ID_PREFIX, ts_ns),
         )
 
-        if self.bridge_config.order_style == "MAK":
+        if self.strategy_config.order_style == "MAK":
             order = self._order_factory.market(
                 instrument_id=self._instrument_id,
                 order_side=side,
@@ -914,7 +888,7 @@ class BridgeStrategy(Strategy):
             last_price = self._closes[-1] if self._closes else None
             if last_price is None:
                 self.log.warning(
-                    f"Bridge {self.id} cannot build LO: no close price buffered",
+                    f"TargetPosition {self.id} cannot build LO: no close price buffered",
                 )
                 return
             order = self._order_factory.limit(
@@ -930,7 +904,7 @@ class BridgeStrategy(Strategy):
         self._pending_client_order_ids.add(client_order_id)
         self._orders_submitted += 1
         self.log.info(
-            f"Bridge {self.id} submitting {order.order_type.name} {side.name} "
+            f"TargetPosition {self.id} submitting {order.order_type.name} {side.name} "
             f"qty={order.quantity} coid={client_order_id} "
             f"tif={order.time_in_force.name}",
         )
@@ -963,7 +937,7 @@ class BridgeStrategy(Strategy):
         last order-submission timestamp (nanoseconds), and the
         ``ExpiryState`` dates as ISO strings.
         """
-        return format_bridge_state(
+        return format_target_state(
             session_date=self._session_date,
             session_closed=self._session_closed,
             last_submit_ns=self._last_submit_ns,
@@ -990,8 +964,8 @@ class BridgeStrategy(Strategy):
             if not should_restore_session(saved, vn_today_iso(self._now_utc())):
                 if saved is not None:
                     self.log.info(
-                        f"Bridge {self.id}: saved session {saved} is not today; "
-                        "starting fresh",
+                        f"TargetPosition {self.id}: saved session {saved} is not "
+                        "today; starting fresh",
                     )
                 return
             self._session_date = date.fromisoformat(saved)
@@ -1001,12 +975,12 @@ class BridgeStrategy(Strategy):
                 int(last_submit_ns) if last_submit_ns is not None else None
             )
             self.log.info(
-                f"Bridge {self.id}: restored session state for {saved} "
+                f"TargetPosition {self.id}: restored session state for {saved} "
                 f"(closed={self._session_closed}, "
                 f"last_submit_ns={self._last_submit_ns})",
             )
         except Exception as error:  # noqa: BLE001 - save/load must never break start
-            self.log.warning(f"Bridge {self.id}: failed to load saved state: {error}")
+            self.log.warning(f"TargetPosition {self.id}: failed to load saved state: {error}")
 
     def _now_utc(self) -> datetime:
         """UTC now from the strategy clock, falling back to wall clock when the

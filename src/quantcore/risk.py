@@ -1,4 +1,8 @@
-"""quantcore.risk - Quant Risk Researcher module."""
+"""quantcore.risk - Quant Risk Researcher module.
+
+``backtest_portfolio`` always runs sizing; the ``risk_limits`` policy applies
+only with ``apply_policy=True``.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +10,9 @@ import json
 import math
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import alpha_core
 import numpy as np
@@ -18,34 +23,16 @@ from core.contracts import (
     HarnessParams,
     Instrument,
     RiskConfig,
-    RiskState,
 )
 from core.data import BarFrame
 from core.mapping import hysteresis_band_contracts, max_contracts_at
 from core.registry import Registry
 from core.signal import close_returns, rolling_vol
-from core.risk import (
-    ACTIVE,
-    HALTED,
-    REDUCING,
-    REASON_EXCEEDS_MAX,
-    REASON_EXPOSURE,
-    REASON_LOSS,
-    REASON_REDUCING_ONLY,
-    REASON_STALE,
-    RiskLedger,
-    in_tz,
-    is_session_open,
-    parse_close_time,
-    session_day,
-)
 
 __all__ = [
     "PolicyInput",
     "RiskBacktestConfig",
     "RiskBacktestResult",
-    "RiskLedger",
-    "SideReport",
     "SessionReport",
     "GaugeReport",
     "backtest_portfolio",
@@ -60,7 +47,7 @@ __all__ = [
 #: happens at the registry: register a replacement under the same name
 #: (``replace=True``) to change the backtest.
 DEFAULT_SIZING = "vol_target_drawdown"
-DEFAULT_POLICY = "trigger_matrix"
+DEFAULT_POLICY = "risk_limits"
 
 #: Rolling realized-vol window (bars) for the sizing stack's vol estimate.
 VOL_EST_WINDOW = 20
@@ -70,6 +57,15 @@ TRACKING_ERROR_BOUND_CONTRACTS = 1.0
 
 #: Gauge 4 expected fill rate (fraction) - a LOWER limit.
 FILL_RATE_EXPECTED = 0.95
+
+# --- offline policy vocabulary (mirrors the live safety boundary) -----------
+_STATUS_ACTIVE = "ACTIVE"
+_STATUS_HALTED = "HALTED"
+_STATUS_REDUCING = "REDUCING"
+_REASON_LOSS = "intraday-loss-limit"
+_REASON_STALE = "stale-feed"
+_REASON_EXPOSURE = "exposure-cap"
+_REASON_EXCEEDS_MAX = "exceeds-max-contracts"
 
 
 # --------------------------------------------------------------------------- #
@@ -131,7 +127,7 @@ class PolicyInput:
     Parameters
     ----------
     ts : datetime
-        Bar/decision timestamp (UTC preferred; the ledger normalizes).
+        Bar/decision timestamp (UTC preferred; the tracker normalizes).
     position : int
         Current signed position, in contracts.
     session_pnl : float
@@ -142,8 +138,8 @@ class PolicyInput:
         ``RiskConfig`` asdict (limits, instrument, triggers) for policies
         that read configuration.
     ledger : object
-        The loop's ledger (``RiskLedger``; used by the ``trigger_matrix``
-        policy only). Custom policies may ignore it.
+        The loop's offline PnL tracker (used by the ``risk_limits``
+        policy). Custom policies may ignore it.
     price : float
         Current price (bar close), the mark and fill price.
     """
@@ -157,54 +153,149 @@ class PolicyInput:
     price: float
 
 
-def _trigger_matrix_policy(policy_input: PolicyInput) -> dict:
-    """Offline policy application driving the ``RiskLedger`` trigger matrix.
+@dataclass
+class _PnlTracker:
+    """Private offline PnL tracker for the ``risk_limits`` policy.
 
-    The ledger is driven per bar: fills for position deltas (realized PnL
-    in VND), mark at the close, bar arrival, then ``decide()`` (loss limit,
-    staleness - staleness cannot fire offline on a continuous bar feed -
-    exposure cap) and ``gate()`` semantics: HALTED flattens, REDUCING only
-    reduces, ACTIVE allows capped targets.
+    Feed math (``record_fill``/``mark``/rollover) is byte-equivalent to the
+    ledger that used to live in ``core/risk.py``, minus the live-only halves
+    (staleness, gate, decide_target, reconcile_position): order enforcement
+    is the live Nautilus RiskEngine's job. State fields: ``position``,
+    ``avg_entry``, ``realized_pnl_vnd``, ``marked_pnl_vnd``,
+    ``intraday_date``.
     """
-    ledger = policy_input.ledger
+
+    multiplier: float
+    tz: str
+    capital_vnd: float
+    intraday_loss_limit: float
+    max_contracts: int
+
+    position: int = 0
+    avg_entry: float | None = None
+    realized_pnl_vnd: float = 0.0
+    marked_pnl_vnd: float = 0.0
+    intraday_date: object | None = None
+
+    def record_fill(self, price: float, qty: int, ts: datetime) -> None:
+        """Accumulate one signed fill (``qty > 0`` buys/longs) into position and
+        realized PnL in VND: ``closed_qty * (price - avg_entry) * multiplier``
+        per contract, signed by the closing side. Opening and extending fills
+        only move the weighted average entry price.
+        """
+        if qty == 0:
+            return
+        old_pos = self.position
+        new_pos = old_pos + qty
+        multiplier = self.multiplier
+
+        if old_pos == 0:
+            # Opening fill: nothing to realize yet.
+            self.avg_entry = price if new_pos != 0 else None
+        elif (old_pos > 0) == (qty > 0):
+            # Same-direction extension: re-weight the average entry.
+            self.avg_entry = (old_pos * (self.avg_entry or 0.0) + qty * price) / new_pos
+        else:
+            # Reducing or flipping: realize the closed portion.
+            closing = min(abs(qty), abs(old_pos))
+            direction = 1 if old_pos > 0 else -1
+            self.realized_pnl_vnd += (
+                closing * (price - (self.avg_entry or 0.0)) * multiplier * direction
+            )
+            if new_pos == 0:
+                self.avg_entry = None
+            elif new_pos * old_pos < 0:
+                # Flipped remainder opens a new position at this price.
+                self.avg_entry = price
+            # else: partial close in the same direction keeps the entry price.
+        self.position = new_pos
+
+    def mark(self, price: float, ts: datetime) -> None:
+        """Mark to market the current position at ``price`` (last close)."""
+        if self.position == 0 or self.avg_entry is None:
+            self.marked_pnl_vnd = 0.0
+        else:
+            self.marked_pnl_vnd = (
+                self.position * (price - self.avg_entry) * self.multiplier
+            )
+
+    def maybe_rollover(self, ts: datetime) -> None:
+        """Reset intraday PnL when a new session day starts (tz-local date).
+
+        Positions carry across days; only the intraday PnL resets - a fresh
+        day starts with a fresh loss budget. The policy recomputes HALTED
+        from the reset PnL on the same bar, so no halt state lives here.
+        """
+        day = _local_date(ts, self.tz)
+        if self.intraday_date is None:
+            self.intraday_date = day
+            return
+        if day != self.intraday_date:
+            self.realized_pnl_vnd = 0.0
+            self.marked_pnl_vnd = 0.0
+            self.intraday_date = day
+
+
+def _local_date(ts: datetime, tz: str):
+    """The local calendar date of ``ts`` in ``tz`` (naive ``ts`` read as UTC)."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(ZoneInfo(tz)).date()
+
+
+def _risk_limits_policy(policy_input: PolicyInput) -> dict:
+    """Offline policy application driving the ``_PnlTracker`` loss/exposure rules.
+
+    The tracker is driven per bar: rollover check, mark at the close, then
+    the trigger evaluation (loss limit, exposure cap - staleness cannot fire
+    offline on a continuous bar feed) and the gate semantics: HALTED
+    flattens, REDUCING only reduces, ACTIVE allows capped targets.
+    """
+    tracker = policy_input.ledger
     ts: datetime = policy_input.ts
     price: float = policy_input.price
     target: int = policy_input.target
 
-    ledger.on_bar(ts)
-    ledger.mark(price, ts)
-    state = ledger.decide()
-    current = ledger.position
+    tracker.maybe_rollover(ts)
+    tracker.mark(price, ts)
+    session_pnl = tracker.realized_pnl_vnd + tracker.marked_pnl_vnd
+    current = tracker.position
 
-    if state.status == HALTED:
+    if session_pnl <= -tracker.intraday_loss_limit * tracker.capital_vnd:
+        status = _STATUS_HALTED
         allowed = 0  # flatten
-        reason = state.reason
-    elif state.status == REDUCING:
-        allowed = min(abs(current), ledger.config.limits.max_contracts) * (
+        reason = _REASON_LOSS
+    elif abs(current) > tracker.max_contracts:
+        status = _STATUS_REDUCING
+        allowed = min(abs(current), tracker.max_contracts) * (
             1 if current >= 0 else -1
         )
-        reason = state.reason
+        reason = _REASON_EXPOSURE
     else:
-        allowed_ok, gate_reason = ledger.gate(target, current)
-        allowed = target if allowed_ok else current
-        # Surface gate denials (exceeds-max-contracts / reducing-only) so
-        # trigger_counts reflects every intervention, not just status
-        # changes.
-        reason = gate_reason or state.reason
+        status = _STATUS_ACTIVE
+        if abs(target) <= tracker.max_contracts:
+            allowed = target
+            reason = ""
+        else:
+            allowed = current
+            # Surface gate denials so trigger_counts reflects every
+            # intervention, not just status changes.
+            reason = _REASON_EXCEEDS_MAX
 
     delta = allowed - current
     if delta != 0:
-        ledger.record_fill(price, delta, ts)
-    return {"status": state.status, "reason": reason, "allowed_position": allowed}
+        tracker.record_fill(price, delta, ts)
+    return {"status": status, "reason": reason, "allowed_position": allowed}
 
 
-if "trigger_matrix" not in risk_policies.names():
+if "risk_limits" not in risk_policies.names():
     risk_policies.register(
-        "trigger_matrix",
-        _trigger_matrix_policy,
+        "risk_limits",
+        _risk_limits_policy,
         source="python",
-        description="offline RiskLedger trigger matrix (ported from"
-        " trading.risk.state, rewired to core.contracts.RiskConfig)",
+        description="offline intraday-loss-limit / exposure-cap policy"
+        " (Nautilus-free; live order enforcement is the RiskEngine's"
+        " set_trading_state job)",
     )
 
 
@@ -227,8 +318,8 @@ class RiskBacktestConfig:
     vol_floor : float | None
         Optional vol floor for the sizing stack (fraction).
     risk : RiskConfig
-        Live-equivalent risk configuration (triggers, tz, session close);
-        the offline ledger is constructed from it.
+        Live-equivalent risk configuration (loss limit, staleness, tz,
+        session close); the offline tracker is constructed from it.
     limits : AccountLimits
         Account limits (capital, safety factor, margin rate,
         max_contracts) driving the contract conversion.
@@ -242,52 +333,40 @@ class RiskBacktestConfig:
 
 
 @dataclass(frozen=True)
-class SideReport:
-    """One side ("before" = sizing only, "after" = policy applied) of the
-    portfolio backtest.
-
-    Parameters
-    ----------
-    performance : dict
-        ``net_sharpe``, ``max_drawdown``, ``total_net_pnl`` of the side's
-        contract series (canonical PnL units; sharpe/drawdown scale-free).
-    risk_process : dict
-        ``n_interventions``, ``intervention_cost_estimate_vnd``,
-        ``mean_abs_tracking_error``, ``max_abs_position``,
-        ``trigger_counts`` (overfit guard: sizing models are never judged
-        on performance alone).
-    """
-
-    performance: dict
-    risk_process: dict
-
-
-@dataclass(frozen=True)
 class RiskBacktestResult:
     """Full portfolio-backtest report (in-memory, never auto-saved).
 
     Parameters
     ----------
     targets : TargetSeries
-        The "after" contract series - the artifact handed to execution.
-    before : SideReport
-        Sizing-only side.
-    after : SideReport
-        Policy-applied side.
+        The contract series artifact handed to execution: the policy-applied
+        "after" series with ``apply_policy=True``, the sizing-only "before"
+        series otherwise.
+    performance : dict
+        ``net_sharpe``, ``max_drawdown``, ``total_net_pnl`` of the
+        ``targets`` contract series.
+    before_performance : dict | None
+        The sizing-only ("before") performance triple; ``None`` never
+        (sizing always runs) - it equals ``performance`` when no policy was
+        applied.
+    policy : dict | None
+        ``None`` with ``apply_policy=False``; otherwise the risk-process
+        metrics: ``trigger_counts``, ``n_interventions`` (the risk-status
+        transition count; equals ``len(interventions)``),
+        ``intervention_cost_estimate_vnd``, ``mean_abs_tracking_error``,
+        ``max_abs_position``.
     interventions : list[dict]
-        Status-change events: ``{"ts", "previous", "current", "reason"}``.
-    metrics_diff : dict
-        ``after.performance - before.performance`` for ``net_sharpe`` and
-        ``max_drawdown``.
+        Policy status-change events ``{"ts", "previous", "current",
+        "reason"}``; empty without the policy pass.
     provenance : dict
         Sizing/policy names + registry sources + engine version.
     """
 
     targets: TargetSeries
-    before: SideReport
-    after: SideReport
+    performance: dict
+    before_performance: dict | None
+    policy: dict | None
     interventions: list[dict]
-    metrics_diff: dict
     provenance: dict
 
 
@@ -345,10 +424,6 @@ class SessionReport:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-
-
-
-
 
 
 def _drawdowns_from_pnl(
@@ -450,16 +525,15 @@ def backtest_portfolio(
     composite: Composite,
     bars: BarFrame,
     config: RiskBacktestConfig | None = None,
+    *,
+    apply_policy: bool = False,
 ) -> RiskBacktestResult:
-    """PORTFOLIO BACKTEST (position level): sizing -> policy -> PnL, run
-    "before" (sizing only) and "after" (policy applied).
+    """PORTFOLIO BACKTEST (position level): sizing -> optional policy -> PnL.
 
-    Sizing and policy are resolved through the ``sizing_methods`` /
-    ``risk_policies`` registries (real dispatch, defaults
-    ``vol_target_drawdown`` / ``trigger_matrix``). The contract conversion
-    goes through ``core.mapping`` (band hysteresis in contract units). The
-    drawdown proxy and the intervention-cost math use the bar instrument's
-    multiplier.
+    Sizing always runs (the "before" series, two engine passes with the
+    drawdown proxy). With ``apply_policy=True`` the ``risk_limits`` policy
+    loop additionally drives an offline PnL tracker bar by bar and produces
+    the policy-applied "after" series plus risk-process metrics.
 
     Parameters
     ----------
@@ -470,12 +544,16 @@ def backtest_portfolio(
         The bar window (close feeds returns and marks).
     config : RiskBacktestConfig | None
         Defaults to ``RiskBacktestConfig()``.
+    apply_policy : bool
+        Run the ``risk_limits`` policy pass (default False: sizing only).
 
     Returns
     -------
     RiskBacktestResult
-        ``targets`` (the "after" TargetSeries artifact for execution), both
-        SideReports, interventions, metrics diff, provenance.
+        ``targets`` (the TargetSeries artifact for execution - "after" with
+        the policy, "before" without), ``performance``,
+        ``before_performance``, ``policy`` (None without the policy pass),
+        ``interventions``, provenance.
 
     Raises
     ------
@@ -550,23 +628,55 @@ def backtest_portfolio(
         raise ValueError(f"sizing method {DEFAULT_SIZING!r} returned non-finite values")
     before = _z_to_contracts(z2, close, h, instrument, limits)
     before_pnl = alpha_core.compute_pnl_py(before, returns, cost_per_side, h.bars_per_day).net
+    before_performance = _performance(list(before_pnl), h.bars_per_day)
+
+    provenance = {
+        "sizing": DEFAULT_SIZING,
+        "sizing_source": sizing_method.source,
+        "policy": DEFAULT_POLICY,
+        "policy_source": policy_method.source,
+        "engine_version": getattr(alpha_core, "__version__", "unknown"),
+        "apply_policy": apply_policy,
+    }
+
+    if not apply_policy:
+        targets = TargetSeries.from_arrays(
+            ts=bars.ts,
+            target_contracts=np.asarray(before, dtype=np.int64),
+            window=composite.window,
+            instrument=instrument,
+        )
+        return RiskBacktestResult(
+            targets=targets,
+            performance=before_performance,
+            before_performance=before_performance,
+            policy=None,
+            interventions=[],
+            provenance=provenance,
+        )
 
     # Policy pass ("after"): risk lets a subset of the sized target through.
-    ledger = RiskLedger(cfg.risk)
+    tracker = _PnlTracker(
+        multiplier=multiplier,
+        tz=cfg.risk.tz,
+        capital_vnd=limits.capital_vnd,
+        intraday_loss_limit=cfg.risk.intraday_loss_limit,
+        max_contracts=limits.max_contracts,
+    )
     after: list[int] = []
     interventions: list[dict] = []
     policy_reasons: Counter = Counter()
-    prev_status = ACTIVE
+    prev_status = _STATUS_ACTIVE
     for t in range(n):
         result = risk_policies.call(
             DEFAULT_POLICY,
             PolicyInput(
                 ts=ts[t],
-                position=ledger.position,
-                session_pnl=ledger.realized_pnl_vnd + ledger.marked_pnl_vnd,
+                position=tracker.position,
+                session_pnl=tracker.realized_pnl_vnd + tracker.marked_pnl_vnd,
                 target=before[t],
                 config=asdict(cfg.risk),
-                ledger=ledger,
+                ledger=tracker,
                 price=close[t],
             ),
         )
@@ -589,10 +699,10 @@ def backtest_portfolio(
     # Risk-process metrics:
     # - tracking error = |after - before| (policy-driven deviation),
     # - trigger counts = EVERY policy reason (status changes AND gate
-    #   denials like exceeds-max-contracts / reducing-only),
+    #   denials like exceeds-max-contracts),
     # - intervention cost = actual fill deltas of the after series
     #   (sum |after[t] - after[t-1]| over changes, priced at cost_per_side),
-    # - max_abs_position per side.
+    # - max_abs_position of the after series.
     tracking = [abs(a - b) for a, b in zip(after, before)]
     fill_deltas = [
         abs(after[t] - after[t - 1])
@@ -603,48 +713,26 @@ def backtest_portfolio(
         d * cost_per_side * close[t] * multiplier
         for d, t in zip(fill_deltas, range(1, len(after)))
     )
-
-    def _side(pnl_series, series, is_after: bool) -> SideReport:
-        return SideReport(
-            performance=_performance(list(pnl_series), h.bars_per_day),
-            risk_process={
-                "n_interventions": len(interventions) if is_after else 0,
-                "intervention_cost_estimate_vnd": policy_cost if is_after else 0.0,
-                "mean_abs_tracking_error": (
-                    float(np.mean(tracking)) if (is_after and tracking) else 0.0
-                ),
-                "max_abs_position": max((abs(p) for p in series), default=0),
-                "trigger_counts": dict(policy_reasons) if is_after else {},
-            },
-        )
-
-    before_report = _side(before_pnl, before, is_after=False)
-    after_report = _side(after_pnl, after, is_after=True)
-    metrics_diff = {
-        "net_sharpe": after_report.performance["net_sharpe"]
-        - before_report.performance["net_sharpe"],
-        "max_drawdown": after_report.performance["max_drawdown"]
-        - before_report.performance["max_drawdown"],
+    policy = {
+        "trigger_counts": dict(policy_reasons),
+        "n_interventions": len(interventions),
+        "intervention_cost_estimate_vnd": policy_cost,
+        "mean_abs_tracking_error": float(np.mean(tracking)) if tracking else 0.0,
+        "max_abs_position": max((abs(p) for p in after), default=0),
     }
+
     targets = TargetSeries.from_arrays(
         ts=bars.ts,
         target_contracts=np.asarray(after, dtype=np.int64),
         window=composite.window,
         instrument=instrument,
     )
-    provenance = {
-        "sizing": DEFAULT_SIZING,
-        "sizing_source": sizing_method.source,
-        "policy": DEFAULT_POLICY,
-        "policy_source": policy_method.source,
-        "engine_version": getattr(alpha_core, "__version__", "unknown"),
-    }
     return RiskBacktestResult(
         targets=targets,
-        before=before_report,
-        after=after_report,
+        performance=_performance(list(after_pnl), h.bars_per_day),
+        before_performance=before_performance,
+        policy=policy,
         interventions=interventions,
-        metrics_diff=metrics_diff,
         provenance=provenance,
     )
 
@@ -892,14 +980,14 @@ def post_mortem(session_dir: Path) -> SessionReport:
     reasons = [r for (_, r) in transitions_by_status if r]
 
     recommendations: list[dict] = []
-    if REASON_LOSS in reasons:
+    if _REASON_LOSS in reasons:
         recommendations.append(
             {
                 "gate": "tighten intraday loss limit or drawdown multiplier",
                 "triggered_by": "intraday-loss-limit transitions observed",
             }
         )
-    if REASON_STALE in reasons:
+    if _REASON_STALE in reasons:
         recommendations.append(
             {"gate": "review staleness threshold", "triggered_by": "stale-feed transitions observed"}
         )

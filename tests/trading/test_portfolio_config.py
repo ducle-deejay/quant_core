@@ -6,7 +6,7 @@ import pytest
 
 from core import AccountLimits, Instrument
 from core.artifacts import AlphaPool, PoolEntry, WeightsArtifact, Window
-from trading.portfolio import portfolio_config_from_pool
+from strategy.portfolio import portfolio_config_from_pool
 
 INSTRUMENT = Instrument.load("VN30F1M")
 W = Window(

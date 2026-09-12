@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -320,317 +319,37 @@ def _bars_to_nautilus(bars: BarFrame, instrument: Instrument):
     return bar_type, out
 
 
-def _ticks_to_nautilus(
-    ticks: pd.DataFrame, instrument_id_str: str, price_precision: int
-):
-    """Convert a decoded tick frame (columns ``ts, price, size,
-    aggressor_side``) into Nautilus ``TradeTick`` objects. Trade ids are
-    sequential positions in the frame (bookkeeping only - the prices/sizes
-    are the recorded data). ``price_precision`` is the instrument's price
-    precision; the matching engine rejects ticks at any other precision."""
-    from nautilus_trader.model.data import TradeTick
-    from nautilus_trader.model.enums import AggressorSide
-    from nautilus_trader.model.identifiers import InstrumentId, TradeId
-    from nautilus_trader.model.objects import Price, Quantity
+def _make_precomputed_portfolio(targets: TargetSeries):
+    """Portfolio implementing ``core.contracts.Portfolio`` over a precomputed
+    ``TargetSeries``: ``compute_target`` latches the latest target whose
+    timestamp is at/before the decision timestamp (the target series is the
+    frozen research decision; the strategy's own gates apply on top)."""
+    from core import TargetPosition
 
-    instrument_id = InstrumentId.from_str(instrument_id_str)
-    precision = price_precision  # instrument price precision (engine-checked)
-    out = []
-    aggressor_map = {
-        "1": AggressorSide.BUYER,
-        "b": AggressorSide.BUYER,
-        "buy": AggressorSide.BUYER,
-        "buyer": AggressorSide.BUYER,
-        "-1": AggressorSide.SELLER,
-        "s": AggressorSide.SELLER,
-        "sell": AggressorSide.SELLER,
-        "seller": AggressorSide.SELLER,
-    }
-    for i, row in enumerate(ticks.itertuples(index=False)):
-        ts_ns = int(pd.Timestamp(row.ts).value)
-        aggressor = aggressor_map.get(str(row.aggressor_side).lower(), AggressorSide.NO_AGGRESSOR)
-        out.append(
-            TradeTick(
-                instrument_id,
-                Price(float(row.price), precision),
-                Quantity(float(row.size), 0),
-                aggressor,
-                TradeId(str(i)),
-                ts_ns,
-                ts_ns,
-            )
-        )
-    return out
+    pending = sorted(
+        (int(pd.Timestamp(t).value), int(q))
+        for t, q in zip(targets.ts, targets.target_contracts)
+    )
 
+    class _PrecomputedPortfolio:
+        """Returns the precomputed ``TargetPosition`` at each timestamp."""
 
-def _depth_to_nautilus(
-    depth: pd.DataFrame, instrument_id_str: str, price_precision: int
-):
-    """Convert a decoded depth frame (long format ``ts, level, side, price,
-    size``, levels 0-9) into Nautilus ``OrderBookDepth10`` objects. Levels
-    missing at a timestamp are padded with zero-size orders at the deepest
-    recorded price (no trade impact); counts are 1 per present level.
-    ``price_precision`` is the instrument's price precision; the matching
-    engine rejects depth at any other precision."""
-    from nautilus_trader.model.data import BookOrder, OrderBookDepth10
-    from nautilus_trader.model.enums import OrderSide
-    from nautilus_trader.model.identifiers import InstrumentId
-    from nautilus_trader.model.objects import Price, Quantity
+        def __init__(self) -> None:
+            self._pending = list(pending)
+            self._current = 0
 
-    instrument_id = InstrumentId.from_str(instrument_id_str)
-    precision = price_precision
-    grouped: dict[int, dict[int, tuple[int, float, float]]] = {}
-    for row in depth.itertuples(index=False):
-        ts_ns = int(pd.Timestamp(row.ts).value)
-        side = 1 if str(row.side).lower() in ("buy", "bid", "1", "b") else -1
-        grouped.setdefault(ts_ns, {})[int(row.level)] = (side, float(row.price), float(row.size))
-
-    out = []
-    order_id = 1
-    for ts_ns in sorted(grouped):
-        levels = grouped[ts_ns]
-        bids: list = []
-        asks: list = []
-        for side, book in ((1, bids), (-1, asks)):
-            side_levels = {lvl: v for lvl, v in levels.items() if v[0] == side}
-            pad_price = side_levels[max(side_levels)][1] if side_levels else 0.0
-            for level in range(10):
-                entry = side_levels.get(level)
-                if entry is None:
-                    book.append(
-                        BookOrder(
-                            OrderSide.BUY if side == 1 else OrderSide.SELL,
-                            Price(pad_price, precision),
-                            Quantity(0.0, 0),
-                            order_id,
-                        )
-                    )
-                else:
-                    _, price, size = entry
-                    book.append(
-                        BookOrder(
-                            OrderSide.BUY if side == 1 else OrderSide.SELL,
-                            Price(price, precision),
-                            Quantity(size, 0),
-                            order_id,
-                        )
-                    )
-                order_id += 1
-        out.append(
-            OrderBookDepth10(
-                instrument_id,
-                bids,
-                asks,
-                [1] * 10,
-                [1] * 10,
-                0,
-                0,
-                ts_ns,
-                ts_ns,
-            )
-        )
-    return out
-
-
-def _make_target_follower_strategy():
-    """Build the target-following strategy class (Nautilus imported here,
-    at backtest assembly time, never at module import).
-
-    Mirrors the live bridge semantics: at most one working order, min-gap
-    and cooldown skips, target changes only. ``mode="bar"`` drives from
-    1-minute bars (decision price = bar close); ``mode="tick"`` drives from
-    trade ticks (decision price = last trade tick), so fills happen against
-    the real book. Order style per config: limit at the decision price (LO)
-    or market (MAK). Decision mid for slippage = the decision price.
-    """
-    from nautilus_trader.model.enums import OrderSide
-    from nautilus_trader.model.objects import Price
-    from nautilus_trader.trading.strategy import Strategy
-
-    class TargetFollowerStrategy(Strategy):
-        """Target-following strategy for the offline engine (two data
-        modes). See :func:`_make_target_follower_strategy`."""
-
-        def __init__(
-            self,
-            config: ExecutionConfig,
-            targets: dict[int, int],
-            algo: str,
-            instrument,
-            mode: str,
-            bar_type=None,
-        ) -> None:
-            super().__init__()
-            self._cfg = config
-            # Sorted pending targets: applied on the first bar/tick at/after
-            # each ts.
-            self._pending: list[tuple[int, int]] = sorted(targets.items())
-            self._algo = algo
-            self._instrument = instrument
-            self._instrument_id = instrument.id
-            self._multiplier = float(instrument.multiplier.as_double())
-            self._expiration_ns = int(getattr(instrument, "expiration_ns", 0))
-            self._bar_type = bar_type
-            self._mode = mode
-            self._position = 0
-            self._target = 0
-            self._queue: deque[int] = deque()
-            self._last_submit_ns: int | None = None
-            self._last_queue_submit_ns: int | None = None
-            self._working_coid: str | None = None
-            self._avg_entry: float | None = None
-            self._realized_pnl_vnd: float = 0.0
-            self.fills: list[dict] = []
-            self.order_events: list[dict] = []
-
-        def on_start(self) -> None:
-            if self._mode == "tick":
-                self.subscribe_trade_ticks(self._instrument_id)
-            else:
-                self.subscribe_bars(self._bar_type)
-
-        def on_bar(self, bar) -> None:
-            self._on_price(int(bar.ts_event), float(bar.close.as_double()))
-
-        def on_trade_tick(self, tick) -> None:
-            self._on_price(int(tick.ts_event), float(tick.price.as_double()))
-
-        def _on_price(self, ts_ns: int, price: float) -> None:
-            # Session-end awareness: after the contract expires, STOP
-            # submitting - no retry loop against an expired instrument
-            # (fills before expiry are still recorded).
-            if ts_ns > self._expiration_ns:
-                return
-            while self._pending and self._pending[0][0] <= ts_ns:
-                self._target = max(
-                    -self._cfg.limits.max_contracts,
-                    min(self._cfg.limits.max_contracts, self._pending.pop(0)[1]),
-                )
-
-            # Decision mid = the reference price (bar close / last trade
-            # tick) - the live bridge convention ("reference price is the
-            # last trade price"). Book-mid refinement (queue/adverse-
-            # selection aware) is deferred.
-            decision_mid = price
-
-            # Submit queued chunks: one per bar in bar mode; in tick mode
-            # time-gated by twap_interval_secs so "slice_bars" means a time
-            # horizon, not ~0.1s of ticks.
-            if self._queue and self._working_coid is None:
-                due = True
-                if self._mode == "tick" and self._last_queue_submit_ns is not None:
-                    due = (
-                        ts_ns - self._last_queue_submit_ns
-                    ) / 1e9 >= self._cfg.twap_interval_secs
-                if due:
-                    self._submit(self._queue.popleft(), ts_ns, decision_mid)
-                    self._last_queue_submit_ns = ts_ns
-
-            gap = self._target - self._position
-            if gap == 0 or self._working_coid is not None:
-                return
-            if abs(gap) < self._cfg.min_gap_contracts:
-                return
-            if self._last_submit_ns is not None:
-                elapsed = (ts_ns - self._last_submit_ns) / 1e9
-                if elapsed < self._cfg.cooldown_secs:
-                    return
-
-            plan = plan_orders(gap, self._cfg, self._algo)
-            if not plan:
-                return
-            self._queue = deque(plan[1:])
-            self._submit(plan[0], ts_ns, decision_mid)
-
-        def _submit(self, qty: int, ts_ns: int, decision_mid: float) -> None:
-            if qty == 0:
-                return
-            side = OrderSide.BUY if qty > 0 else OrderSide.SELL
-            from nautilus_trader.model.objects import Quantity
-
-            quantity = Quantity(abs(qty), 0)
-            if self._cfg.order_style == "MAK":
-                order = self.order_factory.market(self._instrument_id, side, quantity)
-            else:
-                price = (
-                    self._instrument.make_price(decision_mid)
-                    if self._instrument is not None
-                    else Price(decision_mid, 1)
-                )
-                order = self.order_factory.limit(
-                    self._instrument_id, side, quantity, price=price
-                )
-            self.submit_order(order)
-            self._working_coid = str(order.client_order_id)
-            self._last_submit_ns = ts_ns
-            self.order_events.append(
-                {"ts_ns": ts_ns, "type": "submit", "qty": qty, "decision_mid": decision_mid}
+        def compute_target(self, bars: dict[str, list[float]], ts) -> TargetPosition:
+            while self._pending and self._pending[0][0] <= int(pd.Timestamp(ts).value):
+                self._current = self._pending.pop(0)[1]
+            return TargetPosition(
+                ts=ts,
+                target_contracts=self._current,
+                z_target=0.0,
+                reason="precomputed",
+                components={},
             )
 
-        def on_order_filled(self, fill) -> None:
-            side = 1 if fill.order_side == OrderSide.BUY else -1
-            qty = int(fill.last_qty.as_double()) * side
-            self._position += qty
-            # Update average entry + realized PnL (VND, instrument
-            # multiplier) so the report's total_pnl is honest (account
-            # balances do not move in the sim with zero fees).
-            old_pos = self._position - qty
-            px = float(fill.last_px.as_double())
-            if old_pos == 0:
-                self._avg_entry = px
-            elif (old_pos > 0) == (qty > 0):
-                self._avg_entry = (
-                    old_pos * (self._avg_entry or 0.0) + qty * px
-                ) / self._position
-            else:
-                closing = min(abs(qty), abs(old_pos))
-                direction = 1 if old_pos > 0 else -1
-                self._realized_pnl_vnd += (
-                    closing * (px - (self._avg_entry or 0.0)) * self._multiplier * direction
-                )
-                if self._position == 0:
-                    self._avg_entry = None
-                elif self._position * old_pos < 0:
-                    self._avg_entry = px
-            # The no-stacking invariant: the working guard clears only on a
-            # TERMINAL fill; a partial fill keeps the order working (clearing
-            # on partials fabricated duplicate orders and position
-            # overshoot).
-            try:
-                order = self.cache.order(fill.client_order_id)
-                terminal = order is None or str(order.status) != "PARTIALLY_FILLED"
-            except Exception:  # noqa: BLE001
-                terminal = True
-            if terminal and self._working_coid == str(fill.client_order_id):
-                self._working_coid = None
-            decision = next(
-                (e for e in reversed(self.order_events) if e["type"] == "submit"), None
-            )
-            decision_mid = (
-                decision["decision_mid"] if decision else float(fill.last_px.as_double())
-            )
-            self.fills.append(
-                {
-                    "ts_ns": int(fill.ts_event),
-                    "side": side,
-                    "price": px,
-                    "qty": abs(qty),
-                    "decision_mid": decision_mid,
-                    "slippage_bps": (px - decision_mid)
-                    * side
-                    * 10_000.0
-                    / decision_mid,
-                }
-            )
-
-        def on_order_rejected(self, event) -> None:
-            reason = getattr(event, "reason", "")
-            self.order_events.append(
-                {"ts_ns": int(event.ts_event), "type": "rejected", "reason": str(reason)}
-            )
-            self._working_coid = None
-
-    return TargetFollowerStrategy
+    return _PrecomputedPortfolio()
 
 
 # --------------------------------------------------------------------------- #
@@ -644,33 +363,36 @@ def backtest_execution(
     config: ExecutionConfig | None = None,
     algo: str = "marketable_limit",
     catalog: CatalogClient | None = None,
+    strategy_factory=None,
 ) -> ExecutionReport:
-    """Offline execution backtest on the Nautilus engine.
+    """Offline execution backtest on the Nautilus engine (bar mode).
 
-    Two data modes:
-
-    - bar mode (default): the continuous instrument driven by the EXPLICIT
-      ``bars`` window (real recorded bars; no catalog access).
-    - tick mode (``catalog`` given): driven by REAL trade ticks with
-      order-book depth10 feeding, loaded from the catalog for
-      ``targets.window`` - fills match against the actual book (the
-      slippage-review leg, feedback execution -> alpha).
-
-    No hardcoded instrument ids: the instrument derives from
-    ``targets.instrument``; the bar type from ``bars.bar_type``.
+    Runs the REAL :class:`strategy.TargetPositionStrategy` (the same class
+    the live runner uses) against a precomputed portfolio: the default
+    ``strategy_factory`` wires a ``_PrecomputedPortfolio`` - whose
+    ``compute_target`` returns the ``targets`` value at each timestamp -
+    into a fresh strategy. Orders, fills and slippage are read back from
+    the engine cache after the run (no mirror strategy).
 
     Parameters
     ----------
     targets : TargetSeries
         Target contract series (``ts`` + ``target_contracts``).
     bars : BarFrame
-        The bar window (consumed in bar mode; provenance in tick mode).
+        The bar window driving the simulation (real recorded bars).
     config : ExecutionConfig | None
         Defaults to ``ExecutionConfig()``.
     algo : str
-        Registry key in ``execution_algorithms``.
+        Registry key in ``execution_algorithms`` (validated; the default
+        ``"marketable_limit"`` mirrors the live one-order-now semantics).
     catalog : CatalogClient | None
-        REQUIRED for tick mode (real ticks/depth); omitted -> bar mode.
+        Must be ``None``: tick mode died with the deleted target-follower
+        mirror (the real strategy is bar-driven); a value raises
+        ``ValueError`` instead of silently ignoring it.
+    strategy_factory : callable | None
+        ``fn(portfolio) -> nautilus Strategy``; ``None`` builds the
+        default :class:`strategy.TargetPositionStrategy` wired to the
+        ``_PrecomputedPortfolio``.
 
     Returns
     -------
@@ -681,14 +403,29 @@ def backtest_execution(
     Raises
     ------
     ValueError
-        Empty targets, unknown algorithm, bar_type/instrument mismatch, or
-        (tick mode) no ticks/depth in the window.
+        Empty targets, unknown algorithm, ``catalog`` given (tick mode
+        removed), or bar_type/instrument mismatch.
+
+    Notes
+    -----
+    Decision-mid convention (unchanged): the strategy's reference price -
+    the limit price it selected (the last bar close for LO); market orders
+    fall back to the fill price. The backtest strategy runs with
+    ``warmup_bars=1`` so the precomputed targets act from the first bar.
     """
-    # Local import: keeps Nautilus lazy even for this function's module.
     from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
     from nautilus_trader.common.config import LoggingConfig
-    from nautilus_trader.model.enums import AccountType, BookType, OmsType
+    from nautilus_trader.model.enums import (
+        AccountType,
+        BookType,
+        OmsType,
+        OrderSide,
+        OrderType,
+    )
+    from nautilus_trader.model.events import OrderFilled, OrderRejected, OrderSubmitted
     from nautilus_trader.model.objects import Money
+
+    from strategy.target_position import TargetPositionConfig, TargetPositionStrategy
 
     cfg = config or ExecutionConfig()
     try:
@@ -697,104 +434,122 @@ def backtest_execution(
         raise ValueError(str(exc)) from None
     if len(targets.ts) == 0:
         raise ValueError("targets must be a non-empty TargetSeries")
+    if catalog is not None:
+        raise ValueError(
+            "tick mode (catalog=...) was removed together with the"
+            " target-follower mirror strategy: backtest_execution runs the"
+            " real bar-driven TargetPositionStrategy, so bar mode is the"
+            " only executable mode"
+        )
 
     instrument = targets.instrument
     nautilus_instrument = _nautilus_instrument(instrument)
     currency = nautilus_instrument.quote_currency
-    strategy_cls = _make_target_follower_strategy()
-
-    start = targets.ts.min() - pd.Timedelta(minutes=5)
-    end = targets.ts.max() + pd.Timedelta(minutes=10)
-
-    if catalog is None:
-        # Bar mode: continuous instrument driven by the explicit bar window.
-        bar_type, data_objects = _bars_to_nautilus(bars, instrument)
-        if not data_objects:
-            raise ValueError(
-                f"no bars in the provided BarFrame window [{bars.ts.min()}, {bars.ts.max()}]"
-            )
-        mode = "bar"
-        book_type = BookType.L1_MBP
-        ticks = depth = None
-    else:
-        # Tick mode: monthly-contract ticks + order-book depth10 (L2 book
-        # matching) from the catalog for the target window.
-        instrument_id_str = f"{instrument.symbol}.{instrument.venue}"
-        ticks_df = catalog.ticks(instrument_id_str, start=start, end=end)
-        depth_df = catalog.depth(instrument_id_str, start=start, end=end)
-        if ticks_df.empty:
-            raise ValueError(
-                f"no trade ticks in [{start}, {end}] for {instrument_id_str}"
-            )
-        if depth_df.empty and not cfg.allow_l1:
-            raise ValueError(
-                f"no order-book depth10 for {instrument_id_str} in [{start}, {end}]:"
-                " tick mode requires 10-level order-book data to measure"
-                " slippage (missing-data behavior, not a silent degradation)."
-                " Set ExecutionConfig(allow_l1=True) to run tick-only L1"
-                " matching explicitly."
-            )
-        price_precision = _precision_from_increment(instrument.tick_size)
-        ticks = _ticks_to_nautilus(ticks_df, instrument_id_str, price_precision)
-        depth = (
-            _depth_to_nautilus(depth_df, instrument_id_str, price_precision)
-            if not depth_df.empty
-            else []
+    bar_type, data_objects = _bars_to_nautilus(bars, instrument)
+    if not data_objects:
+        raise ValueError(
+            f"no bars in the provided BarFrame window [{bars.ts.min()}, {bars.ts.max()}]"
         )
-        # L2 book matching when depth exists; explicit L1 fallback otherwise.
-        mode = "tick"
-        book_type = BookType.L2_MBP if depth else BookType.L1_MBP
-        bar_type = None
-        data_objects = None
 
-    target_map = {
-        int(pd.Timestamp(t).value): int(q)
-        for t, q in zip(targets.ts, targets.target_contracts)
-    }
+    portfolio = _make_precomputed_portfolio(targets)
+    if strategy_factory is None:
+        def strategy_factory(portfolio):  # noqa: E306
+            return TargetPositionStrategy(
+                TargetPositionConfig(
+                    instrument_id=str(nautilus_instrument.id),
+                    bar_type=str(bar_type),
+                    order_style=cfg.order_style,
+                    cooldown_secs=cfg.cooldown_secs,
+                    min_gap_contracts=cfg.min_gap_contracts,
+                    warmup_bars=1,  # targets are precomputed; act from bar 1
+                ),
+                portfolio,
+            )
+
+    n_target_changes = len(
+        {(int(pd.Timestamp(t).value), int(q)) for t, q in zip(targets.ts, targets.target_contracts)}
+    )
 
     engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(log_level="ERROR")))
     try:
         engine.add_venue(
             venue=nautilus_instrument.id.venue,
-            oms_type=OmsType.HEDGING,
+            # NETTING matches the live entrade OMS: the strategy reads its
+            # single per-strategy net position from the cache.
+            oms_type=OmsType.NETTING,
             account_type=AccountType.MARGIN,
             starting_balances=[Money(cfg.limits.capital_vnd, currency)],
             base_currency=currency,
-            book_type=book_type,
+            book_type=BookType.L1_MBP,
         )
         engine.add_instrument(nautilus_instrument)
-        if mode == "tick":
-            # Separate add_data calls: the engine only checks the FIRST data
-            # object of a batch for book data (engine.pyx:896), so ticks and
-            # depth must not share one batch or L2 matching is not armed.
-            # An EMPTY depth collection must not be added at all (the engine
-            # rejects empty collections).
-            engine.add_data(ticks, sort=True)
-            if depth:
-                engine.add_data(depth, sort=True)
-        else:
-            engine.add_data(data_objects, sort=True)
-        strategy = strategy_cls(
-            cfg,
-            target_map,
-            algo,
-            nautilus_instrument,
-            mode,
-            bar_type if mode == "bar" else None,
-        )
+        engine.add_data(data_objects, sort=True)
+        strategy = strategy_factory(portfolio)
         engine.add_strategy(strategy)
         engine.run()
-        fills = [f for f in strategy.fills if f["qty"] > 0]
-        orders = strategy.order_events
-        n_orders = sum(1 for e in orders if e["type"] == "submit")
-        n_rejected = sum(1 for e in orders if e["type"] == "rejected")
+
+        # Read the report back from the engine cache (the real strategy does
+        # not record fills itself): decision_mid = the order's limit price
+        # (the strategy's reference price), fill price/qty from the events.
+        fills: list[dict] = []
+        n_orders = 0
+        n_rejected = 0
+        avg_entry: float | None = None
+        position = 0
+        realized_pnl_vnd = 0.0
+        multiplier = float(nautilus_instrument.multiplier.as_double())
+        for order in engine.cache.orders():
+            for event in order.events:
+                if isinstance(event, OrderSubmitted):
+                    n_orders += 1
+                elif isinstance(event, OrderRejected):
+                    n_rejected += 1
+                elif isinstance(event, OrderFilled):
+                    side = 1 if event.order_side == OrderSide.BUY else -1
+                    qty = int(event.last_qty.as_double())
+                    price = float(event.last_px.as_double())
+                    decision_mid = (
+                        float(order.price.as_double())
+                        if order.order_type == OrderType.LIMIT and order.price is not None
+                        else price
+                    )
+                    fills.append(
+                        {
+                            "ts_ns": int(event.ts_event),
+                            "side": side,
+                            "price": price,
+                            "qty": qty,
+                            "decision_mid": decision_mid,
+                            "slippage_bps": (price - decision_mid)
+                            * side
+                            * 10_000.0
+                            / decision_mid,
+                        }
+                    )
+                    # Realized PnL (VND, instrument multiplier) via the
+                    # avg-entry ledger so total_pnl is honest (sim account
+                    # balances do not move with zero fees).
+                    old_pos = position
+                    position += side * qty
+                    if old_pos == 0:
+                        avg_entry = price
+                    elif (old_pos > 0) == (side * qty > 0):
+                        avg_entry = (old_pos * (avg_entry or 0.0) + side * qty * price) / position
+                    else:
+                        closing = min(abs(side * qty), abs(old_pos))
+                        direction = 1 if old_pos > 0 else -1
+                        realized_pnl_vnd += (
+                            closing * (price - (avg_entry or 0.0)) * multiplier * direction
+                        )
+                        if position == 0:
+                            avg_entry = None
+                        elif position * old_pos < 0:
+                            avg_entry = price
+        fills.sort(key=lambda f: f["ts_ns"])
         slippage = [f["slippage_bps"] for f in fills]
+
         stats: dict = {}
         try:
-            from nautilus_trader.analysis.analyzer import PortfolioAnalyzer
-
-            analyzer = PortfolioAnalyzer()
-            analyzer.add_positions(engine.cache.positions())
             accounts = engine.cache.accounts()
             balance = (
                 float(sum(m.as_double() for m in accounts[0].balances_total().values()))
@@ -803,9 +558,9 @@ def backtest_execution(
             )
             stats = {
                 "n_positions": len(engine.cache.positions()),
-                "realized_pnl_vnd": strategy._realized_pnl_vnd,
+                "realized_pnl_vnd": realized_pnl_vnd,
                 "account_balance": balance,
-                "total_pnl": strategy._realized_pnl_vnd,
+                "total_pnl": realized_pnl_vnd,
             }
         except Exception as exc:  # noqa: BLE001 - analyzer is best-effort, never silent
             stats = {"error": f"{type(exc).__name__}: {exc}"}
@@ -814,13 +569,8 @@ def backtest_execution(
             fills,
             columns=["ts_ns", "side", "price", "qty", "decision_mid", "slippage_bps"],
         )
-        if mode == "tick":
-            data_mode = mode + ("-l2" if book_type == BookType.L2_MBP else "-l1")
-        else:
-            data_mode = mode
-
         return ExecutionReport(
-            n_target_changes=len(target_map),
+            n_target_changes=n_target_changes,
             n_orders=n_orders,
             n_fills=len(fills),
             n_rejected=n_rejected,
@@ -834,7 +584,8 @@ def backtest_execution(
                 "algo_source": execution_algorithms.get(algo).source,
                 "order_style": cfg.order_style,
                 "engine": "nautilus_trader.backtest.engine.BacktestEngine",
-                "data_mode": data_mode,
+                "data_mode": "bar",
+                "strategy": type(strategy).__name__,
                 "instrument_id": str(nautilus_instrument.id),
                 "window_start": targets.ts.min().isoformat(),
                 "window_end": targets.ts.max().isoformat(),
