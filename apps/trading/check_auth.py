@@ -1,12 +1,6 @@
 """Quick entrade demo credential check (never prints secrets).
-
-Verifies the .env credentials against the entrade API and, on success,
-prints the investorId needed for ENTRADE_INVESTOR_ID.
-
-ENTRADE_USERNAME is the entrade login identifier (an email for this account),
-NOT the numeric investor id - the two are different credentials.
-
 Usage: .venv/bin/python3 apps/trading/check_auth.py [--env .env]
+On success prints the investorId needed for ENTRADE_INVESTOR_ID.
 """
 
 from __future__ import annotations
@@ -27,6 +21,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
+    """Verify the .env credentials against the entrade API.
+
+    ENTRADE_USERNAME is the entrade login identifier (an email for this
+    account), NOT the numeric investor id - the two are different credentials.
+    """
     parser = argparse.ArgumentParser(description="Check entrade demo credentials")
     parser.add_argument("--env", type=Path, default=ROOT / ".env")
     args = parser.parse_args()

@@ -12,3 +12,6 @@ __pycache__/
 *.egg-info/
 src/alpha_core/*.so
 .cargo-home/
+
+# Delegate workspace (goldens, specs, fixtures) - ephemeral, user-managed
+tmp/

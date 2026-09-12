@@ -1,75 +1,5 @@
-"""Bridge strategy for the live wiring phase (workstream B of DEC-008).
-
-One 1-minute bar in, one target out, at most one working order at a time.
-
-Data path
----------
-- ``on_start`` resolves the instrument from the cache (requesting it when
-  missing, per the DEC-008 design the DNSE data adapter's
-  ``DnseInstrumentProvider`` loads it), then subscribes to the configured
-  ``BarType`` and requests historical bars for the warmup window.
-- ``on_bar`` and ``on_historical_data`` both feed the same rolling buffers
-  (``collections.deque`` per field, capped at ``buffer_bars``). Duplicate
-  bars are dropped by ``ts_event`` so a historical response overlapping the
-  live stream cannot double-count.
-- No decision is taken until ``warmup_bars`` closes are collected.
-
-Decision path (per bar, in this order)
---------------------------------------
-1. Force-close check: only on a configured expiry day (``force_close_dates``,
-   Asia/Ho_Chi_Minh dates; empty list = never) at/after
-   ``force_close_local_time`` -> cancel all orders and close the position,
-   then block the rest of the day (same-day re-entry blocked). The first bar
-   of a new local day re-arms the session.
-2. Warmup: no decision until ``warmup_bars`` closes are collected.
-3. Session window: new orders only inside ``session_windows`` (VN local). The
-   force-close branch above runs before this check, so the 14:00 expiry close
-   still fires inside the afternoon window.
-4. Expiry day before the force-close time: only orders that reduce the
-   absolute position are allowed (``is_expiry_day_entry_blocked``).
-5. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition`` (contracts.py).
-6. ``risk.decide(target)`` -> ``RiskDecision``; execution only pursues its
-   approved target. Blocked targets are logged and skipped.
-7. Cooldown: skip when less than ``cooldown_secs`` elapsed since the last
-   order submission.
-8. Gap: skip when ``abs(target - current) < min_gap_contracts``.
-9. No stacking: skip when a working (non-terminal) order exists for the
-   instrument.
-
-Every exit path above appends one JSONL line to ``decision_log_path`` when
-configured (see ``format_decision``); the log is consumed later by an
-acceptance report.
-
-State persistence: ``on_save``/``on_load`` persist the session flags
-(``session_date``/``session_closed``/``last_submit_ns``) through the kernel's
-save/load hooks (TradingNodeConfig ``save_state``/``load_state``); a same-day
-restart keeps the force-close-closed session, a new day starts fresh.
-
-Order construction
-------------------
-The bridge consumes bars, not the book, so the reference price is the last
-trade price = latest bar close (marketable side by construction):
-
-- ``order_style="LO"`` (default): limit order at the last close with
-  ``TimeInForce.DAY``. The entrade execution adapter maps ``LIMIT + DAY`` to
-  broker order type ``LO``.
-- ``order_style="MAK"``: market order with ``TimeInForce.IOC``. The entrade
-  adapter maps ``MARKET + IOC`` to broker order type ``MAK``.
-
-Position source (documented choice): the current position is read from the
-Nautilus cache (``self.cache.positions(instrument_id=..., strategy_id=...)``),
-not from ``self.portfolio``. ``self.portfolio`` is a ``PortfolioFacade`` with
-no per-strategy position accessor (only ``net_position`` across accounts);
-under the NETTING OMS used by the entrade adapter the cache holds the single
-per-strategy position, so it is the authoritative source. The strategy never
-imports ``trading.portfolio`` - it only calls the ``Portfolio`` protocol
-duck-typed via ``BridgeConfig.portfolio``.
-
-Client order IDs are deterministic: ``f"{prefix}-{timestamp_ns}"``.
-
-All decision helpers are module-level pure functions taking plain values so
-they are unit-testable without a running node (see
-``src/trading/tests/test_bridge.py``).
+"""Bridge strategy: one 1-minute bar in, one target out, one working order at a time.
+Consumes bars (never the book); decision helpers are pure module-level functions.
 """
 
 from __future__ import annotations
@@ -87,6 +17,7 @@ from datetime import timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from nautilus_trader.common.factories import OrderFactory
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar
@@ -103,16 +34,18 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.strategy import Strategy
 
-from trading.contracts import Portfolio
-from trading.contracts import RiskController
-from trading.contracts import RiskDecision
-from trading.contracts import TargetPosition
+from core import Portfolio
+from core import RiskDecision
+from core import TargetPosition
+from core.contracts import RiskController
+from core.expiry import ExpiryState
+from core.expiry import apply_expiry_gate
 from trading.notify import format_force_close
 from trading.notify import format_order_outcome
 from trading.notify import format_session
 from trading.notify import notify_or_log
 
-#: Local timezone used for the session/force-close rules (VN derivative market).
+#: Local timezone used for the session/expiry rules (VN derivative market).
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 #: entrade adapter mappings (src/trading/adapters/entrade/contracts.py):
@@ -150,47 +83,6 @@ def _parse_local_time(value: str) -> local_time:
         raise ValueError(
             f"Invalid local time {value!r}, expected 'HH:MM' (e.g. '14:00')",
         ) from error
-
-
-def should_force_close(ts: datetime, force_close_time_str: str, tz: ZoneInfo) -> bool:
-    """Return whether ``ts`` is at/after the force-close time in ``tz``.
-
-    Pure per-timestamp rule: the timestamp is converted to ``tz`` and its
-    time-of-day is compared against ``force_close_time_str``. A timestamp on
-    any day before the cutoff (including a new day's morning) returns False,
-    which is what lets the strategy re-arm the session on day rollover.
-    """
-    if ts.tzinfo is None:
-        raise ValueError("should_force_close requires a timezone-aware timestamp")
-    cutoff = _parse_local_time(force_close_time_str)
-    return ts.astimezone(tz).time() >= cutoff
-
-
-def is_force_close_day(
-    now: datetime,
-    force_close_dates: list[str],
-    tz: ZoneInfo,
-) -> bool:
-    """Return whether ``now``'s calendar date in ``tz`` is in ``force_close_dates``.
-
-    Dates are ISO strings ("YYYY-MM-DD"); an empty list means the force-close
-    never fires (the live bridge must only flatten on the contract's expiry
-    day, not daily at the cutoff).
-    """
-    if now.tzinfo is None:
-        raise ValueError("is_force_close_day requires a timezone-aware timestamp")
-    return now.astimezone(tz).date().isoformat() in force_close_dates
-
-
-def is_expiry_day_entry_blocked(current_contracts: int, delta: int) -> bool:
-    """True when the trade is blocked by the expiry-day reduce-only rule.
-
-    On an expiry day before the force-close time, only orders that decrease
-    the absolute position are allowed: ``abs(current + delta) < abs(current)``.
-    Everything else is blocked: entries from flat, increases, and flips
-    through zero that end up with a larger |position|.
-    """
-    return abs(current_contracts + delta) >= abs(current_contracts)
 
 
 def in_session_window(
@@ -314,7 +206,7 @@ def format_decision(
     )
 
 
-# -- session save/load helpers (pure, unit-testable) ------------------------- #
+# -- session/expiry save/load helpers (pure, unit-testable) ------------------ #
 
 
 def vn_today_iso(now_utc: datetime | None = None) -> str:
@@ -334,22 +226,62 @@ def format_bridge_state(
     session_date: date | None,
     session_closed: bool,
     last_submit_ns: int | None,
+    expiry_state: ExpiryState | None = None,
 ) -> dict[str, Any]:
-    """The bridge's persisted session-state dict (plain values, Redis-safe).
+    """The bridge's persisted session/expiry-state dict (plain values, Redis-safe).
 
     ``session_date`` is ``None`` when no bar has been seen yet (fresh start).
+    The ``ExpiryState`` dates are serialized as ISO strings (``None`` when
+    unset), so the expiry gate survives a restart without re-forcing.
     """
+    expiry = expiry_state if expiry_state is not None else ExpiryState()
     return {
         "session_date": session_date.isoformat() if session_date is not None else None,
         "session_closed": bool(session_closed),
         "last_submit_ns": last_submit_ns,
+        "expiry_blocked_session_date": (
+            expiry.blocked_session_date.isoformat()
+            if expiry.blocked_session_date is not None
+            else None
+        ),
+        "expiry_last_processed_expiry_date": (
+            expiry.last_processed_expiry_date.isoformat()
+            if expiry.last_processed_expiry_date is not None
+            else None
+        ),
     }
+
+
+def expiry_state_from_saved(
+    blocked_session_date: str | None,
+    last_processed_expiry_date: str | None,
+) -> ExpiryState:
+    """Rebuild an ``ExpiryState`` from the ISO date strings in a saved state.
+
+    Malformed values are treated as unset (the gate's own date logic clears
+    stale entries); never raises on garbage input.
+    """
+    blocked = _date_from_iso_or_none(blocked_session_date)
+    processed = _date_from_iso_or_none(last_processed_expiry_date)
+    return ExpiryState(
+        blocked_session_date=blocked,
+        last_processed_expiry_date=processed,
+    )
+
+
+def _date_from_iso_or_none(value: Any) -> date | None:
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 def should_restore_session(saved_session_date: str | None, today_iso: str) -> bool:
     """True when a persisted session belongs to the same VN day as ``today_iso``.
 
-    A new day must start fresh (the force-close/session machinery re-arms on
+    A new day must start fresh (the expiry/session machinery re-arms on
     day rollover anyway), so only a same-day restart restores the flags.
     """
     return saved_session_date is not None and saved_session_date == today_iso
@@ -396,13 +328,14 @@ class BridgeConfig:
     order_style: str = "LO"  # "LO" | "MAK"
     cooldown_secs: float = 5.0
     min_gap_contracts: int = 1
-    force_close_local_time: str = "14:00"
-    #: ISO "YYYY-MM-DD" expiry dates interpreted in Asia/Ho_Chi_Minh; the
-    #: force-close fires only on these days (empty list = never, i.e. the
-    #: live bridge no longer flattens daily at the cutoff).
-    force_close_dates: list[str] = field(default_factory=list)
+    #: Master switch for the expiry gate (``RuntimeConfig.
+    #: close_positions_on_expiry_day``); False disables expiry handling.
+    expiry_enabled: bool = True
+    #: VN local cutoff on the front-month expiry day: at/after this time the
+    #: gate force-flats; before it only reduce-only targets pass.
+    expiry_close_time_local: str = "14:00"
     #: VN local windows within which NEW orders may be submitted; the
-    #: force-close branch runs before the window check and is unaffected.
+    #: expiry force-flat branch runs before the window check and is unaffected.
     session_windows: list[tuple[str, str]] = field(
         default_factory=lambda: [("09:00", "11:30"), ("13:00", "14:30")],
     )
@@ -437,7 +370,7 @@ class BridgeStrategy(Strategy):
             raise ValueError("warmup_bars and buffer_bars must be positive")
         if config.buffer_bars < config.warmup_bars:
             raise ValueError("buffer_bars must be >= warmup_bars so warmup can complete")
-        _parse_local_time(config.force_close_local_time)  # validate eagerly
+        _parse_local_time(config.expiry_close_time_local)  # validate eagerly
         if not config.session_windows:
             raise ValueError("session_windows must not be empty")
         for window in config.session_windows:
@@ -449,18 +382,6 @@ class BridgeStrategy(Strategy):
                 ) from error
             _parse_local_time(start_str)
             _parse_local_time(end_str)
-        for date_str in config.force_close_dates:
-            try:
-                parsed = datetime.strptime(date_str, "%Y-%m-%d")
-            except ValueError as error:
-                raise ValueError(
-                    f"force_close_dates entries must be ISO 'YYYY-MM-DD', got {date_str!r}",
-                ) from error
-            if parsed.date().isoformat() != date_str:
-                raise ValueError(
-                    f"force_close_dates entries must be zero-padded ISO 'YYYY-MM-DD', "
-                    f"got {date_str!r}",
-                )
 
         self._instrument_id = InstrumentId.from_str(config.instrument_id)
         self._bar_type = BarType.from_str(config.bar_type)
@@ -487,10 +408,11 @@ class BridgeStrategy(Strategy):
         self._instrument_ready = False
         self._bars_requested = False
 
-        # Session state.
+        # Session + expiry gate state (persisted via on_save/on_load).
         self._session_closed = False
         self._session_date: date | None = None
         self._last_submit_ns: int | None = None
+        self._expiry_state = ExpiryState()
         self._pending_client_order_ids: set[ClientOrderId] = set()
 
         # Telemetry.
@@ -557,7 +479,33 @@ class BridgeStrategy(Strategy):
     # -- data handlers ------------------------------------------------------ #
 
     def on_bar(self, bar: Bar) -> None:
-        """One decision per bar; every exit path appends a decision-log line."""
+        """One decision per bar; every exit path appends a decision-log line.
+
+        Decision path, in this order:
+
+        1. Expiry gate (early call with target 0; state persisted in
+           ``_expiry_state``): on the VN30 front-month expiry day at/after
+           ``expiry_close_time_local`` (Asia/Ho_Chi_Minh) the gate
+           force-flats and blocks re-entry for the rest of the session.
+           This branch runs BEFORE the warmup and session-window checks so
+           the expiry close fires even while warming up.
+        2. Warmup: no decision until ``warmup_bars`` closes are collected.
+        3. Session window: new orders only inside ``session_windows``.
+        4. ``portfolio.compute_target(bars, ts)`` -> ``TargetPosition``.
+        5. ``risk.decide(target)`` -> ``RiskDecision``; execution only
+           pursues the approved target. Blocked targets are logged and
+           skipped.
+        6. Expiry reduce-only clamp: BEFORE the cutoff on an expiry day the
+           portfolio target is replaced by the gate's
+           ``approved_target_contracts`` (no entry/increase may run on an
+           expiry day before the close); the gate reason propagates to the
+           decision log.
+        7. Cooldown: skip when less than ``cooldown_secs`` elapsed since
+           the last order submission.
+        8. Gap: skip when ``abs(target - current) < min_gap_contracts``.
+        9. No stacking: skip when a working (non-terminal) order exists
+           for the instrument.
+        """
         if bar.bar_type != self._bar_type:
             return
         self._append_bar(bar)
@@ -570,19 +518,32 @@ class BridgeStrategy(Strategy):
             self._log_decision(bar, now_ns, "skip-session-closed")
             return
 
-        on_expiry_day = is_force_close_day(
-            now,
-            self.bridge_config.force_close_dates,
-            VN_TZ,
+        # Step 1: expiry gate. The candidate target is not known yet (scoring
+        # has not run), so the early call carries 0 and only the force-flat /
+        # re-entry branches act here; the reduce-only clamp re-runs the gate
+        # with the real target after scoring (step 6). The gate consumes a
+        # pandas UTC timestamp; the Nautilus clock datetime is converted here.
+        gate_ts = pd.Timestamp(now)
+        gate = apply_expiry_gate(
+            gate_ts,
+            target_contracts=0,
+            current_contracts=self._current_position_contracts(),
+            state=self._expiry_state,
+            enabled=self.bridge_config.expiry_enabled,
+            close_time_local=self.bridge_config.expiry_close_time_local,
+            tz=str(VN_TZ),
         )
-        if on_expiry_day and should_force_close(
-            now,
-            self.bridge_config.force_close_local_time,
-            VN_TZ,
-        ):
+        self._expiry_state = gate.state
+        if gate.force_flat:
             self._force_close(now)
             self._session_closed = True
-            self._log_decision(bar, now_ns, "force-close")
+            self._log_decision(bar, now_ns, "force-close", reason=gate.reason)
+            return
+        if gate.reentry_blocked:
+            self._session_closed = True
+            self._log_decision(
+                bar, now_ns, "skip-session-closed", reason=gate.reason
+            )
             return
 
         if not self._warmed_up():
@@ -639,17 +600,33 @@ class BridgeStrategy(Strategy):
             )
             return
 
-        # Risk may cap or force-flat a desired target.  Every scheduling and
-        # order-construction decision below uses the approved target only.
-        approved_target = decision.approved_target_contracts
+        # Step 6: clamp the portfolio target through the expiry gate's
+        # reduce-only result (before the cutoff on an expiry day). The
+        # approved target replaces the portfolio target and the gate reason
+        # propagates to every subsequent decision-log line.
         current_contracts = self._current_position_contracts()
+        clamp = apply_expiry_gate(
+            gate_ts,
+            target_contracts=target.target_contracts,
+            current_contracts=current_contracts,
+            state=self._expiry_state,
+            enabled=self.bridge_config.expiry_enabled,
+            close_time_local=self.bridge_config.expiry_close_time_local,
+            tz=str(VN_TZ),
+        )
+        self._expiry_state = clamp.state
+        approved_target = clamp.approved_target_contracts
+        expiry_reason: str | None = clamp.reason or None
         delta = target_delta(approved_target, current_contracts)
 
-        if on_expiry_day and is_expiry_day_entry_blocked(current_contracts, delta):
+        if expiry_reason is not None and delta == 0:
+            # No reducing move is available on the expiry day (the clamp
+            # holds the current position); nothing to submit.
             self._log_decision(
                 bar,
                 now_ns,
                 "skip-expiry-day-entry",
+                reason=expiry_reason,
                 target=approved_target,
                 current=current_contracts,
             )
@@ -664,6 +641,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-cooldown",
+                reason=expiry_reason,
                 target=approved_target,
                 current=current_contracts,
             )
@@ -674,6 +652,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-gap",
+                reason=expiry_reason,
                 target=approved_target,
                 current=current_contracts,
             )
@@ -684,6 +663,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-working",
+                reason=expiry_reason,
                 target=approved_target,
                 current=current_contracts,
             )
@@ -694,6 +674,7 @@ class BridgeStrategy(Strategy):
                 bar,
                 now_ns,
                 "skip-instrument-not-ready",
+                reason=expiry_reason,
                 target=approved_target,
                 current=current_contracts,
             )
@@ -704,6 +685,7 @@ class BridgeStrategy(Strategy):
             bar,
             now_ns,
             "submit",
+            reason=expiry_reason,
             target=approved_target,
             current=current_contracts,
         )
@@ -864,7 +846,14 @@ class BridgeStrategy(Strategy):
             self.close_position(position, time_in_force=TimeInForce.IOC)
 
     def _current_position_contracts(self) -> int:
-        """Signed current position in contracts, read from the Nautilus cache."""
+        """Signed current position in contracts, read from the Nautilus cache.
+
+        Position source (documented choice): ``self.cache.positions(...)`` —
+        ``self.portfolio`` is a facade with no per-strategy position
+        accessor (only ``net_position`` across accounts), and under the
+        NETTING OMS used by the entrade adapter the cache holds the single
+        per-strategy position.
+        """
         positions = self.cache.positions(
             instrument_id=self._instrument_id,
             strategy_id=self.id,
@@ -892,6 +881,16 @@ class BridgeStrategy(Strategy):
         )
 
     def _submit_target_delta(self, delta: int, ts_ns: int) -> None:
+        """Submit one signed order for the position gap (deterministic
+        client order id ``f"{prefix}-{timestamp_ns}"``).
+
+        Reference price is the last trade price = latest bar close (the
+        bridge consumes bars, not the book; marketable side by
+        construction). ``order_style="LO"``: limit at the last close with
+        ``TimeInForce.DAY`` (entrade adapter maps LIMIT+DAY -> "LO");
+        ``order_style="MAK"``: market with ``TimeInForce.IOC`` (entrade
+        maps MARKET+IOC -> "MAK").
+        """
         if self._order_factory is None or self._instrument is None:
             self.log.warning(
                 f"Bridge {self.id} cannot submit: instrument not ready",
@@ -957,26 +956,37 @@ class BridgeStrategy(Strategy):
     # database adapter, so only plain JSON-compatible values are persisted.
 
     def on_save(self) -> dict[str, Any]:
-        """Persist session state so a same-day restart keeps force-close state.
+        """Persist session and expiry-gate state so a same-day restart keeps
+        the closed session and the expiry force-flat cannot re-fire.
 
-        Returns the session date (VN), whether the session is force-close
-        closed, and the last order-submission timestamp (nanoseconds).
+        Returns the session date (VN), whether the session is closed, the
+        last order-submission timestamp (nanoseconds), and the
+        ``ExpiryState`` dates as ISO strings.
         """
         return format_bridge_state(
             session_date=self._session_date,
             session_closed=self._session_closed,
             last_submit_ns=self._last_submit_ns,
+            expiry_state=self._expiry_state,
         )
 
     def on_load(self, state: dict[str, Any]) -> None:
-        """Restore session state only when the saved session is today's VN date.
+        """Restore the expiry state (date-stamped, self-cleaning) and the
+        session flags when the saved session is today's VN date.
 
-        A new day starts fresh (the force-close/session machinery re-arms on
-        day rollover anyway). Save/load errors are logged, never raised, so a
+        A new day starts fresh (the expiry/session machinery re-arms on day
+        rollover anyway). Save/load errors are logged, never raised, so a
         corrupt state cannot break start-up.
         """
         try:
             saved = state.get("session_date") if isinstance(state, dict) else None
+            # The expiry dates are absolute (not session-relative): the gate
+            # clears a stale block on the first non-expiry bar, so restore
+            # them regardless of the saved session date.
+            self._expiry_state = expiry_state_from_saved(
+                state.get("expiry_blocked_session_date"),
+                state.get("expiry_last_processed_expiry_date"),
+            )
             if not should_restore_session(saved, vn_today_iso(self._now_utc())):
                 if saved is not None:
                     self.log.info(

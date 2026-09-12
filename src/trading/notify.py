@@ -1,13 +1,5 @@
 """Trading alert helpers over the shared Telegram transport.
-
-Re-exports the single notifier implementation from ``market_data.notify``
-and provides message formatters for the live loop: session lifecycle, order
-outcomes, force-close, and risk state transitions.
-
-Format follows the unified template (DEC-012):
-    <icon> QC-<DOMAIN> <EVENT> | <date> <time VN> | <verdict>
-    <pre>aligned body</pre>
-Dynamic values are HTML-escaped (the transport sends parse_mode=HTML).
+Format: ``<icon> QC-<DOMAIN> <EVENT> | <date> <time VN> | <verdict>``; values are HTML-escaped.
 """
 
 from __future__ import annotations

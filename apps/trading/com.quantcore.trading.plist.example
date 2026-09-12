@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the QuantCore live trading runner.
+
+  TEMPLATE ONLY: never auto-loaded by the workstream. To install manually,
+  copy to ~/Library/LaunchAgents/com.quantcore.trading.plist, replace
+  <repo> with the absolute repository path, then `launchctl load` it.
+  Credentials come from the process environment (or <repo>/.env): API_KEY,
+  API_SECRET, ENTRADE_USERNAME, ENTRADE_PASSWORD, optional
+  ENTRADE_INVESTOR_ID; TRADING_TELEGRAM_BOT_TOKEN / TRADING_TELEGRAM_CHAT_ID
+  for alerts.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.quantcore.trading</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>.venv/bin/python</string>
+        <string>apps/trading/run.py</string>
+        <string>--config</string>
+        <string>apps/trading/config/runtime.json</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>&lt;repo&gt;</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>1</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>4</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>&lt;repo&gt;/data/logs/trading-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>&lt;repo&gt;/data/logs/trading-launchd.log</string>
+</dict>
+</plist>

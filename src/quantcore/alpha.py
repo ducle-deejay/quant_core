@@ -1,17 +1,4 @@
-"""quantcore.alpha - Quantitative Researcher module (decision note DEC-017).
-
-WorldQuant-style workflow: hand-written seed -> single-alpha evaluation
-(Component 1 - Canonical Simulation + Component 2 - Evaluation and
-Screening) -> only passing seeds enter GA mining -> bred candidates are
-evaluated -> passing candidates are delivered to the pool folder consumed
-by the Portfolio Researcher.
-
-Extension slot: ``ga_fitness`` registry - default "engine" delegates to the
-Rust GA binding (fixed fitness = mean score x next-bar return); a custom
-fitness is a Python function with the same signature
-``fn(seeds, close, volume, population_size, generations, seed) -> list[str]``
-(phase-2 evaluation harness, DEC-017).
-"""
+"""quantcore.alpha - Quantitative Researcher module."""
 
 from __future__ import annotations
 
@@ -23,28 +10,36 @@ from datetime import date
 
 import alpha_core
 import numpy as np
+import pandas as pd
 
-from quantcore.core.artifacts import append_trial_ledger
-from quantcore.core.config import DataConfig
-from quantcore.core.data import close_volume, load_bars
-from quantcore.core.pool import PoolEntry, load_pool, write_pool_entry, write_pool_index
-from quantcore.core.registry import Registry
-from quantcore.core.extensions import QuantitativeModel, _CallableQuantitativeModel
-from quantcore.core.report import SpecSheet, TearSheet
+from core.artifacts import (
+    AlphaPool,
+    PoolEntry,
+    SpecSheet,
+    TearSheet,
+    append_trial_ledger,
+)
+from core.contracts import HarnessParams, Instrument
+from core.data import BarFrame
+from core.signal import close_returns, sanitize_scores
+from core.registry import Registry
 
-try:  # trading.contracts is the live wiring contract source (DEC-017)
-    from trading.contracts import HarnessParams
-except ImportError:  # pragma: no cover - fallback mirror for standalone use
-    from dataclasses import dataclass as _dc
-
-    @_dc(frozen=True)
-    class HarnessParams:  # type: ignore[no-redef]
-        span: int = 8
-        z_window: int = 480
-        band: float = 0.35
-        cap: float = 2.0
-        cost_per_side: float = 0.000229
-        bars_per_day: int = 240
+__all__ = [
+    "AlphaConfig",
+    "EngineQuantitativeModel",
+    "GateCriteria",
+    "ScreenResult",
+    "build_spec_sheet",
+    "deliver",
+    "evaluate_seed",
+    "ga_fitness",
+    "mine_seeds",
+    "quantitative_models",
+    "score",
+    "score_model",
+    "screen_batch",
+    "validate_seed",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -54,12 +49,36 @@ except ImportError:  # pragma: no cover - fallback mirror for standalone use
 
 @dataclass(frozen=True)
 class GateCriteria:
-    """Component 2 - Evaluation and Screening gate thresholds.
+    """Evaluation/screening gate thresholds for one alpha.
 
-    Phase-1 gate: absolute Information Coefficient, cost drag, net Sharpe,
-    walk-forward stability, ICIR. The deflated-threshold wiring (canon
-    section 3.4) is part of the phase-2 evaluation harness and is recorded
-    in DEC-017.
+    Phase gate: absolute Information Coefficient, cost drag, net Sharpe,
+    walk-forward stability, ICIR. ``sharpe_variance`` feeds the
+    deflated-Sharpe threshold when ``AlphaConfig.n_trials > 0``.
+
+    Parameters
+    ----------
+    min_abs_ic : float
+        Minimum absolute mean IC (rank correlation, z-units vs returns).
+    max_cost_drag_pct : float
+        Maximum cost drag in percent (40.0 == 40%).
+    min_net_sharpe : float
+        Minimum annualized net Sharpe of the daily PnL.
+    min_icir : float
+        Minimum IC information ratio (mean/std of per-block rank ICs).
+    min_positive_blocks_pct : float
+        Minimum share of positive walk-forward blocks in percent.
+    ic_horizons : tuple[int, ...]
+        IC ladder horizons in bars.
+    ic_window : int
+        Block length in bars for the ICIR and IC estimation windows.
+    walk_forward_block_days : int
+        Walk-forward block length in trading days.
+    ann_factor : float
+        Annualization factor for daily-observation statistics.
+    bars_per_day : int
+        Bars per trading day used to aggregate daily statistics.
+    sharpe_variance : float
+        Trial-Sharpe variance used by the deflated threshold.
     """
 
     min_abs_ic: float = 0.02
@@ -77,39 +96,87 @@ class GateCriteria:
 
 @dataclass(frozen=True)
 class AlphaConfig:
-    """Everything one research call needs; every field has a default."""
+    """Everything one research call needs; every field has a default.
+
+    Parameters
+    ----------
+    harness : HarnessParams
+        Canonical simulation parameters (span, z_window, band, cap,
+        bars_per_day).
+    gate : GateCriteria
+        Evaluation/screening thresholds.
+    ga_population_size : int
+        GA population size used by ``mine_seeds``.
+    ga_generations : int
+        GA generation count used by ``mine_seeds``.
+    ga_seed : int
+        GA RNG seed (deterministic breeding for a fixed seed).
+    n_trials : int
+        Effective trial count; ``> 0`` wires the deflated-Sharpe check into
+        the gate. Trial counting is the caller's responsibility (use
+        ``record_trial=True`` so the ledger stays complete).
+    record_trial : bool
+        When True, every evaluation is appended to the trial ledger
+        (``core.artifacts.append_trial_ledger``).
+    """
 
     harness: HarnessParams = field(default_factory=HarnessParams)
     gate: GateCriteria = field(default_factory=GateCriteria)
-    data: DataConfig | None = None
     ga_population_size: int = 100
     ga_generations: int = 20
     ga_seed: int = 42
-    n_trials: int = 0  # effective trial count; >0 wires the deflated-Sharpe check
+    n_trials: int = 0
+    record_trial: bool = False
+
+
+@dataclass(frozen=True)
+class ScreenResult:
+    """Batch screening output.
+
+    Parameters
+    ----------
+    funnel : dict
+        Counts: ``total_candidates``, ``ic_pass_count``,
+        ``drag_pass_count`` (engine screening gates) and
+        ``survivor_count`` (full-gate verdict IN).
+    tear_sheets : list[TearSheet]
+        One tear sheet per candidate, in input order.
+    survivors : list[str]
+        Canonical DSL strings of the full-gate survivors (verdict IN).
+    """
+
+    funnel: dict
+    tear_sheets: list[TearSheet]
+    survivors: list[str]
 
 
 # --------------------------------------------------------------------------- #
-# Extension registry
+# Extension registries
 # --------------------------------------------------------------------------- #
 
-#: GA fitness slot (DEC-017): engine default breeds via ga_breed_py.
+#: GA fitness slot: engine default breeds via ga_breed_py; a custom fitness
+#: is ``fn(seeds, close, volume, population_size, generations, seed)
+#: -> list[str]``.
 ga_fitness = Registry("ga_fitness")
-ga_fitness.register(
-    "engine",
-    alpha_core.ga_breed_py,
-    source="engine",
-    description="engine GA, fixed fitness mean score x next-bar return;"
-    " custom fitness = python fn(seeds, close, volume, population_size,"
-    " generations, seed) -> list[str]; use quantcore.alpha.score() as the"
-    " scoring primitive inside custom fitnesses",
-)
+if "engine" not in ga_fitness.names():
+    ga_fitness.register(
+        "engine",
+        alpha_core.ga_breed_py,
+        source="engine",
+        description="engine GA, fixed fitness mean score x next-bar return;"
+        " custom fitness = python fn(seeds, close, volume, population_size,"
+        " generations, seed) -> list[str]; use quantcore.alpha.score() as the"
+        " scoring primitive inside custom fitnesses",
+    )
 
 
 class EngineQuantitativeModel:
     """Thin model adapter over the Rust expression evaluator.
 
     ``dsl`` is explicit because the expression is part of model semantics;
-    no expression is silently selected by a call site.
+    no expression is silently selected by a call site. Instances are both
+    callable and provide ``score`` (the old adapter's dual surface), so they
+    satisfy the plain callable contract of ``quantitative_models``.
     """
 
     def __init__(self, dsl: str) -> None:
@@ -119,30 +186,52 @@ class EngineQuantitativeModel:
         matrix = alpha_core.execute_batch_py([self.dsl], list(close), list(volume))
         return list(matrix[0])
 
+    __call__ = score
 
-quantitative_models = Registry(
-    "quantitative_models",
-    contract=QuantitativeModel,
-    capability="score",
-    adapter=_CallableQuantitativeModel,
-)
+
+quantitative_models = Registry("quantitative_models")
 # This registered built-in names its expression explicitly. Other DSL
 # expressions use ``EngineQuantitativeModel(dsl)`` so no model semantics are
 # selected by an implicit default.
-quantitative_models.register(
-    "engine_close",
-    EngineQuantitativeModel("close"),
-    source="engine",
-    description="Rust alpha expression evaluator; construct with explicit DSL for other expressions",
-)
+if "engine_close" not in quantitative_models.names():
+    quantitative_models.register(
+        "engine_close",
+        EngineQuantitativeModel("close"),
+        source="engine",
+        description="Rust alpha expression evaluator; construct with explicit"
+        " DSL for other expressions",
+    )
 
 
 def score_model(
-    model: str | QuantitativeModel,
+    model: str | object,
     close: list[float],
     volume: list[float],
 ) -> list[float]:
-    """Score one observation window through the quantitative-model contract."""
+    """Score one observation window through the quantitative-model contract.
+
+    Parameters
+    ----------
+    model : str | object
+        A registered ``quantitative_models`` name, or any object providing
+        ``score(close, volume) -> list[float]``.
+    close : list[float]
+        Close prices, one per bar.
+    volume : list[float]
+        Volumes, one per bar.
+
+    Returns
+    -------
+    list[float]
+        One score per bar (z-units where the model produces them).
+
+    Raises
+    ------
+    ValueError
+        Empty/mismatched inputs, wrong output length, or no finite scores.
+    TypeError
+        ``model`` is neither a registered name nor a score-providing object.
+    """
     if not close:
         raise ValueError("close and volume must be non-empty")
     if len(close) != len(volume):
@@ -150,11 +239,21 @@ def score_model(
             f"close and volume lengths differ ({len(close)} != {len(volume)})"
         )
     if isinstance(model, str):
-        scores = list(quantitative_models.call(model, close, volume))
+        implementation = quantitative_models.get(model).fn
+        score_method = getattr(implementation, "score", None)
+        if not callable(score_method):
+            raise TypeError(
+                f"registered quantitative model {model!r} does not provide"
+                " callable score(close, volume)"
+            )
     else:
-        if not isinstance(model, QuantitativeModel):
-            raise TypeError("model must be a registered name or implement QuantitativeModel.score")
-        scores = list(model.score(close, volume))
+        score_method = getattr(model, "score", None)
+        if not callable(score_method):
+            raise TypeError(
+                "model must be a registered quantitative_models name or"
+                " provide score(close, volume)"
+            )
+    scores = list(score_method(close, volume))
     if len(scores) != len(close):
         raise ValueError(
             f"quantitative model returned {len(scores)} scores for {len(close)} bars"
@@ -174,33 +273,12 @@ def _alpha_id(dsl: str) -> str:
     return "alpha-" + hashlib.sha256(dsl.encode("utf-8")).hexdigest()[:8]
 
 
-def _sanitize_scores(series: list[float]) -> list[float]:
-    """Forward-fill non-finite scores (mirror of trading.portfolio).
-
-    Leading non-finite values take the first finite value; interior ones
-    carry the last finite value forward; an all-non-finite series maps to
-    zeros (engine ``sanitize_scores`` semantics, observation OBS-011).
-    """
-    first = next((v for v in series if math.isfinite(v)), None)
-    if first is None:
-        return [0.0] * len(series)
-    last = first
-    out: list[float] = []
-    for v in series:
-        if math.isfinite(v):
-            last = v
-        out.append(last)
-    return out
 
 
-def _close_returns(close: list[float]) -> list[float]:
-    r = [0.0] * len(close)
-    for t in range(1, len(close)):
-        r[t] = close[t] / close[t - 1] - 1.0
-    return r
 
 
 def _daily(pnl: list[float], bars_per_day: int) -> list[float]:
+    """Aggregate per-bar PnL into consecutive per-day sums."""
     return [sum(pnl[i : i + bars_per_day]) for i in range(0, len(pnl), bars_per_day)]
 
 
@@ -219,8 +297,8 @@ def _rank_ic(x: np.ndarray, y: np.ndarray) -> float:
 def _icir(score: list[float], returns: list[float], horizon: int, window: int) -> float | None:
     """ICIR = mean/std of per-block rank ICs (block length = ``window``).
 
-    Returns None when fewer than two usable blocks exist (check treated as
-    not-applicable by the gate).
+    Returns None when fewer than two usable blocks exist (the gate treats
+    the check as not-applicable).
     """
     n = len(score)
     max_t = n - horizon
@@ -244,6 +322,29 @@ def _icir(score: list[float], returns: list[float], horizon: int, window: int) -
     return mean / std
 
 
+def _instrument_for(bars: BarFrame) -> Instrument:
+    """Resolve the bar window's instrument (bare symbol from the id).
+
+    ``bars.instrument_id`` is ``"<SYMBOL>.<VENUE>"`` (e.g. ``"VN30F1M.HNX"``);
+    ``Instrument.load`` takes the bare symbol, so the venue suffix is
+    stripped here.
+    """
+    symbol = bars.instrument_id.split(".", 1)[0]
+    return Instrument.load(symbol)
+
+
+def _window_provenance(bars: BarFrame) -> dict:
+    """JSON-safe provenance dict for the evaluated bar window."""
+    window = bars.window
+    return {
+        "instrument_id": window.instrument_id,
+        "bar_type": window.bar_type,
+        "start": window.start.isoformat(),
+        "end": window.end.isoformat(),
+        "n_bars": int(window.n_bars),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #
@@ -254,40 +355,80 @@ def validate_seed(dsl: str) -> str:
     return alpha_core.validate_expression_py(dsl)
 
 
-def _resolve_data(config: AlphaConfig | None, data: DataConfig | None) -> DataConfig:
-    if data is not None:
-        return data
-    if config is not None and config.data is not None:
-        return config.data
-    return DataConfig()
+def score(expressions: list[str], close: list[float], volume: list[float]) -> list[list[float]]:
+    """Batch-score expressions over close/volume.
+
+    The scoring primitive for custom ``ga_fitness`` functions: one engine
+    call, one row per expression.
+
+    Parameters
+    ----------
+    expressions : list[str]
+        DSL expressions (canonicalized first for safety).
+    close : list[float]
+        Close prices, one per bar.
+    volume : list[float]
+        Volumes, one per bar.
+
+    Returns
+    -------
+    list[list[float]]
+        One score series (z-units) per expression, in input order.
+    """
+    return alpha_core.execute_batch_py(list(expressions), list(close), list(volume))
 
 
 def evaluate_seed(
     dsl: str,
+    bars: BarFrame,
     config: AlphaConfig | None = None,
-    data: DataConfig | None = None,
-    record_trial: bool = False,
-    trial_root=None,
-    source: str = "seed",
-    bars_df=None,
 ) -> TearSheet:
-    """Single-alpha evaluation: Component 1 + Component 2 -> TearSheet.
+    """Single-alpha evaluation: canonical simulation + screening -> TearSheet.
 
     Pipeline: canonicalize -> batch score -> sanitize -> canonical position
     -> net/gross PnL -> metrics (Sharpe, max drawdown, cost drag, IC ladder,
     walk-forward, ICIR) -> gate verdict "IN"/"OUT" with failing reasons.
-    With ``record_trial=True`` the evaluation is appended to the trial
-    ledger (mandatory trial accounting, canon Component 2 section 3.4).
+    Transaction costs use the bar instrument's cost model
+    (``Instrument.cost.cost_per_side_frac``). With
+    ``config.record_trial=True`` the evaluation is appended to the trial
+    ledger.
+
+    Parameters
+    ----------
+    dsl : str
+        Seed expression in the canonical DSL.
+    bars : BarFrame
+        The bar window to evaluate over (close/volume feed the engine).
+    config : AlphaConfig | None
+        Defaults to ``AlphaConfig()``.
+
+    Returns
+    -------
+    TearSheet
+        Metrics, verdict, failing reasons and provenance (engine version,
+        harness, gate, window).
+
+    Raises
+    ------
+    ValueError
+        Invalid DSL syntax, or the expression produces no finite values.
+
+    Notes
+    -----
+    Units: scores and composites are z-units; PnL metrics are in canonical
+    composite units (position x return per bar); ``cost_drag_pct`` is a
+    percent value.
     """
     cfg = config or AlphaConfig()
     gate = cfg.gate
     h = cfg.harness
-    eff_data = _resolve_data(cfg, data)
     dsl_canonical = validate_seed(dsl)
 
-    df = bars_df if bars_df is not None else load_bars(eff_data)
-    close, volume = close_volume(df)
+    close = bars.close_list()
+    volume = bars.volume_list()
     bpd = h.bars_per_day
+    instrument = _instrument_for(bars)
+    cost_per_side = instrument.cost.cost_per_side_frac
 
     matrix = alpha_core.execute_batch_py([dsl_canonical], close, volume)
     if not any(math.isfinite(v) for v in matrix[0]):
@@ -296,7 +437,7 @@ def evaluate_seed(
             " references fields absent from the data (only close/volume are"
             " available in the research catalog)"
         )
-    sane = _sanitize_scores(matrix[0])
+    sane = sanitize_scores(matrix[0])
     position = alpha_core.canonical_map_py(
         sane,
         span=h.span,
@@ -305,17 +446,17 @@ def evaluate_seed(
         cap=h.cap,
         bars_per_day=bpd,
     ).position
-    returns = _close_returns(close)
-    net = alpha_core.compute_pnl_py(position, returns, h.cost_per_side, bpd).net
+    returns = close_returns(close)
+    net = alpha_core.compute_pnl_py(position, returns, cost_per_side, bpd).net
     gross = alpha_core.compute_pnl_py(position, returns, 0.0, bpd).net
 
     daily_net = _daily(net, bpd)
     daily_gross = _daily(gross, bpd)
     net_sum = sum(daily_net)
     gross_sum = sum(daily_gross)
-    # Engine convention (canonical pnl.rs): drag = cost / |gross|, always
-    # non-negative; the naive 1 - net/gross goes negative when gross < 0 and
-    # silently passes the gate (practitioner-review finding).
+    # Engine convention: drag = cost / |gross|, always non-negative; the
+    # naive 1 - net/gross goes negative when gross < 0 and silently passes
+    # the gate.
     cost_drag_pct = (
         100.0 * (gross_sum - net_sum) / abs(gross_sum) if gross_sum != 0.0 else math.inf
     )
@@ -373,10 +514,9 @@ def evaluate_seed(
         ("icir", icir is None or icir > gate.min_icir),
     ]
     if cfg.n_trials > 0:
-        # Canon Component 2 section 3.4: the bar rises with the effective
-        # trial count (deflated-Sharpe logic). Wired in the API now that the
-        # ledger exists (practitioner-review finding); trial count is the
-        # caller's responsibility (screen_batch accounting).
+        # The bar rises with the effective trial count (deflated-Sharpe
+        # logic); the trial count is the caller's responsibility
+        # (screen_batch accounting).
         deflated = alpha_core.deflated_threshold_py(cfg.n_trials, gate.sharpe_variance)
         checks.append(
             ("deflated_sharpe", math.isfinite(net_sharpe) and net_sharpe > deflated)
@@ -386,10 +526,9 @@ def evaluate_seed(
 
     provenance = {
         "engine_version": getattr(alpha_core, "__version__", "unknown"),
-        "source": source,
         "harness": asdict(h),
         "gate": asdict(gate),
-        "data": asdict(eff_data),
+        "window": _window_provenance(bars),
     }
     tear = TearSheet(
         alpha_id=_alpha_id(dsl_canonical),
@@ -400,7 +539,7 @@ def evaluate_seed(
         provenance=provenance,
     )
 
-    if record_trial:
+    if cfg.record_trial:
         append_trial_ledger(
             {
                 "alpha_id": tear.alpha_id,
@@ -414,76 +553,130 @@ def evaluate_seed(
                     "cost_drag_pct": cost_drag_pct,
                 },
                 "provenance": provenance,
-            },
-            root=trial_root,
+            }
         )
     return tear
 
 
-def evaluate_candidate(
-    dsl: str,
-    config: AlphaConfig | None = None,
-    data: DataConfig | None = None,
-    record_trial: bool = False,
-    trial_root=None,
-) -> TearSheet:
-    """Evaluate a GA-bred candidate (source="ga"); same pipeline as a seed."""
-    return evaluate_seed(
-        dsl,
-        config=config,
-        data=data,
-        record_trial=record_trial,
-        trial_root=trial_root,
-        source="ga",
-    )
-
-
-def score(expressions: list[str], close: list[float], volume: list[float]) -> list[list[float]]:
-    """Batch-score expressions over close/volume — the scoring primitive for
-    custom ``ga_fitness`` functions (DEC-017; UAT finding: the extension
-    contract previously forced writers to import raw ``alpha_core``)."""
-    return alpha_core.execute_batch_py(list(expressions), list(close), list(volume))
-
-
-def mine_seeds(
+def screen_batch(
     seeds: list[str],
+    bars: BarFrame,
     config: AlphaConfig | None = None,
-    data: DataConfig | None = None,
-    fitness: str = "engine",
-    population_size: int | None = None,
-    generations: int | None = None,
-    seed: int | None = None,
-) -> list[str]:
-    """Breed the GA from evaluation-passing seeds (WorldQuant-style).
+) -> ScreenResult:
+    """Evaluate a batch and report the screening funnel.
 
-    Every seed is canonicalized first (invalid seeds raise ValueError
-    naming the offending expression). Returns the final population's DSL
-    strings ranked best-first; deterministic for a fixed ``seed``.
+    Every candidate is recorded in the trial ledger when
+    ``config.record_trial`` is True (the funnel is where trials are
+    counted). ``survivor_count`` counts FULL-gate survivors (verdict IN),
+    while ``ic_pass_count``/``drag_pass_count`` are the forecast- and
+    cost-gate counts from the engine screening.
+
+    Parameters
+    ----------
+    seeds : list[str]
+        Candidate DSL expressions (seeds or GA-bred).
+    bars : BarFrame
+        The bar window; loaded once and shared by the whole batch.
+    config : AlphaConfig | None
+        Defaults to ``AlphaConfig()``.
+
+    Returns
+    -------
+    ScreenResult
+        Funnel counts, one TearSheet per candidate, survivor DSL strings.
+
+    Raises
+    ------
+    ValueError
+        Empty seed list.
     """
     if not seeds:
         raise ValueError("seeds must be non-empty")
     cfg = config or AlphaConfig()
-    eff_data = _resolve_data(cfg, data)
+    tears = [evaluate_seed(e, bars, cfg) for e in seeds]
+    funnel = alpha_core.screen_candidates_py(
+        [t.metrics["best_abs_ic"] for t in tears],
+        [t.metrics["cost_drag_pct"] for t in tears],
+        cfg.gate.min_abs_ic,
+        cfg.gate.max_cost_drag_pct,
+    )
+    survivors = [t.dsl for t in tears if t.verdict == "IN"]
+    return ScreenResult(
+        funnel={
+            "total_candidates": funnel.total_candidates,
+            "ic_pass_count": funnel.ic_pass_count,
+            "drag_pass_count": funnel.drag_pass_count,
+            "survivor_count": len(survivors),
+        },
+        tear_sheets=tears,
+        survivors=survivors,
+    )
+
+
+def mine_seeds(
+    seeds: list[str],
+    bars: BarFrame,
+    config: AlphaConfig | None = None,
+) -> list[str]:
+    """Breed the GA from evaluation-passing seeds (WorldQuant-style).
+
+    Every seed is canonicalized first (invalid seeds raise ValueError naming
+    the offending expression). Uses the ``ga_fitness`` registry "engine"
+    method with ``config.ga_population_size`` / ``config.ga_generations`` /
+    ``config.ga_seed``.
+
+    Parameters
+    ----------
+    seeds : list[str]
+        Evaluation-passing seed expressions.
+    bars : BarFrame
+        The bar window feeding the fitness evaluation.
+    config : AlphaConfig | None
+        Defaults to ``AlphaConfig()``.
+
+    Returns
+    -------
+    list[str]
+        The final population's canonical DSL strings ranked best-first,
+        deduplicated; deterministic for a fixed ``ga_seed``.
+
+    Raises
+    ------
+    ValueError
+        Empty seed list, invalid seed syntax, or a fitness that returns
+        non-string entries.
+
+    Notes
+    -----
+    Extension slot: the ``ga_fitness`` registry "engine" default delegates
+    to the Rust GA binding (fixed fitness = mean score x next-bar return);
+    a custom fitness is a Python function with the same signature
+    ``fn(seeds, close, volume, population_size, generations, seed) ->
+    list[str]`` using :func:`score` as the scoring primitive.
+    """
+    if not seeds:
+        raise ValueError("seeds must be non-empty")
+    cfg = config or AlphaConfig()
     canonical = [validate_seed(s) for s in seeds]
-    df = load_bars(eff_data)
-    close, volume = close_volume(df)
+    close = bars.close_list()
+    volume = bars.volume_list()
     result = ga_fitness.call(
-        fitness,
+        "engine",
         canonical,
         close,
         volume,
-        population_size or cfg.ga_population_size,
-        generations or cfg.ga_generations,
-        seed if seed is not None else cfg.ga_seed,
+        cfg.ga_population_size,
+        cfg.ga_generations,
+        cfg.ga_seed,
     )
     # Custom fitnesses are not trusted: validate + canonicalize every element
     # (the engine path is idempotent here) and dedupe so trial accounting and
-    # deflated-threshold priors are not inflated by duplicates (UAT findings).
+    # deflated-threshold priors are not inflated by duplicates.
     validated: list[str] = []
     for i, dsl in enumerate(result):
         if not isinstance(dsl, str):
             raise ValueError(
-                f"fitness {fitness!r} returned non-string at index {i}: {dsl!r}"
+                f"ga_fitness 'engine' returned non-string at index {i}: {dsl!r}"
             )
         validated.append(validate_seed(dsl))
     seen: set[str] = set()
@@ -495,124 +688,112 @@ def mine_seeds(
     return out
 
 
-def screen_batch(
-    expressions: list[str],
-    config: AlphaConfig | None = None,
-    data: DataConfig | None = None,
-    record_trials: bool = True,
-    trial_root=None,
-    source: str = "seed",
-) -> dict:
-    """Evaluate a batch and report the screening funnel (canon 3.1-3.5).
+def build_spec_sheet(sheet: TearSheet, bars: BarFrame) -> SpecSheet:
+    """Build the PASS artifact: expectations consumed by the Portfolio
+    Researcher, the divergence gauges and the live kill criteria.
 
-    Every candidate is recorded in the trial ledger when
-    ``record_trials=True`` (the funnel is where trials are counted).
-    ``source`` tags provenance ("seed" or "ga") for GA-bred batches so the
-    trial ledger is not misattributed (UAT finding).
-    Returns {"funnel": {...counts}, "tear_sheets": [...], "survivors": [...]}
-    where ``survivor_count`` counts FULL-gate survivors (verdict IN), while
-    ``ic_pass_count``/``drag_pass_count`` are the forecast- and cost-gate
-    counts from the engine screening.
+    Holding period = ladder horizon with max |mean IC|; expected ICs are the
+    full ladder (horizon -> mean IC); capacity = 5% of mean daily volume
+    (documented participation heuristic); kill criteria = rolling 20-day IC
+    below zero for ten consecutive days (the documented example).
+
+    Parameters
+    ----------
+    sheet : TearSheet
+        The evaluation tear sheet (must carry ``ic_ladder`` metrics).
+    bars : BarFrame
+        The same bar window the tear sheet was evaluated on (volume feeds
+        the capacity estimate).
+
+    Returns
+    -------
+    SpecSheet
+        Expectations incl. ``expected_ic`` and the default
+        ``cost_model_bps``.
     """
-    if not expressions:
-        raise ValueError("expressions must be non-empty")
-    cfg = config or AlphaConfig()
-    eff_data = _resolve_data(cfg, data)
-    df = load_bars(eff_data)  # loaded ONCE for the whole batch (perf finding)
-    tears = [
-        evaluate_seed(
-            e,
-            config=cfg,
-            data=data,
-            record_trial=record_trials,
-            trial_root=trial_root,
-            source=source,
-            bars_df=df,
-        )
-        for e in expressions
-    ]
-    funnel = alpha_core.screen_candidates_py(
-        [t.metrics["best_abs_ic"] for t in tears],
-        [t.metrics["cost_drag_pct"] for t in tears],
-        cfg.gate.min_abs_ic,
-        cfg.gate.max_cost_drag_pct,
-    )
-    survivors = [t.dsl for t in tears if t.verdict == "IN"]
-    return {
-        "funnel": {
-            "total_candidates": funnel.total_candidates,
-            "ic_pass_count": funnel.ic_pass_count,
-            "drag_pass_count": funnel.drag_pass_count,
-            "survivor_count": len(survivors),
-        },
-        "tear_sheets": tears,
-        "survivors": survivors,
-    }
-
-
-def build_spec_sheet(
-    tear_sheet: TearSheet,
-    data: DataConfig | None = None,
-    config: AlphaConfig | None = None,
-) -> SpecSheet:
-    """Component 2 PASS artifact (canon section 3.5): expectations consumed by
-    the Portfolio Researcher, the divergence gauges and live kill criteria.
-
-    holding period = ladder horizon with max |mean IC|; capacity = 5% of
-    mean daily volume (documented participation heuristic); kill criteria =
-    rolling 20-day IC below zero for two weeks (canon example).
-    """
-    ladder = tear_sheet.metrics.get("ic_ladder") or []
+    ladder = sheet.metrics.get("ic_ladder") or []
     best = max(ladder, key=lambda r: abs(r["mean_ic"]), default=None)
     holding = int(best["horizon"]) if best else 1
-    expected_sharpe = float(tear_sheet.metrics.get("net_sharpe", 0.0))
+    expected_sharpe = float(sheet.metrics.get("net_sharpe", 0.0))
+    expected_ic = {str(r["horizon"]): float(r["mean_ic"]) for r in ladder}
 
-    cfg = config or AlphaConfig()
-    eff_data = _resolve_data(cfg, data)
-    df = load_bars(eff_data)
-    mean_daily_volume = float(df.groupby(df["ts"].dt.date)["volume"].sum().mean())
+    ts = bars.ts
+    volume = np.asarray(bars.volume, dtype=float)
+    daily_volume = pd.Series(volume, index=ts).groupby(ts.date).sum()
+    mean_daily_volume = float(daily_volume.mean()) if len(daily_volume) else 0.0
     capacity = int(math.floor(mean_daily_volume * 0.05)) if mean_daily_volume > 0 else 0
 
     return SpecSheet(
-        alpha_id=tear_sheet.alpha_id,
+        alpha_id=sheet.alpha_id,
         expected_holding_period_bars=holding,
         expected_net_sharpe=expected_sharpe,
         capacity_contracts=capacity,
         regime_notes="",
         kill_criteria={"rolling_ic_window_days": 20, "below": 0.0, "consecutive_days": 10},
+        expected_ic=expected_ic,
     )
 
 
-def deliver_to_pool(
-    tear_sheet: TearSheet,
-    spec_sheet: SpecSheet,
+def deliver(
+    pool: AlphaPool,
+    sheet: TearSheet,
+    spec: SpecSheet,
     *,
     alpha_id: str | None = None,
     author: str = "research",
-    tags=(),
+    tags: tuple[str, ...] = (),
     family: str | None = None,
-    source: str | None = None,
-    pool_root=None,
+    source: str = "seed",
 ) -> PoolEntry:
-    """Deliver an IN-verdict alpha into the pool folder (handoff artifact).
+    """Deliver an IN-verdict alpha into the in-memory pool (handoff artifact).
 
-    Writes ``<pool_root>/alphas/<alpha_id>.json`` and regenerates
-    ``index.json`` from the whole folder. Raises ValueError for OUT.
+    Builds the PoolEntry (schema_version "2", embedding the tear sheet and
+    the spec sheet) and adds it to ``pool``. SAVING is the caller's explicit
+    ``pool.save()``.
+
+    Parameters
+    ----------
+    pool : AlphaPool
+        The pool to append to.
+    sheet : TearSheet
+        The evaluation tear sheet; verdict must be "IN".
+    spec : SpecSheet
+        The expectation sheet (see :func:`build_spec_sheet`).
+    alpha_id : str | None
+        Override id; defaults to the deterministic id of the canonical DSL.
+    author : str
+        Author tag recorded in the entry.
+    tags : tuple[str, ...]
+        Free-form tags.
+    family : str | None
+        Mining family label (GA lineage).
+    source : str
+        Provenance of the alpha ("seed" or "ga").
+
+    Returns
+    -------
+    PoolEntry
+        The entry that was added to ``pool``.
+
+    Raises
+    ------
+    ValueError
+        The tear sheet verdict is not "IN".
     """
-    if tear_sheet.verdict != "IN":
+    if sheet.verdict != "IN":
         raise ValueError(
-            f"cannot deliver alpha {tear_sheet.alpha_id!r} with verdict"
-            f" {tear_sheet.verdict!r}; reasons: {tear_sheet.reasons}"
+            f"cannot deliver alpha {sheet.alpha_id!r} with verdict"
+            f" {sheet.verdict!r}; reasons: {sheet.reasons}"
         )
     entry = PoolEntry(
-        alpha_id=alpha_id or _alpha_id(tear_sheet.dsl),
-        dsl=tear_sheet.dsl,
+        alpha_id=alpha_id or _alpha_id(sheet.dsl),
+        dsl=sheet.dsl,
         author=author,
         tags=tuple(tags),
         family=family,
-        source=source or "seed",
-        spec_sheet=spec_sheet.to_dict(),
+        source=source,
+        tear_sheet=sheet,
+        spec_sheet=spec,
     )
-    write_pool_entry(entry, root=pool_root)
-    write_pool_index(load_pool(pool_root), root=pool_root)
+    pool.add(entry)
     return entry

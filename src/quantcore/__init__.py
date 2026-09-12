@@ -1,22 +1,24 @@
-"""quantcore - role-scoped Python API for the quant_core framework.
-
-One module per practitioner role (decision note DEC-017):
-
-- ``quantcore.alpha``      Quantitative Researcher: seed -> single-alpha
-                              evaluation -> GA breeding -> pool delivery.
-- ``quantcore.portfolio``     Portfolio Researcher: pool, orthogonalization,
-                              combination, weight refit, health report.
-- ``quantcore.execution``     Execution Researcher: Nautilus-based offline
-                              execution backtest, urgency, slippage report.
-- ``quantcore.risk``          Quant Risk Researcher: sizing models, risk
-                              policies, portfolio backtest, gauges, post-mortem.
-- ``quantcore.core``          Shared: config, catalog data access, artifact
-                              writers, pool loader/writer, registries.
-
-Design contract: notebook-first, deterministic, agent-ready. Market data is
-resolved automatically from the research catalog (users never pass data).
-Only handoff artifacts are auto-saved; reports stay in-memory.
+"""quantcore - role-scoped research API for the quant_core framework.
+Entry points take their data explicitly; only caller-invoked ``save()`` writes artifacts.
 """
-from quantcore import core  # noqa: F401
+
+from __future__ import annotations
+
+import importlib
 
 __version__ = "0.1.0"
+
+_ROLE_MODULES = ("alpha", "execution", "portfolio", "risk")
+
+
+def __getattr__(name: str):
+    """Lazily bind a role module on first access (PEP 562)."""
+    if name in _ROLE_MODULES:
+        module = importlib.import_module(f"quantcore.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_ROLE_MODULES))

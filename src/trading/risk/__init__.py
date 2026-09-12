@@ -1,13 +1,8 @@
-"""Component 7 risk overlay package (live wiring phase, workstream C).
+"""Risk overlay package: pure core re-exports + the Nautilus ``RiskOverlayActor``."""
 
-Exposes the pure core (``RiskConfig``, ``RiskLedger``, session helpers,
-status/reason vocabulary) and the thin Nautilus v1 integration
-(``RiskOverlayActor``, ``RiskOverlayConfig``). The contract types
-``RiskState``/``TargetPosition`` live in ``trading.contracts`` (single
-contract file joining the three workstreams, decision DEC-008).
-"""
+from core import RiskConfig
 
-from trading.risk.overlay import RiskOverlayActor, RiskOverlayConfig
+from trading.risk.overlay import RiskOverlayActor
 from trading.risk.state import (
     ACTIVE,
     HALTED,
@@ -17,7 +12,6 @@ from trading.risk.state import (
     REASON_LOSS,
     REASON_REDUCING_ONLY,
     REASON_STALE,
-    RiskConfig,
     RiskLedger,
     is_session_open,
     session_day,
@@ -35,7 +29,6 @@ __all__ = [
     "RiskConfig",
     "RiskLedger",
     "RiskOverlayActor",
-    "RiskOverlayConfig",
     "is_session_open",
     "session_day",
 ]

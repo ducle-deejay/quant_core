@@ -1,8 +1,9 @@
 [project]
 name = "trading"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
+    "core",
     "market-data",
     "nautilus-trader==1.231.0",
     "dnse-sdk-openapi>=2.0.0",
@@ -13,4 +14,15 @@ dependencies = [
     "truststore>=0.10.4",
     "websockets>=16.0",
     "msgpack>=1.2.1",
+]
+
+[tool.setuptools]
+package-dir = { trading = "." }
+packages = [
+    "trading",
+    "trading.adapters",
+    "trading.adapters.dnse",
+    "trading.adapters.entrade",
+    "trading.risk",
+    "trading.strategies",
 ]

@@ -1,69 +1,5 @@
-"""Portfolio orchestration for the live wiring phase (milestone 1, workstream A).
-
-Pure ``alpha_core`` + stdlib: one bar buffer in, one signed target position
-out, per the ``Portfolio`` protocol in ``trading.contracts``. No Nautilus
-dependency. Implements canon stages STG-1-CANONICAL-SIM (score -> position),
-STG-5-POSITION-CONSTRUCTION (vol targeting -> target) and the milestone-1
-contract conversion recorded in decision note DEC-008.
-
-Per-bar algorithm (deterministic; the same input always yields the same
-``TargetPosition``):
-
-1. Shape guards. ``bars`` must carry ``"close"`` and ``"volume"`` lists of
-   equal, non-empty length. A buffer shorter than ``z_window + WARMUP_MARGIN``
-   (800 bars with the default ``z_window = 480``) is not warmed up yet and
-   yields a flat target with reason ``"warmup"``. Missing/incompatible keys
-   are treated as invalid input.
-2. Value guards. Any non-finite close/volume value, or any non-positive
-   close (a zero/negative index price makes returns and the margin
-   conversion meaningless), yields a flat target with reason
-   ``"invalid-input"``.
-3. Scoring. Every configured expression is evaluated over the full buffers
-   in ONE ``execute_batch_py`` call (the whole expression list, never one
-   call per alpha) -> a score matrix with one row per expression.
-4. NaN sanitisation. ``execute_batch_py`` emits NaN during each rolling
-   operator's warmup by engine contract (operators.rs: first ``window - 1``
-   bars are NaN), and the ``canonical_map_py`` binding rejects any non-finite
-   score. The Rust core ``canonical_map`` handles this with
-   ``sanitize_scores`` (forward-fill of non-finite values; all-NaN maps to
-   zeros), so this module mirrors exactly that semantics in Python before
-   calling ``canonical_map_py`` (see GAP-1 in the integrator handoff).
-5. Canonical mapping. Each sanitised score row is mapped with
-   ``canonical_map_py(score, span, z_window, band, cap, bars_per_day)`` from
-   ``config.harness`` -> a per-alpha position series in z units. The current
-   per-alpha position is the last element and is recorded in ``components``
-   under its expression key (telemetry).
-6. Composite z. ``composite_score_py`` is applied to the per-alpha position
-   series with the config weights normalised to sum to 1 (the engine
-   function is reused rather than recomputed by hand, for research/live
-   parity); the current composite z is the last element.
-7. Volatility targeting. A rolling realised-vol series of the underlying
-   close returns (simple returns ``close[t]/close[t-1] - 1``, sample
-   standard deviation ddof=1 over a trailing ``VOL_WINDOW = 20`` bar window,
-   annualised by ``sqrt(bars_per_day)``; windows with fewer than two samples
-   or zero variance are 0.0, matching the engine's ``ts_std`` convention) is
-   passed to ``vol_target_py(composite, vol_est, config.vol_target,
-   config.vol_floor)``. ``vol_target`` is an annualised fraction and
-   ``vol_est`` is annualised, so the target/estimate ratio is scale-
-   invariant. The current target z is the last element.
-8. Contract conversion (DEC-008)::
-       L_max = floor(capital_vnd * safety_factor / (margin_rate * price * 100_000))
-       raw   = z / cap * L_max
-       contracts = round(raw)          # Python round, half-to-even
-       contracts = clip(contracts, -max_contracts, +max_contracts)
-   with ``price`` = last close and ``cap`` = ``harness.cap``. ``z_target``
-   on the result carries the pre-rounding z (the vol-targeted z).
-9. Reason. ``"warmup"`` (buffer not yet long enough), ``"invalid-input"``
-   (malformed/non-finite/non-positive bars or an engine failure), then
-   ``"cap-limited"`` when the un-clipped rounded contract count exceeds
-   ``max_contracts``, ``"flat-no-signal"`` when it rounds to zero or the z
-   is degenerate, else ``"signal"``.
-
-Frozen-canon/ledger context: market facts are the VN30F1M contract
-multiplier 100,000 VND per index point and the entrade 5% margin rate
-(observation notes OBS-009/OBS-010); the milestone-1 cost model is the
-scalar ``HarnessParams.cost_per_side`` (decision note DEC-006); the
-contract conversion formula is decision note DEC-008.
+"""Portfolio orchestration for the live runner.
+One bar buffer in, one signed target out; pure ``alpha_core`` + stdlib, no Nautilus.
 """
 
 from __future__ import annotations
@@ -73,7 +9,15 @@ from datetime import datetime
 
 import alpha_core
 
-from trading.contracts import Portfolio, PortfolioConfig, TargetPosition
+from core import AccountLimits
+from core.signal import rolling_vol, sanitize_scores
+from core import Instrument
+from core import Portfolio
+from core import PortfolioConfig
+from core import TargetPosition
+from core.artifacts import AlphaPool, WeightsArtifact
+from core.mapping import max_contracts_at
+from core.mapping import to_contracts
 
 #: Trailing-window length (bars) for the realised-vol estimate.
 VOL_WINDOW = 20
@@ -105,59 +49,19 @@ def _flat(ts: datetime, reason: str, components: dict[str, float] | None = None)
     )
 
 
-def _sanitize_scores(series: list[float]) -> list[float]:
-    """Forward-fill non-finite score values, mirroring the engine's
-    ``sanitize_scores``: leading non-finite values take the first finite
-    value, interior ones carry the last finite value forward, and an
-    all-non-finite series maps to zeros."""
-    first = next((v for v in series if math.isfinite(v)), None)
-    if first is None:
-        return [0.0] * len(series)
-    last = first
-    out: list[float] = []
-    for v in series:
-        if math.isfinite(v):
-            last = v
-        out.append(last)
-    return out
-
-
-def _rolling_vol(close: list[float], window: int, bars_per_day: int) -> list[float]:
-    """Annualised rolling realised vol of simple close returns.
-
-    ``vol_est[t] = sample_std(r[t-window+1 .. t]) * sqrt(bars_per_day)`` with
-    ``r[0] = 0.0`` and ``r[t] = close[t]/close[t-1] - 1``. Trailing windows
-    with fewer than two samples yield 0.0 (the engine's ``ts_std`` yields NaN
-    there; 0.0 is used so the vol-target zero guard produces a flat output
-    and the series stays finite for ``vol_target_py``)."""
-    n = len(close)
-    rets = [0.0] * n
-    for t in range(1, n):
-        rets[t] = close[t] / close[t - 1] - 1.0
-    scale = math.sqrt(bars_per_day)
-    out: list[float] = []
-    for t in range(n):
-        win = rets[max(0, t - window + 1) : t + 1]
-        if len(win) < 2:
-            out.append(0.0)
-            continue
-        mean = sum(win) / len(win)
-        var = sum((v - mean) * (v - mean) for v in win) / (len(win) - 1)  # ddof=1
-        out.append(math.sqrt(var) * scale)
-    return out
-
-
 class PortfolioOrchestrator(Portfolio):
     """Implements the ``Portfolio`` protocol: bars in, one target out.
 
     Pure ``alpha_core`` calls plus stdlib math; every step is deterministic.
-    The configuration (expressions, weights, harness and sizing parameters)
-    is validated once at construction so per-bar evaluation cannot fail on
-    configuration errors.
+    The configuration (expressions, weights, harness and limits) is validated
+    once at construction so per-bar evaluation cannot fail on configuration
+    errors. The contract ``instrument`` is fixed at construction and feeds
+    the margin conversion (multiplier) in step 8.
     """
 
-    def __init__(self, config: PortfolioConfig) -> None:
+    def __init__(self, config: PortfolioConfig, instrument: Instrument) -> None:
         self.config = config
+        self.instrument = instrument
         self._weights = self._validate_config(config)
         self._min_bars = config.harness.z_window + WARMUP_MARGIN
 
@@ -194,20 +98,19 @@ class PortfolioOrchestrator(Portfolio):
             raise ValueError("harness band must be non-negative")
         if h.cap <= 0.0:
             raise ValueError("harness cap must be positive (contract conversion divides by cap)")
-        if h.cost_per_side < 0.0:
-            raise ValueError("harness cost_per_side must be non-negative")
         if not math.isfinite(config.vol_target) or config.vol_target <= 0.0:
             raise ValueError("vol_target must be a positive finite fraction")
         if config.vol_floor is not None and (
             not math.isfinite(config.vol_floor) or config.vol_floor <= 0.0
         ):
             raise ValueError("vol_floor must be None or a positive finite fraction")
-        if config.capital_vnd <= 0.0 or config.margin_rate <= 0.0:
-            raise ValueError("capital_vnd and margin_rate must be positive")
-        if config.safety_factor < 0.0:
-            raise ValueError("safety_factor must be non-negative")
-        if config.max_contracts < 0:
-            raise ValueError("max_contracts must be non-negative")
+        limits = config.limits
+        if limits.capital_vnd <= 0.0 or limits.margin_rate <= 0.0:
+            raise ValueError("limits.capital_vnd and limits.margin_rate must be positive")
+        if limits.safety_factor < 0.0:
+            raise ValueError("limits.safety_factor must be non-negative")
+        if limits.max_contracts < 0:
+            raise ValueError("limits.max_contracts must be non-negative")
         return weights
 
     def compute_target(
@@ -215,8 +118,57 @@ class PortfolioOrchestrator(Portfolio):
         bars: dict[str, list[float]],
         ts: datetime,
     ) -> TargetPosition:
-        """One bar buffer in, one signed ``TargetPosition`` out (see module
-        docstring for the exact deterministic pipeline)."""
+        """One bar buffer in, one signed ``TargetPosition`` out.
+
+        Deterministic per-bar pipeline:
+
+        1. Shape guards: ``bars`` must carry ``"close"`` and ``"volume"``
+           lists of equal length; a buffer shorter than ``z_window +
+           WARMUP_MARGIN`` yields a flat target with reason ``"warmup"``;
+           missing/incompatible keys are invalid input.
+        2. Value guards: any non-finite close/volume value, or any
+           non-positive close (zero/negative price makes returns and the
+           margin conversion meaningless), yields a flat ``"invalid-input"``
+           target.
+        3. Scoring: every configured expression is evaluated over the FULL
+           buffers in ONE ``execute_batch_py`` call (never one call per
+           alpha) -> one score row per expression.
+        4. NaN sanitisation: ``execute_batch_py`` emits NaN during rolling
+           warmup and the ``canonical_map_py`` binding rejects non-finite
+           scores, so this module mirrors the Rust ``canonical_map``
+           ``sanitize_scores`` semantics (forward-fill; all-non-finite maps
+           to zeros) before calling the binding.
+        5. Canonical mapping: ``canonical_map_py(score, span, z_window,
+           band, cap, bars_per_day)`` from ``config.harness`` -> per-alpha
+           position series in z units; the last element is recorded in
+           ``components`` under its expression key (telemetry).
+        6. Composite z: ``composite_score_py`` over the per-alpha position
+           series with weights normalised to sum to 1 (research/live
+           parity); the last element is the current composite z.
+        7. Volatility targeting: rolling realised vol of simple close
+           returns (sample std ddof=1 over a trailing ``VOL_WINDOW`` bar
+           window, annualised by ``sqrt(bars_per_day)``; fewer than two
+           samples or zero variance -> 0.0, the engine's ``ts_std``
+           convention) into ``vol_target_py(composite, vol_est,
+           config.vol_target, config.vol_floor)``; both annualised, so the
+           target/estimate ratio is scale-invariant. The last element is
+           the current target z.
+        8. Contract conversion via ``core.mapping.to_contracts`` (the
+           single score->contracts implementation shared with research):
+           ``L_max = floor(limits.capital_vnd * limits.safety_factor /
+           (limits.margin_rate * price * multiplier))``,
+           ``raw = z / cap * L_max``, ``round(raw)`` half-to-even, clipped
+           to ``+/-max_contracts``, with ``price`` = last close and
+           ``cap`` = ``harness.cap``. No hysteresis on the live path
+           (stateless conversion; research loops apply the band
+           explicitly). ``z_target`` carries the pre-rounding z.
+        9. Reason: ``"warmup"`` (buffer not yet long enough),
+           ``"invalid-input"`` (malformed/non-finite/non-positive bars or
+           an engine failure), then ``"cap-limited"`` when the un-clipped
+           rounded contract count exceeds ``max_contracts``,
+           ``"flat-no-signal"`` when it rounds to zero or the z is
+           degenerate, else ``"signal"``.
+        """
         cfg = self.config
         h = cfg.harness
 
@@ -241,7 +193,7 @@ class PortfolioOrchestrator(Portfolio):
             matrix = alpha_core.execute_batch_py(
                 list(cfg.expressions), list(close), list(volume)
             )
-        except ValueError as exc:
+        except ValueError:
             # Defensive: precluded by init-time validation and the guards
             # above; degrade to flat rather than crash the live loop.
             return _flat(ts, "invalid-input")
@@ -250,7 +202,7 @@ class PortfolioOrchestrator(Portfolio):
         positions: list[list[float]] = []
         components: dict[str, float] = {}
         for expr, row in zip(cfg.expressions, matrix):
-            sane = _sanitize_scores(row)
+            sane = sanitize_scores(row)
             res = alpha_core.canonical_map_py(
                 sane,
                 span=h.span,
@@ -264,7 +216,7 @@ class PortfolioOrchestrator(Portfolio):
 
         # 6-7. Composite z, then vol targeting (engine functions reused).
         composite = alpha_core.composite_score_py(positions, list(self._weights))
-        vol_est = _rolling_vol(list(close), VOL_WINDOW, h.bars_per_day)
+        vol_est = rolling_vol(list(close), VOL_WINDOW, h.bars_per_day)
         vol_series = alpha_core.vol_target_py(
             composite, vol_est, cfg.vol_target, cfg.vol_floor
         )
@@ -274,17 +226,21 @@ class PortfolioOrchestrator(Portfolio):
             # residual non-finite z as "no usable signal".
             return _flat(ts, "flat-no-signal", components)
 
-        # 8. Contract conversion (DEC-008).
+        # 8. Contract conversion through the single core implementation.
         price = close[-1]
-        l_max = math.floor(
-            cfg.capital_vnd * cfg.safety_factor / (cfg.margin_rate * price * 100_000.0)
+        contracts = to_contracts(
+            z=z,
+            price=price,
+            cap=h.cap,
+            instrument=self.instrument,
+            limits=cfg.limits,
         )
-        raw = z / h.cap * l_max
-        rounded = round(raw)  # Python round: half-to-even, deterministic
-        contracts = max(-cfg.max_contracts, min(cfg.max_contracts, rounded))
+        # Telemetry only: the un-clipped rounded count decides "cap-limited".
+        l_max = max_contracts_at(price=price, instrument=self.instrument, limits=cfg.limits)
+        rounded = round(z / h.cap * l_max)  # Python round: half-to-even
 
         # 9. Reason.
-        if abs(rounded) > cfg.max_contracts:
+        if abs(rounded) > cfg.limits.max_contracts:
             reason = "cap-limited"
         elif contracts == 0:
             reason = "flat-no-signal"
@@ -301,11 +257,87 @@ class PortfolioOrchestrator(Portfolio):
 
 
 def default_seed_portfolio_config() -> PortfolioConfig:
-    """Milestone-1 seed configuration: the 6 verified seed expressions with
-    equal weights 1/6 and the ``HarnessParams``/sizing defaults (100m VND
-    capital, 5% entrade margin, 0.5 safety factor, 10-contract cap)."""
+    """Seed configuration for research bootstrap: the 6 verified seed
+    expressions with equal weights 1/6 and the ``HarnessParams``/``AccountLimits``
+    defaults (100m VND capital, 5% margin rate, 0.5 safety factor,
+    10-contract cap). The live runner does NOT use this fallback: it builds
+    the portfolio from the pool weights artifact (see
+    :func:`portfolio_config_from_pool`)."""
     n = len(SEED_EXPRESSIONS)
     return PortfolioConfig(
         expressions=SEED_EXPRESSIONS,
         weights=tuple(1.0 / n for _ in range(n)),
+    )
+
+
+def portfolio_config_from_pool(
+    artifact: WeightsArtifact,
+    pool: AlphaPool | None = None,
+    instrument: Instrument | None = None,
+    *,
+    limits: AccountLimits | None = None,
+) -> PortfolioConfig:
+    """Build a live ``PortfolioConfig`` from the research weights artifact.
+
+    Parameters
+    ----------
+    artifact : WeightsArtifact
+        The combined-pool weights artifact loaded with
+        ``WeightsArtifact.load()`` (default root ``data/pool``). Keys are
+        ``alpha_id`` values produced by the research flow.
+    pool : AlphaPool | None
+        The research pool carrying each alpha's DSL. When given, every
+        artifact weight key must match a pool entry ``alpha_id`` and the
+        configured expressions are the matched DSL strings (sorted key
+        order). When ``None``, artifact keys are taken AS the expressions —
+        only valid for hand-authored weights files keyed by DSL strings.
+    instrument : Instrument | None
+        When given, cross-checked against the artifact's recorded window
+        instrument (if the artifact carries one) so a weights file fitted on
+        another instrument cannot reach the live runner.
+    limits : AccountLimits | None
+        Account sizing limits from the runtime config (capital etc.);
+        ``None`` keeps the ``AccountLimits`` defaults.
+
+    Returns
+    -------
+    PortfolioConfig
+        Expressions/weights from the artifact (joined through the pool when
+        given) with the given limits.
+
+    Raises
+    ------
+    ValueError
+        If the artifact has no weights, a weight key has no matching pool
+        entry, instrument metadata mismatches, or an instrument mismatch
+        against ``instrument``.
+    """
+    if not artifact.weights:
+        raise ValueError(
+            f"weights artifact at {artifact.generated!r} carries no weights; "
+            "run the research combine flow to produce data/pool/weights.json"
+        )
+    window = artifact.window
+    if instrument is not None and window is not None:
+        window_symbol = str(window.instrument_id).split(".", 1)[0]
+        if window_symbol.casefold() != instrument.symbol.casefold():
+            raise ValueError(
+                f"weights artifact window instrument {window_symbol!r} does not "
+                f"match configured instrument {instrument.symbol!r}"
+            )
+    if pool is None:
+        expressions = tuple(artifact.weights)
+    else:
+        dsl_by_id = {entry.alpha_id: entry.dsl for entry in pool.entries}
+        missing = [key for key in artifact.weights if key not in dsl_by_id]
+        if missing:
+            raise ValueError(
+                f"weights artifact keys absent from pool: {missing}; "
+                "re-deliver the pool or refit the weights"
+            )
+        expressions = tuple(dsl_by_id[key] for key in sorted(artifact.weights))
+    return PortfolioConfig(
+        expressions=expressions,
+        weights=tuple(artifact.weights[key] for key in sorted(artifact.weights)),
+        limits=limits if limits is not None else AccountLimits(),
     )

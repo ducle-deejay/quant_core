@@ -1,0 +1,8 @@
+{
+  "instrument": "VN30F1M",
+  "capital_vnd": 100000000,
+  "environment": "live",
+  "broker": "entrade",
+  "account": "demo",
+  "close_positions_on_expiry_day": true
+}

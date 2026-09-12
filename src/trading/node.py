@@ -1,252 +1,318 @@
+"""Nautilus TradingNode composition for the live runner (single runner path)."""
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from enum import StrEnum
+import os
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
-from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
+from nautilus_trader.common import Environment
 from nautilus_trader.common.config import LoggingConfig
-from nautilus_trader.config import ImportableStrategyConfig
-from nautilus_trader.config import LiveExecClientConfig
+from nautilus_trader.config import CacheConfig
+from nautilus_trader.config import DatabaseConfig
 from nautilus_trader.config import RoutingConfig
+from nautilus_trader.config import StreamingConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.config import LiveDataEngineConfig
 from nautilus_trader.live.config import LiveExecEngineConfig
-from nautilus_trader.live.factories import LiveExecClientFactory
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import ExecAlgorithmId
+from nautilus_trader.model.data import Bar
+from nautilus_trader.model.events import AccountState
+from nautilus_trader.model.events import OrderAccepted
+from nautilus_trader.model.events import OrderCanceled
+from nautilus_trader.model.events import OrderExpired
+from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.events import OrderRejected
+from nautilus_trader.model.events import OrderSubmitted
+from nautilus_trader.model.events import PositionChanged
+from nautilus_trader.model.events import PositionClosed
+from nautilus_trader.model.events import PositionOpened
 
+from core import Account
+from core import AccountLimits
+from core import Instrument
+from core import PortfolioConfig
+from core import RiskConfig
+from market_data.instrument_provider import instrument_definition_path
+from market_data.instruments import load_futures_instrument_spec
+from market_data.notify import trading_notifier_from_env
 from trading.adapters.dnse.config import DNSE_DATA_CLIENT_NAME
 from trading.adapters.dnse.config import DnseDataClientConfig
 from trading.adapters.dnse.data import build_bar_type_for_symbol
 from trading.adapters.dnse.factory import DnseLiveDataClientFactory
 from trading.adapters.entrade.config import DNSE_EXECUTION_CLIENT_NAME
-from trading.adapters.entrade.config import EntradeExecClientConfig
 from trading.adapters.entrade.factory import EntradeLiveExecClientFactory
-from trading.adapters.entrade.transport import EntradeEnvironment
-from trading.instruments import FuturesInstrumentSpec
-from trading.config import ExecutionAlgorithmConfig
+from trading.config_loader import RuntimeConfig
+from trading.credentials import load_credentials
+from trading.credentials import optional_env
+from trading.credentials import require_env
+from trading.portfolio import PortfolioOrchestrator
+from trading.risk.overlay import RiskOverlayActor
+from trading.strategies.bridge import BridgeConfig
+from trading.strategies.bridge import BridgeStrategy
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[2]
+TRADER_ID = "TRADER-001"
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+#: Nautilus bar resolution for the live feed (1-minute bars).
+BAR_RESOLUTION = "1"
+#: Bridge id formula (v1): f"{component_id}-{order_id_tag}" ->
+#: "BridgeStrategy-bridge"; the risk overlay subscribes to the bridge's
+#: order topic under this exact id.
+BRIDGE_STRATEGY_ID = "BridgeStrategy-bridge"
+
+#: Arrow-serializable stream subset, verified against the installed
+#: nautilus_trader 1.231.0 wheel (persistence/writer.py ``include_types``
+#: filter + serialization.arrow registry): every type below has a registered
+#: Arrow schema in the wheel (54 registered), so the feather stream writes
+#: bars, order events, position events, and account state without loss.
+STREAMABLE_TYPES = [
+    Bar,
+    OrderSubmitted,
+    OrderAccepted,
+    OrderRejected,
+    OrderCanceled,
+    OrderExpired,
+    OrderFilled,
+    PositionOpened,
+    PositionChanged,
+    PositionClosed,
+    AccountState,
+]
+
+#: Redis backing for the cache database (orders/positions/state persistence).
+CACHE_DATABASE = DatabaseConfig(type="redis", host="127.0.0.1", port=6379)
+
+#: RuntimeConfig.environment -> nautilus_trader Environment. This runner only
+#: composes live runtimes; "backtest" raises NotImplementedError (researchers
+#: use quantcore.execution).
+ENVIRONMENTS: dict[str, Environment] = {
+    "sandbox": Environment.SANDBOX,
+    "live": Environment.LIVE,
+}
 
 
-IMPORTABLE_ALPHA_STRATEGY_PATH = "trading.strategy:SystematicTradingStrategy"
-IMPORTABLE_ALPHA_STRATEGY_CONFIG_PATH = (
-    "trading.strategy:SystematicTradingStrategyConfig"
-)
-SANDBOX_CLIENT_NAME = "SANDBOX"
+def session_artifacts_dir(session_date: str) -> Path:
+    """Per-session artifact directory under ``data/logs/sessions``."""
+    return ROOT / "data" / "logs" / "sessions" / session_date
 
 
-class ExecutionBroker(StrEnum):
-    """Execution adapter selected by the NOX live composition."""
-
-    SANDBOX = "sandbox"
-    ENTRADE = "entrade"
-
-
-class TradingEnvironment(StrEnum):
-    """Broker environment selected by the NOX live composition."""
-
-    DEMO = "demo"
-    LIVE = "live"
+def session_date_iso(now: datetime | None = None) -> str:
+    """The Asia/Ho_Chi_Minh calendar date of ``now`` (default: wall clock)."""
+    if now is None:
+        now = datetime.now(tz=VN_TZ)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=VN_TZ)
+    else:
+        now = now.astimezone(VN_TZ)
+    return now.date().isoformat()
 
 
-@dataclass(frozen=True)
-class TradingRuntimeConfig:
-    """NOX composition config for a Nautilus TradingNode runtime."""
+def _nautilus_environment(environment: str) -> Environment:
+    """Map ``RuntimeConfig.environment`` to the Nautilus runtime environment.
 
-    api_key: str
-    api_secret: str
-    instrument_spec: FuturesInstrumentSpec
-    alpha_path: str | None = None
-    alphas: tuple[dict[str, Any], ...] = ()
-    execution_broker: ExecutionBroker = ExecutionBroker.SANDBOX
-    execution_environment: TradingEnvironment | None = None
-    execution_algorithm: ExecutionAlgorithmConfig | None = None
-    entrade_username: str | None = None
-    entrade_password: str | None = None
-    entrade_investor_id: int | str | None = None
-    entrade_base_url: str = "https://services.entrade.com.vn"
-    trader_id: str = "TRADER-001"
-    bar_resolution: str = "1"
-    capital: float = 1_000_000_000.0
-    max_exposure_contracts: int | None = None
-    oms_type: str = "NETTING"
-    account_type: str = "MARGIN"
-    margin_ratio: float | None = None
-    bar_execution: bool = True
-    trade_execution: bool = False
-    use_dnse_working_dates: bool = True
-    market_working_dates: tuple[str, ...] = ()
-    close_positions_on_expiry_day: bool = True
-    close_positions_on_stop: bool = True
-    log_audit_events: bool = True
-    ws_base_url: str = "wss://ws-openapi.dnse.com.vn"
-    rest_base_url: str = "https://openapi.dnse.com.vn"
-    historical_bar_type: str = "DERIVATIVE"
-    log_level: str = "INFO"
-    load_state: bool = False
-    save_state: bool = False
-
-
-def build_trading_node_config(config: TradingRuntimeConfig) -> TradingNodeConfig:
-    if (config.alpha_path is None) == (not config.alphas):
-        raise ValueError("Trading runtime requires exactly one alpha_path or alphas declaration")
-    if (
-        config.execution_broker == ExecutionBroker.ENTRADE
-        and config.execution_environment == TradingEnvironment.LIVE
-    ):
-        raise RuntimeError(
-            "Entrade live execution remains disabled until AR-001/F01-F04 "
-            "broker validation is complete",
+    Raises
+    ------
+    NotImplementedError
+        For ``"backtest"``: the live runner never composes a backtest;
+        researchers use ``quantcore.execution``.
+    ValueError
+        For any other unknown environment string.
+    """
+    if environment == "backtest":
+        raise NotImplementedError(
+            "environment 'backtest' is not supported by the live runner; "
+            "researchers use quantcore.execution"
         )
-    if config.execution_broker == ExecutionBroker.ENTRADE and (
-        config.max_exposure_contracts is None or config.max_exposure_contracts < 1
-    ):
+    try:
+        return ENVIRONMENTS[environment]
+    except KeyError:
         raise ValueError(
-            "Entrade execution requires max_exposure_contracts of at least 1",
-        )
+            f"environment must be one of {sorted(ENVIRONMENTS)}, got {environment!r}"
+        ) from None
 
-    bar_type = build_bar_type_for_symbol(
-        symbol=config.instrument_spec.symbol,
-        resolution=config.bar_resolution,
-        venue=config.instrument_spec.venue,
+
+def _entrade_execution_factory(config: RuntimeConfig) -> Any:
+    """Build the entrade execution client config for the configured account.
+
+    Credentials are resolved from the process environment (``ENTRADE_*``),
+    exactly as the paper runner did; ``ENTRADE_INVESTOR_ID`` is optional and
+    auto-resolved from the auth token when unset. The broker account boundary
+    (demo/live) maps from ``config.account``.
+    """
+    from trading.adapters.entrade.config import EntradeExecClientConfig
+    from trading.adapters.entrade.transport import EntradeEnvironment
+
+    environment = {
+        Account.DEMO: EntradeEnvironment.DEMO,
+        Account.LIVE: EntradeEnvironment.LIVE,
+    }[config.account]
+    instrument_spec = load_futures_instrument_spec(
+        instrument_definition_path(config.instrument.symbol)
     )
-    routing = RoutingConfig(default=True, venues=frozenset({config.instrument_spec.venue}))
-    execution_algorithm = config.execution_algorithm
-    strategy_config = ImportableStrategyConfig(
-        strategy_path=IMPORTABLE_ALPHA_STRATEGY_PATH,
-        config_path=IMPORTABLE_ALPHA_STRATEGY_CONFIG_PATH,
-        config={
-            "instrument_id": bar_type.instrument_id,
-            "bar_type": bar_type,
-            "capital": config.capital,
-            "margin_ratio": config.margin_ratio,
-            "close_positions_on_stop": config.close_positions_on_stop,
-            "close_positions_on_expiry_day": config.close_positions_on_expiry_day,
-            "market_working_dates": config.market_working_dates,
-            "log_audit_events": config.log_audit_events,
-            "log_events": False,
-            "log_commands": False,
-            "alpha_path": config.alpha_path,
-            "alphas": config.alphas,
-            "exec_algorithm_id": (
-                ExecAlgorithmId(execution_algorithm.exec_algorithm_id)
-                if execution_algorithm is not None
-                else None
-            ),
-            "exec_algorithm_params": (
-                execution_algorithm.order_params if execution_algorithm is not None else None
-            ),
-            "max_exposure_contracts": config.max_exposure_contracts,
-            "require_monthly_contract": config.execution_broker == ExecutionBroker.ENTRADE,
-            "warm_up_live_data": True,
-        },
-    )
-    data_client_config = DnseDataClientConfig(
-        api_key=config.api_key,
-        api_secret=config.api_secret,
-        instrument_spec=config.instrument_spec,
-        rest_base_url=config.rest_base_url,
-        ws_base_url=config.ws_base_url,
-        use_dnse_working_dates=config.use_dnse_working_dates,
-        market_working_dates=config.market_working_dates,
-        historical_bar_type=config.historical_bar_type,
+    routing = RoutingConfig(default=True, venues=frozenset({instrument_spec.venue}))
+    investor_id = optional_env("ENTRADE_INVESTOR_ID")
+    return EntradeExecClientConfig(
+        instrument_spec=instrument_spec,
+        username=require_env("ENTRADE_USERNAME"),
+        password=require_env("ENTRADE_PASSWORD"),
+        investor_id=int(investor_id) if investor_id is not None else None,
+        environment=environment,
         routing=routing,
     )
 
+
+#: Broker adapter registry keyed by ``RuntimeConfig.broker``.
+_BROKERS: dict[str, Callable[[RuntimeConfig], Any]] = {
+    "entrade": _entrade_execution_factory,
+}
+
+
+def _make_node_config(
+    environment: Environment,
+    data_client_config: DnseDataClientConfig,
+    exec_client_config: Any,
+) -> TradingNodeConfig:
+    """The full live node config.
+
+    - ``cache``: Redis-backed cache database (kernel.py constructs a
+      ``CacheDatabaseAdapter`` over ``nautilus_pyo3.RedisCacheDatabase``
+      automatically from ``CacheConfig(database=...)``).
+    - ``streaming``: feather stream of the verified ``STREAMABLE_TYPES`` to
+      ``data/live`` (kernel writes under ``<catalog_path>/LIVE/<instance_id>``).
+    - ``exec_engine``: order and position state snapshots persisted to Redis
+      at every state update.
+    - ``load_state``/``save_state``: the kernel calls the strategy
+      ``on_load``/``on_save`` hooks via ``Trader.load/save``.
+    """
     return TradingNodeConfig(
-        trader_id=config.trader_id,
-        logging=LoggingConfig(log_level=config.log_level, log_colors=False),
+        environment=environment,
+        trader_id=TRADER_ID,
+        logging=LoggingConfig(log_level=os.getenv("LOG_LEVEL", "INFO"), log_colors=False),
         data_engine=LiveDataEngineConfig(validate_data_sequence=True),
         exec_engine=LiveExecEngineConfig(
-            reconciliation=config.execution_broker == ExecutionBroker.ENTRADE,
-            snapshot_positions=True,
+            reconciliation=True,
+            snapshot_positions=True,  # risk overlay seeds position from cache on start
+            snapshot_orders=True,  # order state snapshots -> Redis on every update
         ),
-        load_state=config.load_state,
-        save_state=config.save_state,
-        strategies=[strategy_config],
-        exec_algorithms=(
-            [execution_algorithm.to_importable_config()] if execution_algorithm is not None else []
+        cache=CacheConfig(database=CACHE_DATABASE),
+        streaming=StreamingConfig(
+            catalog_path=str(ROOT / "data" / "live"),
+            include_types=STREAMABLE_TYPES,
         ),
+        load_state=True,  # bridge/overlay on_load hooks run before start
+        save_state=True,  # bridge/overlay on_save hooks run at stop
+        strategies=[],  # both strategies are added programmatically below
         data_clients={DNSE_DATA_CLIENT_NAME: data_client_config},
-        exec_clients={_execution_client_name(config): _execution_client_config(config, routing)},
+        exec_clients={DNSE_EXECUTION_CLIENT_NAME: exec_client_config},
     )
 
 
-def build_trading_node(
-    config: TradingRuntimeConfig,
-    data_client_factory: type[DnseLiveDataClientFactory] = DnseLiveDataClientFactory,
+def build_node(
+    config: RuntimeConfig,
+    portfolio: PortfolioConfig,
+    *,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> TradingNode:
-    node = TradingNode(config=build_trading_node_config(config), loop=loop)
-    node.add_data_client_factory(DNSE_DATA_CLIENT_NAME, data_client_factory)
-    node.add_exec_client_factory(_execution_client_name(config), _execution_client_factory(config))
-    return node
+    """Build the live TradingNode: DNSE data + broker execution + risk + bridge.
 
+    Parameters
+    ----------
+    config : RuntimeConfig
+        Runtime selection (instrument, capital, environment, broker,
+        account, expiry close switch) from :mod:`trading.config_loader`.
+    portfolio : PortfolioConfig
+        Portfolio configuration (expressions/weights from the pool weights
+        artifact; limits embedded), e.g. via
+        ``trading.portfolio.portfolio_config_from_pool``.
+    loop : asyncio.AbstractEventLoop | None
+        Optional event loop handed to the Nautilus TradingNode.
 
-def _execution_client_config(
-    config: TradingRuntimeConfig,
-    routing: RoutingConfig,
-) -> LiveExecClientConfig:
-    if config.execution_broker == ExecutionBroker.SANDBOX:
-        if config.execution_environment is not None:
-            raise ValueError("Sandbox execution does not accept a trading environment")
-        return SandboxExecutionClientConfig(
-            venue=config.instrument_spec.venue,
-            starting_balances=[
-                _format_starting_balance(config.capital, config.instrument_spec.currency_code),
-            ],
-            base_currency=config.instrument_spec.currency_code,
-            oms_type=config.oms_type,
-            account_type=config.account_type,
-            bar_execution=config.bar_execution,
-            trade_execution=config.trade_execution,
-            routing=routing,
-        )
+    Returns
+    -------
+    TradingNode
+        The composed, not-yet-built node; the runner calls ``node.build()``
+        then blocks in ``node.run()``.
+    """
+    load_credentials()
+    environment = _nautilus_environment(config.environment)
 
-    if config.execution_broker != ExecutionBroker.ENTRADE:
-        raise ValueError(f"Unsupported execution broker: {config.execution_broker}")
+    instrument_spec = load_futures_instrument_spec(
+        instrument_definition_path(config.instrument.symbol)
+    )
+    bar_type = build_bar_type_for_symbol(
+        symbol=instrument_spec.symbol,
+        resolution=BAR_RESOLUTION,
+        venue=instrument_spec.venue,
+    )
+    routing = RoutingConfig(default=True, venues=frozenset({instrument_spec.venue}))
 
-    if config.execution_environment == TradingEnvironment.DEMO:
-        environment = EntradeEnvironment.DEMO
-    elif config.execution_environment == TradingEnvironment.LIVE:
-        environment = EntradeEnvironment.LIVE
-    else:
-        raise ValueError("Entrade execution requires environment 'demo' or 'live'")
-
-    return EntradeExecClientConfig(
-        instrument_spec=config.instrument_spec,
-        username=config.entrade_username,
-        password=config.entrade_password,
-        investor_id=config.entrade_investor_id,
-        environment=environment,
-        base_url=config.entrade_base_url,
+    data_client_config = DnseDataClientConfig(
+        api_key=require_env("API_KEY"),
+        api_secret=require_env("API_SECRET"),
+        instrument_spec=instrument_spec,
         routing=routing,
     )
+    try:
+        broker_factory = _BROKERS[config.broker]
+    except KeyError:
+        raise ValueError(
+            f"broker must be one of {sorted(_BROKERS)}, got {config.broker!r}"
+        ) from None
+    exec_client_config = broker_factory(config)
 
+    node_config = _make_node_config(environment, data_client_config, exec_client_config)
+    node = TradingNode(config=node_config, loop=loop)
+    node.add_data_client_factory(DNSE_DATA_CLIENT_NAME, DnseLiveDataClientFactory)
+    node.add_exec_client_factory(DNSE_EXECUTION_CLIENT_NAME, EntradeLiveExecClientFactory)
 
-def _execution_client_factory(
-    config: TradingRuntimeConfig,
-) -> type[LiveExecClientFactory]:
-    if config.execution_broker == ExecutionBroker.SANDBOX:
-        return SandboxLiveExecClientFactory
-    if config.execution_broker == ExecutionBroker.ENTRADE:
-        return EntradeLiveExecClientFactory
-    raise ValueError(f"Unsupported execution broker: {config.execution_broker}")
+    # Telegram alerting (failure-safe; None when TRADING_TELEGRAM_* unset).
+    notifier = trading_notifier_from_env()
 
+    # Risk overlay first so the bridge can reference the instance.
+    artifacts = session_artifacts_dir(session_date_iso())
+    risk_config = RiskConfig(
+        limits=AccountLimits(capital_vnd=config.capital_vnd),
+        instrument=config.instrument,
+    )
+    risk_actor = RiskOverlayActor(
+        bar_type=bar_type,
+        risk_config=risk_config,
+        order_id_tag="risk",
+        bridge_strategy_id=BRIDGE_STRATEGY_ID,
+        transition_log_path=str(artifacts / "risk_transitions.jsonl"),
+        notifier=notifier,
+    )
 
-def _execution_client_name(config: TradingRuntimeConfig) -> str:
-    if config.execution_broker == ExecutionBroker.SANDBOX:
-        return SANDBOX_CLIENT_NAME
-    if config.execution_broker == ExecutionBroker.ENTRADE:
-        return DNSE_EXECUTION_CLIENT_NAME
-    raise ValueError(f"Unsupported execution broker: {config.execution_broker}")
+    # Portfolio orchestrator (pure alpha_core decisions).
+    orchestrator = PortfolioOrchestrator(config=portfolio, instrument=config.instrument)
 
+    # Bridge strategy, constructed directly (BridgeConfig is a plain
+    # dataclass; Nautilus ImportableStrategyConfig cannot round-trip it).
+    bridge = BridgeStrategy(
+        BridgeConfig(
+            instrument_id=str(bar_type.instrument_id),
+            bar_type=str(bar_type),
+            portfolio=orchestrator,
+            risk=risk_actor,
+            notifier=notifier,
+            expiry_enabled=config.close_positions_on_expiry_day,
+            decision_log_path=str(artifacts / "decisions.jsonl"),
+        ),
+    )
 
-def _format_starting_balance(amount: float, currency_code: str) -> str:
-    if float(amount).is_integer():
-        amount_text = str(int(amount))
-    else:
-        amount_text = format(amount, "f").rstrip("0").rstrip(".")
-    return f"{amount_text} {currency_code}"
+    node.trader.add_strategy(risk_actor)
+    node.trader.add_strategy(bridge)
+
+    if node_config.load_state:
+        # The kernel's own trader.load() ran at node construction (kernel.py),
+        # when config.strategies was empty because both strategies are added
+        # programmatically above; trigger the load now so the on_load hooks
+        # actually run before start.
+        node.trader.load()
+
+    return node

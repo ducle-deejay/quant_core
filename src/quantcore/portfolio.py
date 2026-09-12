@@ -1,54 +1,34 @@
-"""quantcore.portfolio - Portfolio Researcher API (decision note DEC-017).
-
-Role: Portfolio Researcher. Consumes the research pool (per-alpha files with
-canonical DSL + metadata), orthogonalizes new candidates against it, combines
-scores into a composite, refits the allocation weights on a cadence and
-produces the monthly portfolio health report. Position sizing is owned by the
-risk role (DEC-017) and is NOT in scope here.
-
-Canon stage map (frozen design, docs/enhanced/):
-- Component 3 - Orthogonalization : ``orthogonalize`` verdict
-- Component 4 - Combination       : ``combine`` / ``refit_weights`` /
-                                    ``portfolio_health_report``
-- Component 1 - Canonical Simulation : canonical_map_py + compute_pnl_py are
-                                    reused inside ``portfolio_health_report``
-
-Extension (DEC-017): one registry per slot. ``combine_methods`` carries the
-two engine-backed defaults (equal_weight, inverse_vol) registered at import
-with ``source="engine"``; practitioners register research methods as plain
-Python functions (``source="python"``) and migrate validated ones into the
-Rust ``CombineMethod`` trait later (validate-then-migrate).
-
-Artifact discipline (DEC-017): only handoff artifacts are auto-saved. Weights
-are a handoff artifact (consumed by the live ``PortfolioConfig``), so
-``refit_weights(save=True)`` persists them; reports (health report) stay
-in-memory and are never auto-saved.
-
-Parity: the composite series always comes from the Rust engine bindings
-(research/live parity by construction); research-side weight *derivation*
-mirrors the engine algorithm documented in
-``src/alpha-core/src/strategies/combination/inverse_vol.rs`` (capped-simplex
-projection with min 0.01 / max 0.5) so the reported weights agree with what
-the engine actually used.
-"""
+"""quantcore.portfolio - Portfolio Researcher module."""
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any
 
 import alpha_core
 import numpy as np
 import pandas as pd
 
-from quantcore.core.artifacts import write_weights
-from quantcore.core.config import DataConfig, HarnessParams
-from quantcore.core.data import close_volume, load_bars
-from quantcore.core.pool import PoolEntry, load_pool
-from quantcore.core.registry import Registry
-from quantcore.core.extensions import PortfolioOptimizer, _CallablePortfolioOptimizer
+from core.artifacts import AlphaPool, Composite, WeightsArtifact
+from core.contracts import HarnessParams, Instrument
+from core.data import BarFrame
+from core.signal import close_returns
+from core.registry import Registry
+
+__all__ = [
+    "OrthoReport",
+    "PortfolioHealth",
+    "combine",
+    "combine_methods",
+    "equal_weight",
+    "health_report",
+    "inverse_vol",
+    "orthogonalize",
+    "refit_weights",
+    "score_pool",
+]
 
 #: Capped-simplex bounds for inverse-volatility weights, mirroring
 #: ``InverseVol::default`` in src/alpha-core/src/strategies/combination/
@@ -61,39 +41,31 @@ MAX_WEIGHT = 0.50
 _FEASIBILITY_TOL = 1e-9
 _BISECT_STEPS = 200
 
-#: Default combine method for the health report and module entry points.
+#: Default combine method for the module entry points.
 DEFAULT_COMBINE_METHOD = "inverse_vol"
+
+#: Trailing calendar window (days) for the health report's last-window
+#: statistics.
+DEFAULT_HEALTH_WINDOW_DAYS = 30
+
+#: Composite must beat this mean IC over the health window, else verdict
+#: "refit".
+MIN_HEALTH_MEAN_IC = 0.05
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _sanitize_scores(series: list[float]) -> list[float]:
-    """Forward-fill non-finite score values before any finite-only binding.
-
-    Mirrors ``trading.portfolio._sanitize_scores`` (which mirrors the engine
-    ``sanitize_scores`` in src/alpha-core/src/canonical/mapping.rs, see
-    observation note OBS-011): leading non-finite values take the first
-    finite value, interior ones carry the last finite value forward, and an
-    all-non-finite series maps to zeros.
-    """
-    first = next((v for v in series if math.isfinite(v)), None)
-    if first is None:
-        return [0.0] * len(series)
-    last = first
-    out: list[float] = []
-    for v in series:
-        if math.isfinite(v):
-            last = v
-        out.append(last)
-    return out
 
 
 def _sample_stddev(series: list[float]) -> float | None:
-    """Sample standard deviation (n-1 denominator), like the engine's
-    ``sample_stddev``: ``None`` for series shorter than two observations or
-    containing non-finite values ("no usable volatility estimate")."""
+    """Sample standard deviation (n-1 denominator) — PARITY-LOCKED with the
+    engine's ``sample_stddev``: ANY non-finite entry (raw rows carry warmup
+    NaN) poisons the mean and returns ``None`` ("no usable volatility
+    estimate" -> zero weight). Do not switch to finite-only statistics
+    without re-recording the goldens: finite-only changes which alphas are
+    eligible and therefore every downstream weight."""
     n = len(series)
     if n < 2:
         return None
@@ -111,11 +83,11 @@ def _capped_simplex(weights: list[float], eligible: list[int]) -> None:
     ``{w : MIN_WEIGHT <= w_i <= MAX_WEIGHT, sum(w) = 1}``, in place.
 
     Exact Python mirror of ``InverseVol::apply_caps`` in
-    src/alpha-core/src/strategies/combination/inverse_vol.rs (Component 4 -
-    Combination): water-filling bisection over a global scale ``lambda`` so
-    that the clipped weights sum to one, respecting both caps and the budget
-    simultaneously. Single-survivor and infeasible-cap cases fall back the
-    same way the engine does.
+    src/alpha-core/src/strategies/combination/inverse_vol.rs: water-filling
+    bisection over a global scale ``lambda`` so that the clipped weights sum
+    to one, respecting both caps and the budget simultaneously. Single-
+    survivor and infeasible-cap cases fall back the same way the engine
+    does.
     """
     k = len(eligible)
     if k == 0:
@@ -150,7 +122,7 @@ def _capped_simplex(weights: list[float], eligible: list[int]) -> None:
 
 
 def _inverse_vol_weights(scores: list[list[float]]) -> list[float]:
-    """Research-side inverse-volatility weights: ``w_i ∝ 1/std_i`` with the
+    """Research-side inverse-volatility weights: ``w_i = 1/std_i`` with the
     capped-simplex projection (min 0.01, max 0.5, sum 1).
 
     Mirrors ``InverseVol::compute_weights`` in
@@ -179,31 +151,34 @@ def _inverse_vol_weights(scores: list[list[float]]) -> list[float]:
     return weights
 
 
-def _score_pool(pool: list[PoolEntry], df: pd.DataFrame) -> dict[str, list[float]]:
-    """Score every pool alpha over a bars frame in ONE engine batch call.
-
-    Returns ``{alpha_id: sanitized_score_series}``; an empty pool yields {}.
-    """
-    expressions = [e.dsl for e in pool]
-    if not expressions:
-        return {}
-    close, volume = close_volume(df)
-    matrix = alpha_core.execute_batch_py(expressions, close, volume)
-    return {
-        e.alpha_id: _sanitize_scores(row)
-        for e, row in zip(pool, matrix)
-    }
-
-
-def _simple_returns(close: list[float]) -> list[float]:
-    """Per-bar simple close returns: ``r[0] = 0.0``, ``r[t] = c[t]/c[t-1] - 1``."""
-    out = [0.0] * len(close)
-    for t in range(1, len(close)):
-        out[t] = close[t] / close[t - 1] - 1.0
+def _standardize(matrix: list[list[float]]) -> list[list[float]]:
+    """Row-wise z-score — PARITY-LOCKED semantics (same computation as the
+    pre-redesign implementation): the std runs over the WHOLE row including
+    warmup NaN, so any non-finite entry makes the row's std non-finite and
+    the ENTIRE row maps to zeros. This degenerate-on-warmup behavior is what
+    every recorded system output was produced with; do not "fix" it without
+    re-recording the goldens."""
+    out: list[list[float]] = []
+    for row in matrix:
+        arr = np.asarray(row, dtype=float)
+        std = float(arr.std())
+        if not math.isfinite(std) or std == 0.0:
+            out.append([0.0] * len(row))
+            continue
+        mean = float(arr.mean())
+        out.append([(v - mean) / std for v in row])
     return out
 
 
-def _daily_sums(ts: pd.Series, pnl: list[float]) -> tuple[list[object], list[float]]:
+def _as_matrix(scores: dict[str, np.ndarray]) -> tuple[list[str], list[list[float]]]:
+    """Sorted alpha ids + row matrix (Python floats) from a score mapping."""
+    keys = sorted(scores)
+    return keys, [[float(v) for v in scores[k]] for k in keys]
+
+
+
+
+def _daily_sums(ts: pd.DatetimeIndex, pnl: list[float]) -> tuple[list[object], list[float]]:
     """Aggregate per-bar PnL into per-UTC-date sums (sorted by date)."""
     daily: dict[object, float] = defaultdict(float)
     for t, p in zip(ts, pnl):
@@ -233,138 +208,342 @@ def _mean_ic(composite: list[float], rets: list[float], start: int) -> float:
     return corr if math.isfinite(corr) else 0.0
 
 
+def _instrument_for(bars: BarFrame) -> Instrument:
+    """Resolve the bar window's instrument (bare symbol from the id)."""
+    symbol = bars.instrument_id.split(".", 1)[0]
+    return Instrument.load(symbol)
+
+
 # ---------------------------------------------------------------------------
-# combine_methods registry (Component 4 - Combination, DEC-017)
+# combine_methods registry
 # ---------------------------------------------------------------------------
 
-combine_methods = Registry(
-    "combine_methods",
-    contract=PortfolioOptimizer,
-    capability="optimize",
-    adapter=_CallablePortfolioOptimizer,
-)
+combine_methods = Registry("combine_methods")
 
 
-def equal_weight(
-    scores: list[list[float]], weights: list[float] | None = None
-) -> list[float]:
-    """Engine-backed equal-weight (or explicit-weight) combination.
+def equal_weight(scores: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, float]]:
+    """Engine-backed equal-weight combination (``1/N``).
 
-    ``weights=None`` -> equal ``1/N`` weights; the weighted sum itself always
-    runs in the Rust engine via ``alpha_core.composite_score_py`` (parity).
+    The weighted sum itself always runs in the Rust engine via
+    ``alpha_core.composite_score_py`` over the standardized rows (parity).
+
+    Parameters
+    ----------
+    scores : dict[str, numpy.ndarray]
+        Mapping alpha_id -> raw score series (z-units; non-finite entries
+        allowed and handled by standardization).
+
+    Returns
+    -------
+    tuple[numpy.ndarray, dict[str, float]]
+        ``(composite, weights)`` - composite in z-units, equal fractions
+        per alpha_id (sum 1).
     """
-    n = len(scores)
-    ws = weights if weights is not None else [1.0 / n] * n
-    return alpha_core.composite_score_py(scores, ws)
+    keys, matrix = _as_matrix(scores)
+    derived = [1.0 / len(matrix)] * len(matrix)
+    composite = alpha_core.composite_score_py(_standardize(matrix), derived)
+    return np.asarray(composite, dtype=float), dict(zip(keys, derived))
 
 
-def inverse_vol(scores: list[list[float]]) -> list[float]:
-    """Engine-backed inverse-volatility combination (Component 4 - Combination).
+def inverse_vol(scores: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, float]]:
+    """Engine-mirrored inverse-volatility combination — PARITY-LOCKED.
 
-    Delegates to ``alpha_core.inverse_vol_combine_py``; the composite comes
-    from the engine while the weights can be recovered research-side via
-    ``_inverse_vol_weights`` (mirror of the same algorithm).
+    Identical call sequence to the pre-redesign implementation: weights are
+    the capped-simplex of ``1/std`` over the RAW rows (``_sample_stddev``
+    carries the engine's NaN-poisoning semantics: one non-finite entry means
+    no volatility estimate and zero weight), the composite is the engine
+    ``composite_score_py`` over the standardized rows.
+
+    Parameters
+    ----------
+    scores : dict[str, numpy.ndarray]
+        Mapping alpha_id -> raw score series.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, dict[str, float]]
+        ``(composite, weights)`` - composite in z-units, fractions per
+        alpha_id (sum 1).
     """
-    return alpha_core.inverse_vol_combine_py(scores)
+    keys, matrix = _as_matrix(scores)
+    derived = _inverse_vol_weights(matrix)
+    composite = alpha_core.composite_score_py(_standardize(matrix), derived)
+    return np.asarray(composite, dtype=float), dict(zip(keys, derived))
 
 
-combine_methods.register(
-    "equal_weight",
-    equal_weight,
-    source="engine",
-    description="equal 1/N (or explicit) weighted sum via composite_score_py",
-)
-combine_methods.register(
-    "inverse_vol",
-    inverse_vol,
-    source="engine",
-    description="inverse-volatility combination via inverse_vol_combine_py",
-)
-
-#: Method names whose research-side weights can be derived by this module.
-_DERIVABLE_METHODS = ("equal_weight", "inverse_vol")
+if "equal_weight" not in combine_methods.names():
+    combine_methods.register(
+        "equal_weight",
+        equal_weight,
+        source="engine",
+        description="equal 1/N weighted sum via composite_score_py over standardized rows",
+    )
+if "inverse_vol" not in combine_methods.names():
+    combine_methods.register(
+        "inverse_vol",
+        inverse_vol,
+        source="engine",
+        description="inverse-volatility combination: capped-simplex 1/std weights"
+        " applied to standardized rows via composite_score_py",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------------
 
-def score_pool(
-    pool: list[PoolEntry],
-    data: DataConfig | None = None,
-    harness: HarnessParams | None = None,
-) -> dict[str, list[float]]:
-    """Score every pool alpha's canonical DSL over the data (Component 4 -
-    Combination input). ``data`` is a ``DataConfig`` (None = full history);
-    all expressions run in ONE ``execute_batch_py`` call; each row is
-    sanitized (forward-fill) so downstream finite-only bindings accept it.
-    ``harness`` is accepted for signature symmetry with the health report and
-    unused here. Returns ``{alpha_id: score_series}``.
+def score_pool(pool: AlphaPool, bars: BarFrame) -> dict[str, np.ndarray]:
+    """Score every pool alpha's canonical DSL over the bars (combination
+    input).
+
+    All expressions run in ONE ``execute_batch_py`` call. Rows are returned
+    RAW (engine contract: the first ``window - 1`` bars of each rolling
+    operator are NaN) so the combination sees exactly what the canonical
+    harness sees; ``combine`` standardizes internally. Callers must not
+    forward-fill here — sanitizing changes vol estimates and therefore the
+    combination weights.
+
+    Parameters
+    ----------
+    pool : AlphaPool
+        The research pool (entries carry ``dsl``).
+    bars : BarFrame
+        The bar window to score over.
+
+    Returns
+    -------
+    dict[str, numpy.ndarray]
+        ``{alpha_id: raw score series}`` (z-units); an empty pool
+        yields ``{}``.
     """
-    df = load_bars(data)
-    return _score_pool(pool, df)
-
-
-def pool_pnl(
-    pool: list[PoolEntry],
-    data: DataConfig | None = None,
-    harness: HarnessParams | None = None,
-) -> dict[str, list[float]]:
-    """Canonical per-bar NET PnL for every pool alpha (Component 1 pipeline:
-    batch score -> sanitize -> canonical position -> net PnL).
-
-    This is the canonical input for ``orthogonalize`` (Component 3 -
-    Orthogonalization contract: "candidate plus pool PnLs"; reconciliation
-    note REC-008). ``data``/``harness`` resolve like the rest of the API.
-    """
-    h = harness or HarnessParams()
-    df = load_bars(data)
-    close, volume = close_volume(df)
-    rets = _simple_returns(close)
-    expressions = [e.dsl for e in pool]
+    expressions = [e.dsl for e in pool.entries]
+    if not expressions:
+        return {}
+    close = bars.close_list()
+    volume = bars.volume_list()
     matrix = alpha_core.execute_batch_py(expressions, close, volume)
-    out: dict[str, list[float]] = {}
-    for entry, row in zip(pool, matrix):
-        sane = _sanitize_scores(row)
-        position = alpha_core.canonical_map_py(
-            sane,
-            span=h.span,
-            z_window=h.z_window,
-            band=h.band,
-            cap=h.cap,
-            bars_per_day=h.bars_per_day,
-        ).position
-        out[entry.alpha_id] = alpha_core.compute_pnl_py(
-            position, rets, h.cost_per_side, h.bars_per_day
-        ).net
-    return out
+    return {
+        entry.alpha_id: np.asarray(row, dtype=float)
+        for entry, row in zip(pool.entries, matrix)
+    }
+
+
+def combine(
+    scores: dict[str, np.ndarray],
+    method: str = DEFAULT_COMBINE_METHOD,
+    weights: dict[str, float] | None = None,
+    *,
+    window,
+) -> Composite:
+    """Combine per-alpha score series into one composite (z-units).
+
+    Built-ins dispatch through the ``combine_methods`` registry (real
+    dispatch: replacing a registration changes this function's output).
+    Explicit ``weights`` bypass the method entirely (the composite's
+    ``method`` is recorded as ``"explicit"``); they are normalized to sum
+    to one, exactly like the engine does inside ``composite_score_py``, and
+    applied to the standardized rows.
+
+    Parameters
+    ----------
+    scores : dict[str, numpy.ndarray]
+        Mapping alpha_id -> score series (z-units), all equal length.
+    method : str
+        Registry key in ``combine_methods``. Built-ins: ``"equal_weight"``,
+        ``"inverse_vol"``.
+    weights : dict[str, float] | None
+        Explicit per-alpha weights (fractions); overrides ``method`` when
+        given.
+    window : core.artifacts.Window
+        The bar window the scores are aligned to; recorded on the Composite
+        so downstream consumers (risk) can validate provenance.
+
+    Returns
+    -------
+    Composite
+        Frozen artifact: alpha_ids, normalized weights, composite scores,
+        window, method label.
+
+    Raises
+    ------
+    ValueError
+        Empty/ragged scores, unknown method, explicit weights that do not
+        cover exactly the alpha ids, a zero/non-finite explicit weight sum,
+        or a registered method returning a malformed result.
+    """
+    if not scores:
+        raise ValueError("scores must be non-empty")
+    keys = sorted(scores)
+    n_bars = len(scores[keys[0]])
+    if n_bars == 0:
+        raise ValueError("score series must be non-empty")
+    if any(len(scores[k]) != n_bars for k in keys):
+        raise ValueError("all score series must have equal length")
+
+    if weights is not None:
+        missing = [k for k in keys if k not in weights]
+        extra = [k for k in sorted(weights) if k not in set(keys)]
+        if missing or extra:
+            raise ValueError(
+                "explicit weights must cover exactly the score keys"
+                f" (missing {missing}, unknown {extra})"
+            )
+        raw = [float(weights[k]) for k in keys]
+        total = math.fsum(raw)
+        if not math.isfinite(total) or total == 0.0:
+            raise ValueError(
+                f"explicit weights must sum to a non-zero finite value (got {total!r})"
+            )
+        derived = [w / total for w in raw]
+        composite = alpha_core.composite_score_py(_standardize([list(scores[k]) for k in keys]), derived)
+        method_label = "explicit"
+    else:
+        try:
+            composite_list, derived_dict = combine_methods.call(method, scores)
+        except KeyError as exc:
+            raise ValueError(str(exc)) from None
+        composite = list(composite_list)
+        if len(composite) != n_bars:
+            raise ValueError(
+                f"combine method {method!r} returned {len(composite)} values "
+                f"for {n_bars} bars"
+            )
+        if not all(math.isfinite(value) for value in composite):
+            raise ValueError(f"combine method {method!r} returned non-finite values")
+        missing = [k for k in keys if k not in derived_dict]
+        if missing:
+            raise ValueError(
+                f"combine method {method!r} returned no weights for {missing}"
+            )
+        derived = [float(derived_dict[k]) for k in keys]
+        method_label = method
+
+    return Composite(
+        alpha_ids=tuple(keys),
+        weights=tuple(derived),
+        scores=np.asarray(composite, dtype=float),
+        window=window,
+        method=method_label,
+    )
+
+
+@dataclass(frozen=True)
+class OrthoReport:
+    """Component-3 orthogonalization verdict for one candidate vs a pool.
+
+    Parameters
+    ----------
+    residual_sharpe : float
+        Annualized Sharpe of the residual PnL (daily-aggregated, engine
+        ``sharpe_py``).
+    residual : list[float]
+        The residual series (candidate minus pool projection).
+    betas : list[float]
+        OLS betas of the candidate on the pool series (through the origin
+        in the engine regression; full-ols mirror here), pool order =
+        sorted alpha ids.
+    r_squared : float
+        Share of candidate variance explained by the pool (0.0 when the
+        candidate is constant).
+    verdict : str
+        ``"INCREMENTAL"`` when the finite residual Sharpe exceeds
+        ``min_residual_sharpe``, else ``"REDUNDANT"``.
+    note : str
+        Human-readable one-line rationale.
+    """
+
+    residual_sharpe: float
+    residual: list[float]
+    betas: list[float]
+    r_squared: float
+    verdict: str
+    note: str
+
+
+@dataclass(frozen=True)
+class PortfolioHealth:
+    """Monthly allocation-review input (in-memory only, never auto-saved).
+
+    Parameters
+    ----------
+    generated : str
+        ISO-8601 UTC timestamp of the report.
+    pool_size : int
+        Number of alphas in the composite.
+    bars : int
+        Number of bars in the window.
+    window_days : int
+        Trailing calendar window for the last-window statistics.
+    full_sample_sharpe : float
+        Annualized Sharpe of the daily net PnL (full sample).
+    max_drawdown : float
+        Most negative peak-to-trough drawdown of the daily equity curve.
+    last_window_sharpe : float
+        Sharpe over the last ``window_days`` calendar days of bars.
+    window_return : float
+        Sum of daily net PnL over the same window.
+    rolling_mean_ic : float
+        Pearson correlation of the composite vs next-bar returns over the
+        last window's aligned finite pairs (0.0 when undefined).
+    verdict : str
+        ``"refit"`` when ``last_window_sharpe < 0`` or
+        ``rolling_mean_ic < 0.05``, else ``"ok"``.
+    units : str
+        Units note: PnL metrics are in canonical composite units (position
+        x return per bar, NOT capital fractions); sharpe/IC are scale-free.
+    """
+
+    generated: str
+    pool_size: int
+    bars: int
+    window_days: int
+    full_sample_sharpe: float
+    max_drawdown: float
+    last_window_sharpe: float
+    window_return: float
+    rolling_mean_ic: float
+    verdict: str
+    units: str
 
 
 def orthogonalize(
-    candidate: list[float],
-    pool: list[list[float]],
+    candidate: np.ndarray,
+    scores: dict[str, np.ndarray],
     min_residual_sharpe: float = 0.0,
-) -> dict:
-    """Component 3 - Orthogonalization verdict for one candidate vs a pool.
+) -> OrthoReport:
+    """Orthogonalization verdict for one candidate vs a pool of series.
 
-    Canonical input is per-bar NET PNL series (reconciliation note REC-008):
-    ``orthogonalize_py(candidate, pool)`` regresses the candidate PnL on the
-    pool PnLs (OLS through the origin); the residual's ANNUALIZED Sharpe
-    (daily-aggregated residual, engine ``sharpe_py``) decides the verdict:
-    "INCREMENTAL" when the finite Sharpe > ``min_residual_sharpe``, else
-    "REDUNDANT". Use ``pool_pnl`` to build the series from a pool folder.
-    The canon pass bar (residual Sharpe 0.3-0.5 / t-stat > 2, walk-forward
-    split) is phase-2; ``min_residual_sharpe`` defaults to 0.0 (admission
-    sign test) until then.
+    The canonical input is per-bar NET PnL series (candidate + pool): build
+    them with the canonical pipeline (batch score -> sanitize ->
+    ``canonical_map_py`` -> ``compute_pnl_py``). ``orthogonalize_py``
+    regresses the candidate on the pool series; the residual's ANNUALIZED
+    Sharpe (daily-aggregated residual, engine ``sharpe_py``) decides the
+    verdict: ``"INCREMENTAL"`` when the finite Sharpe >
+    ``min_residual_sharpe``, else ``"REDUNDANT"``. The admission bar
+    ``min_residual_sharpe`` defaults to 0.0 (sign test).
 
-    Returns the full dossier: residual series, OLS betas (Python mirror of
-    the engine regression), r-squared, verdict and note.
+    Parameters
+    ----------
+    candidate : numpy.ndarray
+        Candidate series (per-bar net PnL is the canonical choice).
+    scores : dict[str, numpy.ndarray]
+        Pool series keyed by alpha_id; regression order = sorted ids.
+    min_residual_sharpe : float
+        Admission threshold for the residual Sharpe.
+
+    Returns
+    -------
+    OrthoReport
+        Residual Sharpe, residual series, OLS betas (Python mirror of the
+        engine regression), r-squared, verdict and note.
     """
-    residual = alpha_core.orthogonalize_py(candidate, pool)
+    candidate_list = [float(v) for v in candidate]
+    keys, pool = _as_matrix(scores)
+    residual = alpha_core.orthogonalize_py(candidate_list, pool)
     bpd = HarnessParams().bars_per_day
     daily = [sum(residual[i : i + bpd]) for i in range(0, len(residual), bpd)]
     residual_sharpe = alpha_core.sharpe_py(daily, bpd)
-    y = np.asarray(candidate, dtype=float)
+    y = np.asarray(candidate_list, dtype=float)
     x = np.asarray(pool, dtype=float).T
     betas = np.linalg.lstsq(x, y, rcond=None)[0]
     resid = y - x @ betas
@@ -382,225 +561,129 @@ def orthogonalize(
         else f"residual annualized Sharpe {residual_sharpe:.3f} <= {min_residual_sharpe};"
         " candidate is redundant to the pool"
     )
-    return {
-        "residual_sharpe": residual_sharpe,
-        "residual": list(residual),
-        "betas": [float(b) for b in betas],
-        "r_squared": r_squared,
-        "verdict": verdict,
-        "note": note,
-    }
-
-
-def _standardize(matrix: list[list[float]]) -> list[list[float]]:
-    """Row-wise z-score (canon stage-4-combination section 2: weights are a
-    risk-budget allocation applied to STANDARDIZED scores, undistorted by
-    each alpha's native scale). Zero-variance rows map to zeros."""
-    out: list[list[float]] = []
-    for row in matrix:
-        arr = np.asarray(row, dtype=float)
-        std = float(arr.std())
-        if not math.isfinite(std) or std == 0.0:
-            out.append([0.0] * len(row))
-            continue
-        mean = float(arr.mean())
-        out.append([(v - mean) / std for v in row])
-    return out
-
-
-def combine(
-    scores: dict[str, list[float]] | list[list[float]],
-    method: str = DEFAULT_COMBINE_METHOD,
-    weights: list[float] | None = None,
-    data: DataConfig | None = None,
-) -> dict:
-    """Combine score series into a composite (Component 4 - Combination).
-
-    ``scores`` is either ``{alpha_id: series}`` or a plain list of series
-    (keys become the indices). Per the canon (stage-4 section 2, reconciliation
-    note REC-009), the engine defaults combine STANDARDIZED rows: equal_weight
-    -> 1/N or the given weights; inverse_vol -> weights from the capped-simplex
-    of ``1/std`` of the RAW series (the risk measure), applied to the
-    standardized rows via the engine ``composite_score_py`` (research/live
-    parity; the engine's raw-input ``inverse_vol_combine_py`` remains for the
-    parity suite). ``data`` is reserved for future alignment and unused.
-    Returns ``{"composite", "weights", "method", "provenance"}`` where
-    ``provenance = {"method", "source"}`` with source "engine" for the
-    defaults or "python" for registered research methods. ``weights`` is a
-    dict for the engine defaults and ``None`` for custom research methods
-    (their implicit weights are unrecoverable).
-    """
-    if isinstance(scores, dict):
-        keys: list[Any] = sorted(scores)
-        matrix = [list(scores[k]) for k in keys]
-    else:
-        matrix = [list(s) for s in scores]
-        keys = list(range(len(matrix)))
-    if not matrix:
-        raise ValueError("scores must be non-empty")
-    n_bars = len(matrix[0])
-    if n_bars == 0:
-        raise ValueError("score series must be non-empty")
-    if any(len(s) != n_bars for s in matrix):
-        raise ValueError("all score series must have equal length")
-
-    method_entry = combine_methods.get(method)
-    if method == "equal_weight":
-        if weights is not None:
-            if len(weights) != len(matrix):
-                raise ValueError(
-                    f"weights must have one value per series (got {len(weights)} "
-                    f"for {len(matrix)} series)"
-                )
-            derived = list(weights)
-        else:
-            derived = [1.0 / len(matrix)] * len(matrix)
-        composite = alpha_core.composite_score_py(_standardize(matrix), derived)
-    elif method == "inverse_vol":
-        if weights is not None:
-            raise ValueError(
-                "weights are derived for inverse_vol (capped-simplex of 1/std); "
-                "passing explicit weights is not supported"
-            )
-        derived = _inverse_vol_weights(matrix)
-        composite = alpha_core.composite_score_py(_standardize(matrix), derived)
-    else:
-        # Custom research method: raw input, no derivation rule for its weights.
-        if weights is not None:
-            raise ValueError(
-                f"weights are only honored by equal_weight (got method={method!r})"
-            )
-        composite = combine_methods.call(method, matrix)
-        if len(composite) != n_bars:
-            raise ValueError(
-                f"combine method {method!r} returned {len(composite)} values "
-                f"for {n_bars} bars"
-            )
-        if not all(math.isfinite(value) for value in composite):
-            raise ValueError(f"combine method {method!r} returned non-finite values")
-        derived = None  # custom research methods: implicit weights unrecoverable
-
-    return {
-        "composite": composite,
-        "weights": (
-            {k: w for k, w in zip(keys, derived)} if derived is not None else None
-        ),
-        "method": method,
-        "provenance": {"method": method, "source": method_entry.source},
-    }
+    return OrthoReport(
+        residual_sharpe=residual_sharpe,
+        residual=[float(v) for v in residual],
+        betas=[float(b) for b in betas],
+        r_squared=r_squared,
+        verdict=verdict,
+        note=note,
+    )
 
 
 def refit_weights(
-    pool: list[PoolEntry],
-    data: DataConfig | None = None,
+    pool: AlphaPool,
+    bars: BarFrame,
     method: str = DEFAULT_COMBINE_METHOD,
-    window_days: int | None = None,
-    save: bool = True,
-    root=None,
-) -> dict:
-    """Weekly weight-refit cadence (Component 4 - Combination, DEC-017).
+) -> WeightsArtifact:
+    """Weight-refit cadence: derive pool weights over the bars window.
 
-    Scores the pool over the data (``window_days=None`` = full history;
-    ``window_days=N`` = bars of the last N calendar days), then derives the
-    weights: equal_weight -> ``1/n``; inverse_vol -> capped-simplex of
-    ``1/std`` (mirror of inverse_vol.rs). Returns
-    ``{"generated": ISO date, "method", "weights": {alpha_id: w},
-    "provenance": {"method", "source"}}``. With ``save=True`` the result is
-    persisted via ``quantcore.core.artifacts.write_weights`` to
-    ``root/weights.json`` (default root ``data/pool``) - the handoff artifact
-    consumed by the live ``PortfolioConfig``.
+    Scores the pool (one engine batch, raw rows) and resolves the weights
+    through the ``combine_methods`` registry (real dispatch), so every
+    registered method's contract ``fn(scores) -> (composite, weights)``
+    applies. Returns the unsaved artifact - SAVING is the caller's explicit
+    ``WeightsArtifact.save()`` (the handoff artifact consumed by the live
+    ``PortfolioConfig``).
+
+    Parameters
+    ----------
+    pool : AlphaPool
+        The research pool (non-empty).
+    bars : BarFrame
+        The refit window (full window; slice the BarFrame for a trailing
+        refit).
+    method : str
+        Registry key in ``combine_methods``.
+
+    Returns
+    -------
+    WeightsArtifact
+        ``generated`` (ISO date), ``method``, ``weights`` (fractions per
+        alpha_id), ``window``.
+
+    Raises
+    ------
+    ValueError
+        Empty pool or unknown method.
     """
-    if not pool:
+    if not pool.entries:
         raise ValueError("pool must be non-empty")
-    if window_days is not None and (not isinstance(window_days, int) or window_days <= 0):
-        raise ValueError(f"window_days must be None or a positive int (got {window_days!r})")
-    method_entry = combine_methods.get(method)
-    if method not in _DERIVABLE_METHODS:
-        raise ValueError(
-            f"refit_weights derives weights only for {sorted(_DERIVABLE_METHODS)} "
-            f"(got method={method!r}); custom methods have no research-side "
-            "derivation rule"
-        )
-
-    df = load_bars(data)
-    if window_days is not None:
-        cutoff = df["ts"].max() - pd.Timedelta(days=window_days)
-        df = df[df["ts"] >= cutoff].reset_index(drop=True)
-    scores = _score_pool(pool, df)
-    ids = sorted(scores)
-    matrix = [scores[i] for i in ids]
-
-    if method == "inverse_vol":
-        derived = _inverse_vol_weights(matrix)
-    else:  # equal_weight
-        derived = [1.0 / len(ids)] * len(ids)
-
-    result = {
-        "generated": date.today().isoformat(),
-        "method": method,
-        "weights": {a: w for a, w in zip(ids, derived)},
-        "provenance": {"method": method, "source": method_entry.source},
-    }
-    if save:
-        write_weights(result, root=root)
-    return result
+    scores = score_pool(pool, bars)
+    try:
+        _, derived = combine_methods.call(method, scores)
+    except KeyError as exc:
+        raise ValueError(str(exc)) from None
+    return WeightsArtifact(
+        generated=date.today().isoformat(),
+        method=method,
+        weights={k: float(derived[k]) for k in sorted(derived)},
+        window=bars.window,
+    )
 
 
-def portfolio_health_report(
-    pool: list[PoolEntry],
-    data: DataConfig | None = None,
-    harness: HarnessParams | None = None,
-    window_days: int = 30,
-) -> dict:
-    """Monthly allocation-review input (Component 4 - Combination); in-memory
-    only, never auto-saved (DEC-017 artifact discipline).
+def health_report(composite: Composite, bars: BarFrame) -> PortfolioHealth:
+    """Monthly allocation-review input; in-memory only, never auto-saved.
 
-    Pipeline: ``score_pool`` (one engine batch) -> ``combine`` (inverse_vol)
-    -> ``canonical_map_py`` position -> ``compute_pnl_py`` net per-bar PnL ->
-    daily sums. Metrics:
+    Pipeline: composite scores -> ``canonical_map_py`` position ->
+    ``compute_pnl_py`` net per-bar PnL (cost = the bar instrument's cost
+    model) -> daily sums. Metrics:
 
-    - ``full_sample_sharpe``: annualized Sharpe of the daily net PnL
-      (``sharpe_py``, daily series).
+    - ``full_sample_sharpe``: annualized Sharpe of the daily net PnL.
     - ``max_drawdown``: most negative peak-to-trough drawdown of the daily
-      equity curve (``max_drawdown_py``).
-    - ``last_window_sharpe``: same Sharpe over the last ``window_days``
-      calendar days of bars.
-    - ``window_return``: sum of daily net PnL over the same last
-      ``window_days`` calendar days (window-consistent with the Sharpe).
+      equity curve.
+    - ``last_window_sharpe``: same Sharpe over the last 30 calendar days of
+      bars.
+    - ``window_return``: sum of daily net PnL over the same window.
     - ``rolling_mean_ic``: numpy corrcoef of the composite vs next-bar
       returns over the last window's aligned finite pairs (0.0 when
       undefined).
 
-    Verdict: "refit" when ``last_window_sharpe < 0`` or
-    ``rolling_mean_ic < 0.05``, else "ok".
+    Verdict: ``"refit"`` when ``last_window_sharpe < 0`` or
+    ``rolling_mean_ic < 0.05``, else ``"ok"``.
+
+    Parameters
+    ----------
+    composite : Composite
+        The combined composite (scores aligned to ``bars``).
+    bars : BarFrame
+        The bar window (close feeds returns; instrument feeds the cost
+        model).
+
+    Returns
+    -------
+    PortfolioHealth
+        Frozen report (see the dataclass docstring for field semantics).
+
+    Raises
+    ------
+    ValueError
+        Composite score length differs from the bar count.
     """
-    if not pool:
-        raise ValueError("pool must be non-empty")
-    if not isinstance(window_days, int) or window_days <= 0:
-        raise ValueError(f"window_days must be a positive int (got {window_days!r})")
-    h = harness or HarnessParams()
+    window_days = DEFAULT_HEALTH_WINDOW_DAYS
+    composite_list = [float(v) for v in composite.scores]
+    close = bars.close_list()
+    n = len(close)
+    if len(composite_list) != n:
+        raise ValueError(
+            f"composite length {len(composite_list)} != data bars {n};"
+            " composite must be aligned with the data window"
+        )
+    h = HarnessParams()
+    instrument = _instrument_for(bars)
+    cost_per_side = instrument.cost.cost_per_side_frac
 
-    df = load_bars(data)
-    scores = _score_pool(pool, df)
-    ids = sorted(scores)
-    matrix = [scores[i] for i in ids]
-    composite = combine(matrix, method=DEFAULT_COMBINE_METHOD)["composite"]
-
-    close, _ = close_volume(df)
-    rets = _simple_returns(close)
+    rets = close_returns(close)
     position = alpha_core.canonical_map_py(
-        composite,
+        composite_list,
         span=h.span,
         z_window=h.z_window,
         band=h.band,
         cap=h.cap,
         bars_per_day=h.bars_per_day,
     ).position
-    net = alpha_core.compute_pnl_py(
-        position, rets, h.cost_per_side, h.bars_per_day
-    ).net
+    net = alpha_core.compute_pnl_py(position, rets, cost_per_side, h.bars_per_day).net
 
-    dates, daily_pnl = _daily_sums(df["ts"], net)
+    dates, daily_pnl = _daily_sums(bars.ts, net)
     full_sample_sharpe = alpha_core.sharpe_py(daily_pnl, h.bars_per_day)
     max_drawdown = alpha_core.max_drawdown_py(daily_pnl)
 
@@ -610,40 +693,28 @@ def portfolio_health_report(
     last_window_sharpe = alpha_core.sharpe_py(window_pnl, h.bars_per_day)
     window_return = sum(window_pnl)
 
-    # Rolling (trailing) window of bars for the IC; the score must sit inside
-    # the window, the next-bar return may be the first bar after it.
-    ts_cutoff = df["ts"].max() - pd.Timedelta(days=window_days)
-    start = int((df["ts"] >= ts_cutoff).idxmax()) if (df["ts"] >= ts_cutoff).any() else 0
-    rolling_mean_ic = _mean_ic(composite, rets, start)
+    # Rolling (trailing) window of bars for the IC; the score must sit
+    # inside the window, the next-bar return may be the first bar after it.
+    ts_cutoff = bars.ts.max() - pd.Timedelta(days=window_days)
+    mask = np.asarray(bars.ts >= ts_cutoff)
+    start = int(np.argmax(mask)) if bool(mask.any()) else 0
+    rolling_mean_ic = _mean_ic(composite_list, rets, start)
 
-    verdict = "refit" if (last_window_sharpe < 0.0 or rolling_mean_ic < 0.05) else "ok"
+    verdict = (
+        "refit" if (last_window_sharpe < 0.0 or rolling_mean_ic < MIN_HEALTH_MEAN_IC) else "ok"
+    )
 
-    return {
-        "generated": pd.Timestamp.now(tz="UTC").isoformat(),
-        "pool_size": len(ids),
-        "bars": len(df),
-        "window_days": window_days,
-        "full_sample_sharpe": full_sample_sharpe,
-        "max_drawdown": max_drawdown,
-        "last_window_sharpe": last_window_sharpe,
-        "window_return": window_return,
-        "rolling_mean_ic": rolling_mean_ic,
-        "verdict": verdict,
-        "units": "PnL metrics are in canonical composite units (position x"
+    return PortfolioHealth(
+        generated=pd.Timestamp.now(tz="UTC").isoformat(),
+        pool_size=len(composite.alpha_ids),
+        bars=n,
+        window_days=window_days,
+        full_sample_sharpe=full_sample_sharpe,
+        max_drawdown=max_drawdown,
+        last_window_sharpe=last_window_sharpe,
+        window_return=window_return,
+        rolling_mean_ic=rolling_mean_ic,
+        verdict=verdict,
+        units="PnL metrics are in canonical composite units (position x"
         " return per bar, NOT capital fractions); sharpe/IC are scale-free",
-    }
-
-
-# ``load_pool`` is a public-surface re-export of quantcore.core.pool.load_pool
-# (already imported at the top of this module).
-__all__ = [
-    "combine_methods",
-    "combine",
-    "equal_weight",
-    "inverse_vol",
-    "load_pool",
-    "orthogonalize",
-    "score_pool",
-    "portfolio_health_report",
-    "refit_weights",
-]
+    )

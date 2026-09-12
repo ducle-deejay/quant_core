@@ -1,10 +1,5 @@
-"""Daily ETL heartbeat watcher: alerts RUN MISSING when the 16:00 run never
-happened (DEC-012). Runs via LaunchAgent io.quant-core.daily-etl-watch at
-16:10 Mon-Fri; exits 0 on a healthy heartbeat, 1 when the run is missing.
-
-Failed runs are NOT alerted here - the pipeline's own failure alert covers
-them; the watcher stays quiet for result="failed" and only fires when no
-record exists for today (or a stale "running" record suggests a hard kill).
+"""Daily ETL heartbeat watcher: alerts RUN MISSING when today's 16:00 run never happened.
+LaunchAgent io.quant-core.daily-etl-watch 16:10 Mon-Fri; exit 0 healthy, 1 missing.
 """
 
 from __future__ import annotations

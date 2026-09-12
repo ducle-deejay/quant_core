@@ -1,21 +1,6 @@
 """Daily ETL entrypoint: DNSE primary + Mirae candlestick fallback + Telegram.
-
-Usage (from the repo root, project venv):
-
-    API_KEY=... API_SECRET=... \\
-    TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \\
-    .venv/bin/python3 apps/data/daily/pipeline.py [--date YYYY-MM-DD]
-
-Alert coverage (DEC-012, replaces silent-failure gaps found 2026-08-30):
-- the notifier is built FIRST; any failure before the run starts (config
-  load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero;
-- the success/failure alert is sent with raise_on_error=True, so an
-  undeliverable alert fails the run loudly instead of pretending success;
-- every run writes a heartbeat status file (market_data.heartbeat) that the
-  io.quant-core.daily-etl-watch LaunchAgent checks for missed runs.
-
-Exits non-zero when both sources failed or bars remain missing after the
-Mirae backfill; the Telegram alert carries the failure detail.
+Usage (repo root): set API_KEY/API_SECRET/TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID,
+then ``.venv/bin/python3 apps/data/daily/pipeline.py [--date YYYY-MM-DD]``.
 """
 
 from __future__ import annotations
@@ -49,6 +34,17 @@ LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 def main() -> None:
+    """Run the daily ETL with loud failure alerting.
+
+    - The notifier is built FIRST: any failure before the run starts (config
+      load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero.
+    - The success/failure alert is sent with ``raise_on_error=True``: an
+      undeliverable alert fails the run loudly instead of pretending success.
+    - Every run writes a heartbeat status file (``market_data.heartbeat``)
+      that the io.quant-core.daily-etl-watch LaunchAgent checks for missed
+      runs; exits non-zero when both sources failed or bars remain missing
+      after the Mirae backfill.
+    """
     parser = argparse.ArgumentParser(description="Run the daily DNSE + Mirae data pipelines")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--date", type=date.fromisoformat)

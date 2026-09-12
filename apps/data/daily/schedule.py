@@ -1,10 +1,5 @@
 """Schedule the daily DNSE + Mirae ETL as a macOS LaunchAgent.
-
 Usage: .venv/bin/python3 apps/data/daily/schedule.py [--launch-agent PATH]
-
-Installs (or refreshes) a LaunchAgent that runs the daily pipeline at the
-configured weekday time in Asia/Ho_Chi_Minh. Mirror of the nox pattern the
-previous data pipeline used; keep the same label per machine.
 """
 
 from __future__ import annotations
