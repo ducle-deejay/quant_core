@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC
-from datetime import datetime
+from datetime import UTC, datetime
 
-from nautilus_trader.common.config import InstrumentProviderConfig
-from nautilus_trader.common.providers import InstrumentProvider
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.live import InstrumentProviderConfig
+from nautilus_trader.live.providers import InstrumentProvider
+from nautilus_trader.model import InstrumentId
 
 from trading.adapters.entrade.client import EntradeClient
-from trading.adapters.entrade.contracts import EntradeMonthlyContract
-from trading.adapters.entrade.contracts import resolve_active_contract
-from trading.instruments import FuturesInstrumentSpec
-from trading.instruments import build_continuous_futures_contract
+from trading.adapters.entrade.contracts import (
+    EntradeMonthlyContract,
+    resolve_active_contract,
+)
+from trading.instruments import FuturesInstrumentSpec, build_continuous_futures_contract
 
 
 class EntradeInstrumentProvider(InstrumentProvider):
@@ -21,7 +20,7 @@ class EntradeInstrumentProvider(InstrumentProvider):
 
     def __init__(
         self,
-        client: EntradeClient,
+        client: EntradeClient | None,
         instrument_spec: FuturesInstrumentSpec,
         config: InstrumentProviderConfig | None = None,
     ) -> None:
@@ -31,7 +30,17 @@ class EntradeInstrumentProvider(InstrumentProvider):
         self._derivatives: dict = {}
         self._contracts: dict[str, EntradeMonthlyContract] = {}
 
+    @property
+    def client(self) -> EntradeClient | None:
+        return self._client
+
+    def set_client(self, client: EntradeClient) -> None:
+        """Bind the network client when the owning execution client connects."""
+        self._client = client
+
     async def load_all_async(self, filters: dict | None = None) -> None:
+        if self._client is None:
+            raise RuntimeError("Entrade instrument provider is not connected")
         self._derivatives = await asyncio.to_thread(self._client.list_derivatives)
         self.add(build_continuous_futures_contract(self._instrument_spec))
         records = self._derivatives.get("data", [])
@@ -68,11 +77,15 @@ class EntradeInstrumentProvider(InstrumentProvider):
             at=at or datetime.now(UTC),
         )
 
-    def resolve_active_instrument(self, at: datetime | None = None) -> Instrument:
+    def resolve_active_instrument(self, at: datetime | None = None) -> object:
         contract = self.resolve_active_contract(at)
-        instrument = self.find(self._instrument_spec.with_symbol(contract.symbol).instrument_id())
+        instrument = self.find(
+            self._instrument_spec.with_symbol(contract.symbol).instrument_id()
+        )
         if instrument is None:
-            raise RuntimeError(f"Entrade contract was not loaded into Nautilus: {contract.symbol}")
+            raise RuntimeError(
+                f"Entrade contract was not loaded into Nautilus: {contract.symbol}"
+            )
         return instrument
 
     def contract_for_instrument(

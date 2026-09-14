@@ -1,38 +1,33 @@
 from __future__ import annotations
 
-import asyncio
-
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
-from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.live.factories import LiveDataClientFactory
+from nautilus_trader.common import Clock
+from nautilus_trader.live import ClientCache, DataClientConfig
+from nautilus_trader.live.clients import DataClientFactory
 
 from trading.adapters.dnse.config import DnseDataClientConfig
 from trading.adapters.dnse.data import DnseLiveDataClient
 from trading.adapters.dnse.instruments import DnseInstrumentProvider
 
 
-class DnseLiveDataClientFactory(LiveDataClientFactory):
+class DnseLiveDataClientFactory(DataClientFactory):
     """Nautilus extension factory constructing the DNSE live data client."""
 
     @staticmethod
     def create(
-        loop: asyncio.AbstractEventLoop,
+        *,
         name: str,
-        config: DnseDataClientConfig,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
+        config: DataClientConfig,
+        cache: ClientCache,
+        clock: Clock,
     ) -> DnseLiveDataClient:
-        PyCondition.type(config, DnseDataClientConfig, "config")
+        if not isinstance(config, DnseDataClientConfig):
+            raise TypeError("Expected DnseDataClientConfig")
         provider = DnseInstrumentProvider(config=config)
         return DnseLiveDataClient(
-            loop=loop,
-            msgbus=msgbus,
+            name=name,
+            config=config,
             cache=cache,
             clock=clock,
+            venue=config.venue,
             instrument_provider=provider,
-            config=config,
-            name=name,
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,57 +10,56 @@ from typing import Any
 import pandas as pd
 from dnse import TradingClient  # type: ignore[attr-defined]
 from dnse.websocket.models import Ohlc
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
-from nautilus_trader.common.signal import generate_signal_class
-from nautilus_trader.data.messages import RequestBars
-from nautilus_trader.data.messages import RequestData
-from nautilus_trader.data.messages import RequestInstrument
-from nautilus_trader.data.messages import RequestInstruments
-from nautilus_trader.data.messages import SubscribeBars
-from nautilus_trader.data.messages import SubscribeData
-from nautilus_trader.data.messages import SubscribeInstrument
-from nautilus_trader.data.messages import SubscribeInstruments
-from nautilus_trader.data.messages import UnsubscribeBars
-from nautilus_trader.data.messages import UnsubscribeData
-from nautilus_trader.data.messages import UnsubscribeInstrument
-from nautilus_trader.data.messages import UnsubscribeInstruments
-from nautilus_trader.live.data_client import LiveMarketDataClient
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarSpecification
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.enums import AggregationSource
-from nautilus_trader.model.enums import BarAggregation
-from nautilus_trader.model.enums import PriceType
-from nautilus_trader.model.identifiers import ClientId
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import Symbol
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
-from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+from nautilus_trader.live import (
+    BarsResponse,
+    ClientCache,
+    DataClientConfig,
+    InstrumentResponse,
+    InstrumentsResponse,
+    RequestBars,
+    RequestCustomData,
+    RequestInstrument,
+    RequestInstruments,
+    SubscribeBars,
+    SubscribeCustomData,
+    SubscribeInstrument,
+    SubscribeInstruments,
+    UnsubscribeBars,
+    UnsubscribeCustomData,
+    UnsubscribeInstrument,
+    UnsubscribeInstruments,
+)
+from nautilus_trader.live.clients import MarketDataClient
+from nautilus_trader.model import (
+    AggregationSource,
+    Bar,
+    BarAggregation,
+    BarSpecification,
+    BarType,
+    InstrumentId,
+    Price,
+    PriceType,
+    Quantity,
+    Symbol,
+    Venue,
+)
+from nautilus_trader.persistence import ParquetDataCatalog
 
-from trading.adapters.dnse.calendar import is_valid_vn_trading_day
-from trading.adapters.dnse.calendar import parse_working_dates_body
+from trading.adapters.dnse.calendar import (
+    is_valid_vn_trading_day,
+    parse_working_dates_body,
+)
 from trading.adapters.dnse.client import create_dnse_rest_client
-from trading.adapters.dnse.config import DNSE_DATA_CLIENT_NAME
-from trading.adapters.dnse.config import SUPPORTED_DNSE_RESOLUTIONS
-from trading.adapters.dnse.config import VN_TZ
-from trading.adapters.dnse.config import DnseDataClientConfig
+from trading.adapters.dnse.config import (
+    DNSE_DATA_CLIENT_NAME,
+    SUPPORTED_DNSE_RESOLUTIONS,
+    VN_TZ,
+    DnseDataClientConfig,
+)
 from trading.adapters.dnse.instruments import DnseInstrumentProvider
-
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog"
-
-
-LIVE_DATA_RECONNECTED_SIGNAL_NAME = "LiveDataReconnected"
-LiveDataReconnectedSignal = generate_signal_class(
-    LIVE_DATA_RECONNECTED_SIGNAL_NAME,
-    str,
-)
 
 
 def normalize_dnse_resolution(resolution: str) -> str:
@@ -101,7 +100,7 @@ def bar_type_to_dnse_resolution(bar_type: BarType) -> str:
     raise ValueError(f"Unsupported bar type for DNSE OHLC subscription: {bar_type}")
 
 
-def dnse_epoch_to_utc_timestamp(value: int | float) -> pd.Timestamp:
+def dnse_epoch_to_utc_timestamp(value: float) -> pd.Timestamp:
     unit = "ms" if value >= 1_000_000_000_000 else "s"
     return pd.to_datetime(value, unit=unit, utc=True)  # type: ignore[call-overload]
 
@@ -157,7 +156,9 @@ def parse_dnse_ohlc_body(body: Any) -> dict[str, list[Any]]:
     if isinstance(body, str):
         body = json.loads(body)
     if not isinstance(body, dict):
-        raise ValueError(f"Unexpected DNSE OHLC response type: {type(body)}")
+        raise ValueError(  # noqa: TRY004 - preserve the adapter's payload error contract.
+            f"Unexpected DNSE OHLC response type: {type(body)}",
+        )
 
     required_keys = ("t", "o", "h", "l", "c", "v")
     if not all(key in body for key in required_keys):
@@ -228,6 +229,7 @@ def _load_catalog_bars(
     bar_type: BarType,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
+    legacy_catalog_path: Path | None = None,
 ) -> list[Bar]:
     """Query bars for a bar type within [start, end] from a ParquetDataCatalog.
 
@@ -236,7 +238,90 @@ def _load_catalog_bars(
     time in UTC, matching the DNSE API conversion path (see
     ``dnse_ohlc_to_nautilus_bar``).
     """
-    return catalog.bars(bar_types=[str(bar_type)], start=start, end=end)
+    try:
+        bars = catalog.query_bars(
+            identifiers=[str(bar_type)],
+            start=None if start is None else int(start.value),
+            end=None if end is None else int(end.value),
+        )
+    except (OSError, RuntimeError):
+        bars = []
+    if bars or legacy_catalog_path is None:
+        return bars
+    return _load_legacy_catalog_bars(legacy_catalog_path, bar_type, start, end)
+
+
+def _load_legacy_catalog_bars(
+    catalog_path: Path,
+    bar_type: BarType,
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> list[Bar]:
+    """Read bars from the v1 catalog schema during the rc5 migration."""
+    from pyarrow import parquet
+
+    directory = catalog_path / "data" / "bar" / str(bar_type)
+    if not directory.is_dir():
+        return []
+
+    bars: list[Bar] = []
+    start_ns = None if start is None else int(start.value)
+    end_ns = None if end is None else int(end.value)
+    for path in sorted(directory.glob("*.parquet")):
+        table = parquet.read_table(path)
+        metadata = table.schema.metadata or {}
+        price_precision = int(metadata.get(b"price_precision", b"0"))
+        size_precision = int(metadata.get(b"size_precision", b"0"))
+        rows = table.to_pydict()
+        for (
+            open_raw,
+            high_raw,
+            low_raw,
+            close_raw,
+            volume_raw,
+            ts_event,
+            ts_init,
+        ) in zip(
+            rows["open"],
+            rows["high"],
+            rows["low"],
+            rows["close"],
+            rows["volume"],
+            rows["ts_event"],
+            rows["ts_init"],
+            strict=True,
+        ):
+            ts_event = int(ts_event)
+            if start_ns is not None and ts_event < start_ns:
+                continue
+            if end_ns is not None and ts_event > end_ns:
+                continue
+            bars.append(
+                Bar(
+                    bar_type,
+                    Price.from_raw(
+                        int.from_bytes(open_raw, "little", signed=True), price_precision
+                    ),
+                    Price.from_raw(
+                        int.from_bytes(high_raw, "little", signed=True), price_precision
+                    ),
+                    Price.from_raw(
+                        int.from_bytes(low_raw, "little", signed=True), price_precision
+                    ),
+                    Price.from_raw(
+                        int.from_bytes(close_raw, "little", signed=True),
+                        price_precision,
+                    ),
+                    Quantity.from_raw(
+                        int.from_bytes(volume_raw, "little", signed=True),
+                        size_precision,
+                    ),
+                    ts_event,
+                    int(ts_init),
+                ),
+            )
+    bars.sort(key=lambda bar: bar.ts_event)
+    return bars
 
 
 @dataclass(frozen=True)
@@ -247,54 +332,41 @@ class SubscriptionKey:
     resolution: str
 
 
-class DnseLiveDataClient(LiveMarketDataClient):
+class DnseLiveDataClient(MarketDataClient):
     """Nautilus extension implementing live and historical DNSE market data."""
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
-        instrument_provider: DnseInstrumentProvider,
-        config: DnseDataClientConfig,
-        name: str | None = None,
+        *,
+        name: str = DNSE_DATA_CLIENT_NAME,
+        config: DataClientConfig,
+        cache: ClientCache,
+        clock: Any,
+        venue: Venue | str | None = None,
+        instrument_provider: DnseInstrumentProvider | None = None,
         trading_client: TradingClient | None = None,
         rest_client: Any | None = None,
     ) -> None:
+        if not isinstance(config, DnseDataClientConfig):
+            raise TypeError("Expected DnseDataClientConfig")
         super().__init__(
-            loop=loop,
-            client_id=ClientId(name or DNSE_DATA_CLIENT_NAME),
-            venue=Venue(config.venue),
-            msgbus=msgbus,
+            name=name,
+            config=config,
             cache=cache,
             clock=clock,
             instrument_provider=instrument_provider,
-            config=config,
+            venue=Venue(venue or config.venue),
         )
         self._config = config
-        self._trading_client = trading_client or TradingClient(
-            api_key=config.api_key,
-            api_secret=config.api_secret,
-            base_url=config.ws_base_url,
-            encoding=config.ws_encoding,
-            auto_reconnect=config.auto_reconnect,
-            max_retries=config.max_retries,
-            heartbeat_interval=config.heartbeat_interval,
-            timeout=config.timeout,
-        )
-        self._rest_client = rest_client or create_dnse_rest_client(
-            api_key=config.api_key,
-            api_secret=config.api_secret,
-            base_url=config.rest_base_url,
-            api_version=config.api_version,
-        )
+        self._trading_client = trading_client
+        self._rest_client = rest_client
         self._catalog: ParquetDataCatalog | None = None
-        if config.historical_source == "catalog":
-            catalog_path = Path(config.catalog_path) if config.catalog_path else DEFAULT_CATALOG_PATH
-            if not catalog_path.is_absolute():
-                catalog_path = REPO_ROOT / catalog_path
-            self._catalog = ParquetDataCatalog(str(catalog_path))
+        catalog_path = (
+            Path(config.catalog_path) if config.catalog_path else DEFAULT_CATALOG_PATH
+        )
+        if not catalog_path.is_absolute():
+            catalog_path = REPO_ROOT / catalog_path
+        self._catalog_path = catalog_path
         self._bar_types_by_key: dict[SubscriptionKey, BarType] = {}
         self._subscribed_keys: set[SubscriptionKey] = set()
         self._last_bar_ts_by_key: dict[SubscriptionKey, int] = {}
@@ -304,37 +376,73 @@ class DnseLiveDataClient(LiveMarketDataClient):
         self._registered_ohlc_handler = False
         self._registered_reconnect_handler = False
         self._market_working_dates: tuple[str, ...] = config.market_working_dates
+        self._instrument_provider = instrument_provider
+        self._log = logging.getLogger(type(self).__name__)
+
+    def _open_resources(self) -> None:
+        """Create transport resources after the rc5 runtime binds the client."""
+        if self._trading_client is None:
+            self._trading_client = TradingClient(
+                api_key=self._config.api_key,
+                api_secret=self._config.api_secret,
+                base_url=self._config.ws_base_url,
+                encoding=self._config.ws_encoding,
+                auto_reconnect=self._config.auto_reconnect,
+                max_retries=self._config.max_retries,
+                heartbeat_interval=self._config.heartbeat_interval,
+                timeout=self._config.timeout,
+            )
+        if self._rest_client is None:
+            self._rest_client = create_dnse_rest_client(
+                api_key=self._config.api_key,
+                api_secret=self._config.api_secret,
+                base_url=self._config.rest_base_url,
+                api_version=self._config.api_version,
+            )
+        if self._catalog is None and self._config.historical_source == "catalog":
+            self._catalog = ParquetDataCatalog(str(self._catalog_path))
 
     async def _connect(self) -> None:
+        self._open_resources()
+        if self._instrument_provider is None:
+            raise RuntimeError("The DNSE data client requires an instrument provider")
         await self._instrument_provider.load_all_async()
         if self._config.use_dnse_working_dates and not self._market_working_dates:
             self._market_working_dates = await self._load_market_working_dates()
         if not self._registered_ohlc_handler:
+            assert self._trading_client is not None
             self._trading_client.on("ohlc_closed", self._on_ohlc_event)
             self._registered_ohlc_handler = True
         if not self._registered_reconnect_handler:
+            assert self._trading_client is not None
             self._trading_client.on("reconnected", self._on_reconnected)
             self._registered_reconnect_handler = True
+        assert self._trading_client is not None
         await self._trading_client.connect()
 
         if self._config.publish_instruments_on_connect:
             self._publish_all_instruments()
 
     async def _disconnect(self) -> None:
-        await self._trading_client.disconnect()
+        if self._trading_client is not None:
+            await self._trading_client.disconnect()
 
-    async def _subscribe(self, command: SubscribeData) -> None:
-        raise NotImplementedError("Generic custom-data subscriptions are not supported for DNSE")
+    async def _subscribe(self, command: SubscribeCustomData) -> None:
+        raise NotImplementedError(
+            "Generic custom-data subscriptions are not supported for DNSE"
+        )
 
-    async def _unsubscribe(self, command: UnsubscribeData) -> None:
-        raise NotImplementedError("Generic custom-data subscriptions are not supported for DNSE")
+    async def _unsubscribe(self, command: UnsubscribeCustomData) -> None:
+        raise NotImplementedError(
+            "Generic custom-data subscriptions are not supported for DNSE"
+        )
 
     async def _subscribe_instruments(self, command: SubscribeInstruments) -> None:
-        self._publish_all_instruments()
+        self._publish_all_instruments(command.venue)
 
     async def _subscribe_instrument(self, command: SubscribeInstrument) -> None:
         instrument = await self._ensure_instrument(command.instrument_id.symbol.value)
-        self._handle_data(instrument)
+        self._handle_instrument(instrument)
 
     async def _unsubscribe_instruments(self, command: UnsubscribeInstruments) -> None:
         return None
@@ -350,6 +458,8 @@ class DnseLiveDataClient(LiveMarketDataClient):
         if key in self._subscribed_keys:
             return
 
+        if self._trading_client is None:
+            raise RuntimeError("DNSE data client is not connected")
         await self._trading_client.subscribe_ohlc_closed(
             symbols=[symbol],
             resolution=resolution,
@@ -366,33 +476,47 @@ class DnseLiveDataClient(LiveMarketDataClient):
         self._subscribed_keys.discard(key)
         self._last_bar_ts_by_key.pop(key, None)
 
-    async def _request(self, request: RequestData) -> None:
-        raise NotImplementedError("Generic custom-data requests are not supported for DNSE")
+    async def _request_data(self, request: RequestCustomData) -> None:
+        raise NotImplementedError(
+            "Generic custom-data requests are not supported for DNSE"
+        )
 
     async def _request_instrument(self, request: RequestInstrument) -> None:
         instrument = await self._ensure_instrument(request.instrument_id.symbol.value)
-        self._handle_instrument(
-            instrument,
-            correlation_id=request.id,
-            start=request.start,
-            end=request.end,
-            params=request.params,
+        self._handle_response(
+            InstrumentResponse(
+                self.client_id,
+                request.instrument_id,
+                instrument,
+                request.request_id,
+                self.clock.timestamp_ns(),
+                request.start_ns,
+                request.end_ns,
+                request.params,
+            ),
         )
 
     async def _request_instruments(self, request: RequestInstruments) -> None:
+        if self._instrument_provider is None:
+            raise RuntimeError("The DNSE data client requires an instrument provider")
         await self._instrument_provider.load_all_async()
+        venue = request.venue or self.venue
         instruments = [
             instrument
             for instrument in self._instrument_provider.get_all().values()
-            if instrument.venue == request.venue
+            if venue is None or instrument.id.venue == venue
         ]
-        self._handle_instruments(
-            request.venue,
-            instruments,
-            correlation_id=request.id,
-            start=request.start,
-            end=request.end,
-            params=request.params,
+        self._handle_response(
+            InstrumentsResponse(
+                self.client_id,
+                venue,
+                instruments,
+                request.request_id,
+                self.clock.timestamp_ns(),
+                request.start_ns,
+                request.end_ns,
+                request.params,
+            ),
         )
 
     async def _request_bars(self, request: RequestBars) -> None:
@@ -419,6 +543,7 @@ class DnseLiveDataClient(LiveMarketDataClient):
                         bar_type=request.bar_type,
                         start=start,
                         end=end,
+                        legacy_catalog_path=self._catalog_path,
                     )
                 except Exception as e:  # noqa: BLE001 - a catalog read failure must not break warmup
                     self._log.warning(
@@ -440,11 +565,14 @@ class DnseLiveDataClient(LiveMarketDataClient):
                 "resolution": resolution,
             }
             if start is not None:
-                query["from"] = int(start.timestamp())
+                query["from"] = int(start.value // 1_000_000_000)
             if end is not None:
-                query["to"] = int(end.timestamp())
+                query["to"] = int(end.value // 1_000_000_000)
 
             try:
+                if self._rest_client is None:
+                    self._open_resources()
+                assert self._rest_client is not None
                 status, body = self._rest_client.get_ohlc(
                     bar_type=self._config.historical_bar_type,
                     query=query,
@@ -489,20 +617,26 @@ class DnseLiveDataClient(LiveMarketDataClient):
                 for bar in bars
             ]
 
-        self._handle_bars(
-            request.bar_type,
-            bars,
-            correlation_id=request.id,
-            start=request.start,
-            end=request.end,
-            params=request.params,
+        self._handle_response(
+            BarsResponse(
+                self.client_id,
+                request.bar_type,
+                bars,
+                request.request_id,
+                self.clock.timestamp_ns(),
+                request.start_ns,
+                request.end_ns,
+                request.params,
+            ),
         )
         self._log.info(f"Served {len(bars)} bars from {source} for {request.bar_type}")
 
         if key in self._recovering_keys:
             self._complete_bar_recovery(key, bars)
 
-    async def _ensure_instrument(self, symbol: str) -> Instrument:
+    async def _ensure_instrument(self, symbol: str) -> object:
+        if self._instrument_provider is None:
+            raise RuntimeError("The DNSE data client requires an instrument provider")
         instrument_id = InstrumentId(Symbol(symbol), Venue(self._config.venue))
         instrument = self._instrument_provider.find(instrument_id)
         if instrument is None:
@@ -512,9 +646,12 @@ class DnseLiveDataClient(LiveMarketDataClient):
             raise ValueError(f"Could not build instrument for symbol={symbol}")
         return instrument
 
-    def _publish_all_instruments(self) -> None:
+    def _publish_all_instruments(self, venue: Venue | None = None) -> None:
+        if self._instrument_provider is None:
+            return
         for instrument in self._instrument_provider.get_all().values():
-            self._handle_data(instrument)
+            if venue is None or instrument.id.venue == venue:
+                self._handle_instrument(instrument)
 
     def _on_ohlc_event(self, ohlc: Ohlc) -> None:
         resolution = normalize_dnse_resolution(ohlc.resolution)
@@ -559,24 +696,15 @@ class DnseLiveDataClient(LiveMarketDataClient):
             return
 
         self._last_bar_ts_by_key[key] = bar.ts_event
-        self._handle_data_py(bar)
+        self._handle_data(bar)
 
     def _on_reconnected(self, _: object) -> None:
-        now = self._clock.timestamp_ns()
         for key in self._subscribed_keys:
-            bar_type = self._bar_types_by_key.get(key)
-            if bar_type is None:
+            if key not in self._bar_types_by_key:
                 continue
             self._recovering_keys.add(key)
             self._failed_recovery_keys.discard(key)
             self._buffered_ohlc_by_key[key] = []
-            self._handle_data_py(
-                LiveDataReconnectedSignal(
-                    value=str(bar_type),
-                    ts_event=now,
-                    ts_init=now,
-                ),
-            )
 
     def _complete_bar_recovery(self, key: SubscriptionKey, bars: list[Bar]) -> None:
         if bars:
@@ -590,6 +718,8 @@ class DnseLiveDataClient(LiveMarketDataClient):
     async def _load_market_working_dates(self) -> tuple[str, ...]:
         status, body = self._rest_client.get_working_dates(dry_run=False)
         if status != 200:
-            raise ValueError(f"DNSE get_working_dates failed with status={status}, body={body}")
+            raise ValueError(
+                f"DNSE get_working_dates failed with status={status}, body={body}"
+            )
 
         return parse_working_dates_body(body)

@@ -1,50 +1,39 @@
 from __future__ import annotations
 
-import asyncio
+from nautilus_trader.common import Clock
+from nautilus_trader.live import ClientCache, ExecutionClientConfig
+from nautilus_trader.live.clients import ExecutionClientFactory
+from nautilus_trader.model import TraderId
 
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
-from nautilus_trader.live.factories import LiveExecClientFactory
-
-from trading.adapters.entrade.client import EntradeClient
-from trading.adapters.entrade.client import EntradeClientConfig
 from trading.adapters.entrade.config import EntradeExecClientConfig
 from trading.adapters.entrade.execution import EntradeExecutionClient
 from trading.adapters.entrade.instruments import EntradeInstrumentProvider
 
 
-class EntradeLiveExecClientFactory(LiveExecClientFactory):
+class EntradeLiveExecClientFactory(ExecutionClientFactory):
     """Nautilus factory composing the Entrade execution adapter."""
 
     @staticmethod
     def create(
-        loop: asyncio.AbstractEventLoop,
+        *,
         name: str,
-        config: EntradeExecClientConfig,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
+        config: ExecutionClientConfig,
+        cache: ClientCache,
+        clock: Clock,
+        trader_id: TraderId,
     ) -> EntradeExecutionClient:
-        client = EntradeClient(
-            EntradeClientConfig(
-                environment=config.environment,
-                base_url=config.base_url,
-                timeout_seconds=config.timeout_seconds,
-            ),
-        )
+        if not isinstance(config, EntradeExecClientConfig):
+            raise TypeError("Expected EntradeExecClientConfig")
         provider = EntradeInstrumentProvider(
-            client=client,
+            client=None,
             instrument_spec=config.instrument_spec,
             config=config.instrument_provider,
         )
         return EntradeExecutionClient(
-            loop=loop,
-            client=client,
-            msgbus=msgbus,
+            name=name,
+            config=config,
             cache=cache,
             clock=clock,
+            trader_id=trader_id,
             instrument_provider=provider,
-            config=config,
-            name=name,
         )

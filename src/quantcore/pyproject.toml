@@ -7,8 +7,7 @@ name = "quantcore"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "core",
-    "nautilus-trader==1.231.0",
+    "nautilus-trader==2.0.0rc5",
     "pandas>=2.3.3",
     "numpy",
     "pyarrow",

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from nautilus_trader.common.config import InstrumentProviderConfig
-from nautilus_trader.common.providers import InstrumentProvider
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.live import InstrumentProviderConfig
+from nautilus_trader.live.providers import InstrumentProvider
+from nautilus_trader.model import InstrumentId, Venue
 
 from trading.adapters.dnse.config import DnseDataClientConfig
 from trading.instruments import build_continuous_futures_contract
@@ -32,7 +30,7 @@ class DnseInstrumentProvider(InstrumentProvider):
                 continue
             self.add(self._build_instrument(instrument_id.symbol.value))
 
-    def _build_instrument(self, symbol: str) -> Instrument:
+    def _build_instrument(self, symbol: str) -> object:
         return build_continuous_futures_contract(
             spec=self._client_config.instrument_spec.with_symbol(symbol),
         )

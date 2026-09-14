@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pandas as pd
-from nautilus_trader.model.currencies import register_currency
-from nautilus_trader.model.enums import AssetClass
-from nautilus_trader.model.enums import CurrencyType
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import Symbol
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.instruments import FuturesContract
-from nautilus_trader.model.objects import Currency
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model import (
+    AssetClass,
+    Currency,
+    CurrencyType,
+    FuturesContract,
+    InstrumentId,
+    Price,
+    Quantity,
+    Symbol,
+    Venue,
+)
+
+try:
+    from nautilus_trader.model.currencies import register_currency
+except ModuleNotFoundError:
+    # Nautilus rc5 moved registration onto the Currency type.
+    def register_currency(currency: Currency, overwrite: bool = False) -> None:
+        Currency.register(currency, overwrite=overwrite)
 
 
 @dataclass(frozen=True)
@@ -80,7 +87,9 @@ def load_futures_instrument_spec(path: str | Path) -> FuturesInstrumentSpec:
         ),
         currency_iso4217=int(payload.get("currency_iso4217", 704)),
         currency_name=payload.get("currency_name", "Vietnamese dong"),
-        price_precision=int(payload.get("price_precision", _precision_from_increment(tick_size))),
+        price_precision=int(
+            payload.get("price_precision", _precision_from_increment(tick_size))
+        ),
         price_increment=tick_size,
         multiplier=int(payload["multiplier"]),
         lot_size=int(payload.get("lot_size", 1)),
@@ -104,7 +113,9 @@ def build_futures_contract(
 ) -> FuturesContract:
     """Compose a monthly Nautilus futures contract from explicit metadata."""
     register_futures_instrument_currency(spec)
-    activation_ns = 0 if activation is None else pd.Timestamp(activation, tz="UTC").value
+    activation_ns = (
+        0 if activation is None else pd.Timestamp(activation, tz="UTC").value
+    )
     expiration_ns = pd.Timestamp(expiration, tz="UTC").value
 
     return FuturesContract(
@@ -133,11 +144,15 @@ def build_continuous_futures_contract(
 ) -> FuturesContract:
     """Compose the continuous signal instrument used by the data pipeline."""
     if (ts_init is None) != (expiration is None):
-        raise ValueError("Continuous instrument window requires both ts_init and expiration")
+        raise ValueError(
+            "Continuous instrument window requires both ts_init and expiration"
+        )
 
     register_futures_instrument_currency(spec)
     ts_init_ns = 0 if ts_init is None else pd.Timestamp(ts_init, tz="UTC").value
-    expiration_ns = 0 if expiration is None else pd.Timestamp(expiration, tz="UTC").value
+    expiration_ns = (
+        0 if expiration is None else pd.Timestamp(expiration, tz="UTC").value
+    )
 
     return FuturesContract(
         instrument_id=spec.instrument_id(),
@@ -163,4 +178,4 @@ def _precision_from_increment(value: float) -> int:
 
 
 def _infer_underlying(symbol: str) -> str:
-    return symbol[:-3] if symbol.endswith("F1M") else symbol
+    return symbol.removesuffix("F1M")
