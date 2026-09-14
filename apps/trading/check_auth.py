@@ -11,10 +11,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from trading.adapters.entrade.client import EntradeClient
-from trading.adapters.entrade.client import investor_id_from_token
-from trading.adapters.entrade.transport import EntradeClientConfig
-from trading.adapters.entrade.transport import EntradeEnvironment
+from trading.adapters.entrade_template.api.entrade_api import EntradeClient
+from trading.adapters.entrade_template.api.entrade_api import investor_id_from_token
+from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +44,7 @@ def main() -> None:
         print("RESULT: credentials missing - fill .env first")
         sys.exit(2)
 
-    client = EntradeClient(EntradeClientConfig(environment=EntradeEnvironment.DEMO))
+    client = EntradeClient(EntradeClientConfig(account=EntradeAccount.DEMO))
     try:
         token = client.authenticate(username, password)
     except Exception as error:
