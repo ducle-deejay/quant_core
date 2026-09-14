@@ -1,36 +1,19 @@
-//! Append-only trial ledger with deduplication and persistence.
-//!
-//! Every backtest configuration that is ever evaluated must be recorded
-//! here so that multiple-testing corrections (see `deflated_sharpe`) can
-//! use the true number of trials. The ledger is append-only: entries are
-//! never removed or rewritten. Duplicate configurations - identical
-//! code version, parameters, and data range - are detected via a 64-bit
-//! FNV-1a hash and reported to the caller instead of silently inflating
-//! the unique trial count.
-//!
-//! Pure Rust, no external dependencies.
-
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// One recorded trial in the ledger.
 #[derive(Debug, Clone)]
 pub struct TrialEntry {
-    /// Hash of code_version + params + data_range (FNV-1a 64-bit).
+
     pub config_hash: u64,
-    /// Brief result description.
+
     pub result_summary: String,
-    /// ISO-8601 UTC timestamp of the moment the trial was recorded.
+
     pub timestamp: String,
 }
 
-/// Append-only ledger of every trial run against the data.
-///
-/// `entries` keeps every record in insertion order; `seen_hashes` provides
-/// O(1) duplicate detection.
 pub struct TrialLedger {
     entries: Vec<TrialEntry>,
     seen_hashes: HashSet<u64>,
@@ -43,7 +26,7 @@ impl Default for TrialLedger {
 }
 
 impl TrialLedger {
-    /// Create an empty ledger.
+
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -51,13 +34,6 @@ impl TrialLedger {
         }
     }
 
-    /// Record one trial. The configuration identity is the combination of
-    /// `code_version`, `params`, and `data_range`; `result` is stored as a
-    /// free-form summary line.
-    ///
-    /// Returns `true` if this configuration had not been seen before,
-    /// `false` if it is a duplicate (the entry is still appended, keeping
-    /// the ledger append-only; use `unique_count` for deflation inputs).
     pub fn record(
         &mut self,
         code_version: &str,
@@ -75,43 +51,23 @@ impl TrialLedger {
         is_new
     }
 
-    /// Number of distinct configurations tried (the N for deflation).
     pub fn unique_count(&self) -> usize {
         self.seen_hashes.len()
     }
 
-    /// Total number of recorded runs, duplicates included.
     pub fn total_count(&self) -> usize {
         self.entries.len()
     }
 
-    /// Read-only view of all entries in insertion order.
     pub fn entries(&self) -> &[TrialEntry] {
         &self.entries
     }
 
-    /// True if this exact configuration has already been recorded.
     pub fn contains(&self, code_version: &str, params: &str, data_range: &str) -> bool {
         self.seen_hashes
             .contains(&config_hash(code_version, params, data_range))
     }
 
-    /// Estimate the effective number of independent trials by clustering
-    /// correlated trials.
-    ///
-    /// `pnl_matrix` supplies the similarity information between trials:
-    /// - If it is square (N x N), it is interpreted as a precomputed
-    ///   correlation / similarity matrix with rows and columns indexed by
-    ///   trial.
-    /// - Otherwise each row is interpreted as one trial's PnL series and
-    ///   Pearson correlations are computed pairwise over the common
-    ///   length.
-    ///
-    /// Two trials belong to the same cluster when their correlation is at
-    /// least `correlation_threshold` (single-linkage greedy clustering).
-    /// The effective N is the number of resulting clusters: a family of
-    /// near-identical parameter tweaks counts as one trial, not many.
-    /// Returns 0 for an empty matrix.
     pub fn effective_n(&self, correlation_threshold: f64, pnl_matrix: &[Vec<f64>]) -> usize {
         let n = pnl_matrix.len();
         if n == 0 {
@@ -120,7 +76,7 @@ impl TrialLedger {
         let sim = similarity_matrix(pnl_matrix);
 
         let mut parent: Vec<usize> = (0..n).collect();
-        // Union-find with path compression.
+
         fn find(parent: &mut Vec<usize>, i: usize) -> usize {
             let mut root = i;
             while parent[root] != root {
@@ -152,11 +108,6 @@ impl TrialLedger {
             .len()
     }
 
-    /// Persist the ledger as newline-delimited records:
-    /// `config_hash<TAB>escaped_timestamp<TAB>escaped_summary`.
-    /// Strings are escaped for tab, newline, carriage return, and
-    /// backslash, so summaries containing any text round-trip exactly.
-    /// The parent directory of `path` must already exist.
     pub fn save(&self, path: &str) -> io::Result<()> {
         let file = fs::File::create(Path::new(path))?;
         let mut w = BufWriter::new(file);
@@ -172,8 +123,6 @@ impl TrialLedger {
         w.flush()
     }
 
-    /// Load a ledger previously written by [`TrialLedger::save`].
-    /// Malformed lines are rejected with `InvalidData`.
     pub fn load(path: &str) -> io::Result<Self> {
         let file = fs::File::open(Path::new(path))?;
         let reader = BufReader::new(file);
@@ -218,8 +167,6 @@ impl TrialLedger {
     }
 }
 
-/// FNV-1a 64-bit hash over `code_version | params | data_range`.
-/// Deterministic across processes and platforms (unlike DefaultHasher).
 pub fn config_hash(code_version: &str, params: &str, data_range: &str) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -238,8 +185,6 @@ pub fn config_hash(code_version: &str, params: &str, data_range: &str) -> u64 {
     h
 }
 
-/// Build the pairwise similarity matrix used by clustering: square input
-/// is taken as-is, anything else gets Pearson correlations between rows.
 fn similarity_matrix(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let n = rows.len();
     let square = rows.iter().all(|r| r.len() == n);
@@ -258,8 +203,6 @@ fn similarity_matrix(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
     sim
 }
 
-/// Pearson correlation over the overlapping prefix of two series.
-/// Returns 0.0 when fewer than 2 overlapping points or zero variance.
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
     if n < 2 {
@@ -285,7 +228,6 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
     cov / (va.sqrt() * vb.sqrt())
 }
 
-/// Escape tab, newline, carriage return, and backslash for storage.
 fn escape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -300,7 +242,6 @@ fn escape_field(s: &str) -> String {
     out
 }
 
-/// Inverse of [`escape_field`]. Returns None on a trailing lone backslash.
 fn unescape_field(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -320,8 +261,6 @@ fn unescape_field(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Current time as an ISO-8601 UTC string, computed from the Unix epoch
-/// without external date libraries.
 fn iso_timestamp_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -330,7 +269,6 @@ fn iso_timestamp_now() -> String {
     format_epoch_utc(secs)
 }
 
-/// Format seconds-since-epoch as `YYYY-MM-DDTHH:MM:SSZ`.
 pub(crate) fn format_epoch_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -346,18 +284,16 @@ pub(crate) fn format_epoch_utc(secs: i64) -> String {
     )
 }
 
-/// Days since 1970-01-01 to (year, month, day) in the proleptic Gregorian
-/// calendar (Howard Hinnant's civil-from-days algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097); // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
@@ -383,12 +319,12 @@ mod tests {
     fn duplicate_detection() {
         let mut led = TrialLedger::new();
         assert!(led.record("v1", "p=1", "2020:2021", "first"));
-        // Same triple, different summary: still a duplicate config.
+
         assert!(!led.record("v1", "p=1", "2020:2021", "rerun after tweak"));
         assert_eq!(led.unique_count(), 1);
-        // The rerun is still appended: ledger stays append-only.
+
         assert_eq!(led.total_count(), 2);
-        // Different code version counts as a different trial.
+
         assert!(led.record("v2", "p=1", "2020:2021", "after bug fix"));
         assert_eq!(led.unique_count(), 2);
         assert_eq!(led.total_count(), 3);
@@ -400,7 +336,7 @@ mod tests {
         let h1 = config_hash("v1", "p=1", "2020:2021");
         assert_eq!(h1, config_hash("v1", "p=1", "2020:2021"));
         assert_ne!(h1, config_hash("v2", "p=1", "2020:2021"));
-        // Field boundaries matter: ("ab","c") vs ("a","bc").
+
         assert_ne!(config_hash("ab", "c", ""), config_hash("a", "bc", ""));
     }
 
@@ -408,7 +344,7 @@ mod tests {
     fn iso_formatting_known_values() {
         assert_eq!(format_epoch_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_epoch_utc(1_700_000_000), "2023-11-14T22:13:20Z");
-        // Leap-day boundary: 2024-02-29T00:00:00Z.
+
         assert_eq!(format_epoch_utc(1_709_164_800), "2024-02-29T00:00:00Z");
         assert_eq!(format_epoch_utc(-1), "1969-12-31T23:59:59Z");
     }
@@ -417,18 +353,16 @@ mod tests {
     fn effective_n_clusters_correlated_pnl_rows() {
         let mut led = TrialLedger::new();
         led.record("v", "x", "r", "s");
-        // Three PnL series: row1 is a scaled copy of row0 (corr = 1.0),
-        // row2 is the inverted row0 (corr = -1.0). At threshold 0.9 only
-        // rows 0 and 1 merge => effective N is 2.
+
         let pnl = vec![
             vec![1.0, 2.0, 3.0, 4.0],
             vec![2.0, 4.0, 6.0, 8.0],
             vec![4.0, 3.0, 2.0, 1.0],
         ];
         assert_eq!(led.effective_n(0.9, &pnl), 2);
-        // Loose threshold merges everything.
+
         assert_eq!(led.effective_n(0.5, &pnl), 2);
-        // Impossible threshold keeps every trial separate.
+
         assert_eq!(led.effective_n(1.5, &pnl), 3);
         assert_eq!(led.effective_n(0.9, &[]), 0);
     }
@@ -436,15 +370,14 @@ mod tests {
     #[test]
     fn effective_n_accepts_precomputed_correlation_matrix() {
         let led = TrialLedger::new();
-        // Square input: treated as a correlation matrix directly.
+
         let corr = vec![
             vec![1.0, 0.95, 0.10],
             vec![0.95, 1.0, 0.20],
             vec![0.10, 0.20, 1.0],
         ];
         assert_eq!(led.effective_n(0.5, &corr), 2);
-        // Chained correlations collapse into a single cluster at 0.8:
-        // 0-1 and 1-2 are linked even though 0-2 is not (single linkage).
+
         let chain = vec![
             vec![1.0, 0.85, 0.70],
             vec![0.85, 1.0, 0.85],

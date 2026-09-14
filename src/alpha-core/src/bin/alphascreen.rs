@@ -1,4 +1,3 @@
-
 use alpha_core::canonical::pnl::{compute_pnl, PnlConfig};
 use alpha_core::canonical::metrics::{sharpe, max_drawdown};
 use alpha_core::evaluation::ic_ladder::ic_ladder;
@@ -31,7 +30,6 @@ fn load_csv(path: &str) -> (Vec<f64>, Vec<f64>, usize) {
         }
     }
 
-    // compute daily returns from closes
     let n = close.len();
     let mut ret = vec![0.0; n];
     for t in 1..n { ret[t] = close[t] / close[t-1] - 1.0; }
@@ -60,32 +58,24 @@ fn main() {
     let bars_per_day = ret.len() / n_days.max(1);
     println!("  bars: {}, sessions: {}, bars/day: {}", ret.len(), n_days, bars_per_day);
 
-    // harness configuration
     let cfg = HarnessConfig::default();
     let _pnl_cfg = crate::PnlConfig {
         cost_per_side: cfg.cost_per_side,
         bars_per_day,
     };
 
-    // generate multiple seed alphas with different lookbacks
     let lookbacks = vec![5, 10, 15, 20, 30, 50];
     println!("\nGenerating {} seed alphas (price deviation, varying lookback)...", lookbacks.len());
 
-    // For this demo we use a simplified version that works on returns directly
-    // In production these come from the DSL expression engine
-
-    // Compute scores using ACTUAL close prices (not reconstructed)
     let mut results = Vec::new();
     for &lb in &lookbacks {
         let score = compute_score(&close_prices, lb);
 
-        // DEBUG
         let sc_min = score.iter().cloned().fold(f64::INFINITY, f64::min);
         let sc_max = score.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let sc_nonzero = score.iter().filter(|&&x| x != 0.0).count();
         println!("  LB={}: score range [{:.6}, {:.6}], nonzero {}/{}", lb, sc_min, sc_max, sc_nonzero, score.len());
 
-        // canonical simulation (vectorized steps)
         let smoothed = {
             let lambda = 2.0 / (cfg.span as f64 + 1.0);
             let mut out = vec![score[0]];
@@ -107,7 +97,6 @@ fn main() {
             z
         };
 
-        // DEBUG
         let z_min = z.iter().cloned().fold(f64::INFINITY, f64::min);
         let z_max = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let z_nonzero = z.iter().filter(|&&x| x != 0.0).count();
@@ -125,7 +114,6 @@ fn main() {
             turn[t] = (pos[t] - pos[t-1]).abs();
         }
 
-        // DEBUG
         let pos_nonzero = pos.iter().filter(|&&p| p != 0.0).count();
         let turn_total: f64 = turn.iter().sum();
         println!("  LB={}: pos nonzero {}/{}, total turnover {:.2}", lb, pos_nonzero, pos.len(), turn_total);
@@ -133,14 +121,12 @@ fn main() {
         let pnl_cfg = PnlConfig { cost_per_side: cfg.cost_per_side, bars_per_day };
         let pnl = compute_pnl(&pos, &ret, &pnl_cfg);
 
-        // daily aggregation
         let d: Vec<f64> = pnl.net.chunks(bars_per_day)
             .map(|c| c.iter().sum::<f64>()).collect();
 
         let sr = sharpe(&d, bars_per_day);
         let mdd = max_drawdown(&d);
 
-        // IC ladder at horizons 5, 15, 30
         let ladder = ic_ladder(&score, &ret, &[5, 15, 30], cfg.z_window, bars_per_day);
         let ic_15 = ladder.iter().find(|r| r.horizon == 15)
             .map(|r| r.mean_ic).unwrap_or(0.0);
@@ -150,7 +136,6 @@ fn main() {
 
     fn to_ann(x: f64) -> f64 { x }
 
-    // print results table
     println!("\n{:<8} {:>10} {:>10} {:>12} {:>10} {:>10}",
              "Lookback", "Sharpe", "MDD", "TO(x/yr)", "IC@15", "Drag%");
     println!("{}", "-".repeat(65));
@@ -159,14 +144,12 @@ fn main() {
                  format!("LB={}", lb), sr, mdd, to, ic, drag);
     }
 
-    // find best by Sharpe
     if let Some(best) = results.iter().max_by(|a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
     }) {
         println!("\nBest: LB={} with net Sharpe {:.3}", best.0, best.1);
     }
 
-    // gate evaluation for the best
     if let Some(best) = results.iter().max_by(|a, b| {
         a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
     }) {
@@ -182,12 +165,12 @@ fn main() {
             kurtosis: 3.0,
             sample_length_bars: ret.len(),
         };
-        
+
         let mut ledger = TrialLedger::new();
         ledger.record("alphascreen", &format!("LB={}", best.0), "full_sample", "gate_evaluation");
-        
+
         let result = evaluate_gate(&input, &criteria, &ledger);
-        
+
         println!("\nGate evaluation (deflated threshold {:.3}, N_eff={}):",
                  result.deflated_threshold_used, result.effective_trials);
         for (name, pass) in &result.checks {

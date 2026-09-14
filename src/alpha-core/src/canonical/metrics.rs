@@ -1,10 +1,3 @@
-/// Batch metrics computed from canonical PnL and score series.
-
-/// Annualized Sharpe ratio from a DAILY PnL series.
-///
-/// The annualization always uses `sqrt(250)`. The trailing `_bars_per_day`
-/// parameter is accepted for interface symmetry with other metrics and is
-/// intentionally unused.
 pub fn sharpe(daily_pnl: &[f64], _bars_per_day: usize) -> f64 {
     if daily_pnl.is_empty() {
         return 0.0;
@@ -20,16 +13,11 @@ pub fn sharpe(daily_pnl: &[f64], _bars_per_day: usize) -> f64 {
     mean / std * (250.0_f64).sqrt()
 }
 
-/// Maximum drawdown from equity curve (cumulative sum of PnL).
-/// Returns the most negative equity-curve difference (e - peak) in the same
-/// units as the input PnL series (e.g. -0.25 means a quarter of initial
-/// capital lost peak-to-trough when inputs are simple-return PnLs).
 pub fn max_drawdown(pnl_series: &[f64]) -> f64 {
     let _equity = 0.0;
     let mut peak = f64::NEG_INFINITY;
     let mut mdd = 0.0;
 
-    // build equity curve
     let eq: Vec<f64> = {
         let mut cum = Vec::with_capacity(pnl_series.len());
         let mut acc = 0.0;
@@ -52,10 +40,6 @@ pub fn max_drawdown(pnl_series: &[f64]) -> f64 {
     mdd
 }
 
-/// Rank Information Coefficient at a given horizon.
-///
-/// Computes Spearman rank correlation between score at t and
-/// cumulative forward return over h bars, aggregated into blocks.
 pub fn rank_ic_block(
     score: &[f64],
     ret: &[f64],
@@ -67,7 +51,6 @@ pub fn rank_ic_block(
         return (0.0, 0);
     }
 
-    // compute forward cumulative returns
     let mut fwd = vec![0.0; n];
     for t in 0..n.saturating_sub(horizon) {
         fwd[t] = (t + 1..=t + horizon)
@@ -75,18 +58,15 @@ pub fn rank_ic_block(
             .sum::<f64>();
     }
 
-    // collect valid pairs (skip warmup NaN/zero regions)
     let pairs: Vec<(f64, f64)> = (horizon..n - horizon).map(|t| (score[t], fwd[t])).collect();
 
     if pairs.len() < block_size {
         return (0.0, 0);
     }
 
-    // rank-transform both sides (Spearman)
     let sc_ranks = rank_vec(&pairs.iter().map(|p| p.0).collect::<Vec<_>>());
     let fw_ranks = rank_vec(&pairs.iter().map(|p| p.1).collect::<Vec<_>>());
 
-    // Pearson correlation on ranks = Spearman
     let n_pairs = pairs.len() as f64;
     let mean_sc: f64 = sc_ranks.iter().sum::<f64>() / n_pairs;
     let mean_fw: f64 = fw_ranks.iter().sum::<f64>() / n_pairs;
@@ -128,15 +108,9 @@ fn rank_vec(v: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
 
-    // -------------------------------------------------------------------
-    // Contract tests derived from the frozen canon (stage-1 formulas),
-    // ledger governance DEC-001: tests encode INTENT, never behaviour.
-    // -------------------------------------------------------------------
-
     #[test]
     fn sharpe_known_answer_hand_computed() {
-        // daily pnl [3, 1, 3, 1]: sample std = sqrt(4/3), mean = 2
-        // annualised = 2 / sqrt(4/3) * sqrt(250) = sqrt(3) * sqrt(250)
+
         let d = [3.0, 1.0, 3.0, 1.0];
         let got = sharpe(&d, 100);
         let want = (3.0f64).sqrt() * (250.0f64).sqrt();
@@ -151,8 +125,7 @@ mod tests {
 
     #[test]
     fn sharpe_scale_invariant_and_sign_mirror() {
-        // Metamorphic: scaling daily pnl carries no Sharpe information;
-        // negating mirrors it. Annualisation constant cancels either way.
+
         let base: Vec<f64> = (0..300).map(|t| ((t as f64) * 0.37).sin()).collect();
         let scaled: Vec<f64> = base.iter().map(|v| v * 17.0).collect();
         let mirrored: Vec<f64> = base.iter().map(|v| -v).collect();
@@ -164,7 +137,7 @@ mod tests {
 
     #[test]
     fn max_drawdown_known_answer() {
-        // equity curve of [1, 1, -2] is [1, 2, 0]; worst peak-to-trough -2
+
         assert!((max_drawdown(&[1.0, 1.0, -2.0]) - (-2.0)).abs() < 1e-12);
     }
 
@@ -178,8 +151,7 @@ mod tests {
 
     #[test]
     fn rank_ic_perfect_monotone_relation_scores_one() {
-        // score strictly increasing and forward return strictly increasing:
-        // Spearman must be exactly 1 up to floating point.
+
         let n = 200usize;
         let score: Vec<f64> = (0..n).map(|t| t as f64).collect();
         let ret: Vec<f64> = (0..n).map(|t| 0.001 * t as f64).collect();
@@ -201,7 +173,7 @@ mod tests {
 
     #[test]
     fn rank_ic_insufficient_data_reports_zero_pairs() {
-        // shorter than horizon plus one: no information, zero pairs out
+
         let score = vec![1.0, 2.0];
         let ret = vec![0.0, 0.1];
         assert_eq!(rank_ic_block(&score, &ret, 5, 10), (0.0, 0));

@@ -1,24 +1,14 @@
-/// Grammar-guided alpha generation.
-///
-/// Generates valid expression trees directly from the DSL grammar rules.
-/// Every generated tree is valid by construction — no post-hoc validation
-/// needed, zero parse failures guaranteed.
-
 use super::expression_parser::{AstNode, BinOp, TsFunc, TsArg, UnaryOp};
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct GeneratorConfig {
-    /// Available data field names in the dataset
+
     pub fields: Vec<String>,
-    /// Maximum tree depth to prevent unbounded recursion
+
     pub max_depth: usize,
-    /// Minimum window size for time-series operators
+
     pub min_window: usize,
-    /// Maximum window size for time-series operators
+
     pub max_window: usize,
 }
 
@@ -36,10 +26,6 @@ impl Default for GeneratorConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Generator
-// ---------------------------------------------------------------------------
-
 pub struct AlphaGenerator<'a> {
     cfg: &'a GeneratorConfig,
     rng_state: u64,
@@ -50,19 +36,14 @@ impl<'a> AlphaGenerator<'a> {
         Self { cfg, rng_state: seed }
     }
 
-    /// Generate one valid expression tree.
     pub fn generate(&mut self) -> AstNode {
         self.generate_expr(0)
     }
 
-    /// Generate `n` valid expression trees.
     pub fn generate_batch(&mut self, n: usize) -> Vec<AstNode> {
         (0..n).map(|_| self.generate()).collect()
     }
 
-    // -- internal: grammar rule expansions --
-
-    /// Grammar rule: expr := term (('+'|'-') term)*
     fn generate_expr(&mut self, depth: usize) -> AstNode {
         if depth >= self.cfg.max_depth || self.flip(0.35) {
             return self.generate_term(depth + 1);
@@ -73,7 +54,6 @@ impl<'a> AlphaGenerator<'a> {
         AstNode::BinaryOp { op, left, right }
     }
 
-    /// Grammar rule: term := factor (('*'|'/') factor)*
     fn generate_term(&mut self, depth: usize) -> AstNode {
         if depth >= self.cfg.max_depth || self.flip(0.40) {
             return self.generate_factor(depth + 1);
@@ -84,7 +64,6 @@ impl<'a> AlphaGenerator<'a> {
         AstNode::BinaryOp { op, left, right }
     }
 
-    /// Grammar rule: factor := number | field | ts_func | '(' expr ')' | '-' factor
     fn generate_factor(&mut self, depth: usize) -> AstNode {
         let choice = if depth >= self.cfg.max_depth {
             self.below(2)
@@ -110,20 +89,19 @@ impl<'a> AlphaGenerator<'a> {
         }
     }
 
-    /// Generate a time-series function call node.
     fn generate_ts_func(&mut self) -> AstNode {
         let func = self.pick_ts_func();
         let range = (self.cfg.max_window - self.cfg.min_window + 1) as u64;
         let window = self.cfg.min_window + (self.next_u64() % range as u64) as usize;
 
         let args = if matches!(func, TsFunc::Corr | TsFunc::Covariance | TsFunc::RegressionResid | TsFunc::RegressionBeta) {
-            // Dual-input operators require two series arguments
+
             vec![
                 TsArg::Field(self.pick_field()),
                 TsArg::Field(self.pick_field()),
             ]
         } else {
-            // Single-input operators
+
             vec![TsArg::Field(self.pick_field())]
         };
 
@@ -134,8 +112,6 @@ impl<'a> AlphaGenerator<'a> {
 
         AstNode::TsFunc { func, args, window, param }
     }
-
-    // -- RNG helpers (xorshift64*) --
 
     fn next_u64(&mut self) -> u64 {
         let mut x = self.rng_state;
@@ -154,9 +130,7 @@ impl<'a> AlphaGenerator<'a> {
     }
 
     fn random_coefficient(&mut self) -> f64 {
-        // Always positive: negative coefficients are produced by wrapping
-        // in UnaryOp::Neg or BinOp::Sub at the grammar level, which ensures
-        // parse(ast.to_string()) == ast round-trip consistency.
+
         (self.next_u64() % 1000) as f64 / 1000.0
     }
 
@@ -235,8 +209,6 @@ mod tests {
 
     #[test]
     fn same_seed_reproduces_identical_sequence() {
-        // Reproducible research requires that a registry batch can be
-        // regenerated bit-for-bit from its recorded seed.
         let cfg = GeneratorConfig::default();
         let mut gen_a = AlphaGenerator::new(&cfg, 777);
         let mut gen_b = AlphaGenerator::new(&cfg, 777);
@@ -250,9 +222,7 @@ mod tests {
 
     #[test]
     fn serialisation_is_idempotent_through_parser() {
-        // to_string must be a fixed point of parse: whatever the generator
-        // emits, printing its re-parse prints the identical text. This keeps
-        // ledger notes and trial entries stable under re-serialisation.
+
         let cfg = GeneratorConfig::default();
         let mut gen = AlphaGenerator::new(&cfg, 2024);
 

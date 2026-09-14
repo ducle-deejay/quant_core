@@ -1,24 +1,18 @@
-/// Acceptance gate with dynamic thresholds based on trial count.
-///
-/// Integrates deflated Sharpe calculation, trial ledger tracking,
-/// and plateau detection into a unified gate evaluation.
 use super::deflated_sharpe::{deflated_sharpe_probability, deflated_threshold};
 use super::trial_ledger::TrialLedger;
 
 pub struct GateCriteria {
-    /// Minimum ICIR required regardless of trial count
+
     pub min_icir: f64,
-    /// Maximum cost drag as percentage of gross
+
     pub max_cost_drag_pct: f64,
-    /// Minimum percentage of positive walk-forward blocks
+
     pub min_positive_blocks_pct: f64,
-    /// Turnover ceiling for the strategy slot
+
     pub slot_ceiling_turnover: f64,
-    /// Variance of Sharpe ratios across all trials (for deflation)
+
     pub sharpe_variance_across_trials: f64,
-    /// Maximum tolerated probability that the observed best-of-N Sharpe is
-    /// spurious once return-distribution shape and sample length are
-    /// accounted for (PSR-style correction; 0.05 = 95% significance).
+
     pub max_spurious_probability: f64,
 }
 
@@ -35,7 +29,6 @@ impl Default for GateCriteria {
     }
 }
 
-/// Input data needed for gate evaluation
 pub struct GateInput {
     pub net_sharpe_walkforward: f64,
     pub icir: f64,
@@ -48,7 +41,6 @@ pub struct GateInput {
     pub sample_length_bars: usize,
 }
 
-/// Result of gate evaluation with per-check details
 pub struct GateResult {
     pub passed: bool,
     pub checks: Vec<(String, bool)>,
@@ -56,25 +48,17 @@ pub struct GateResult {
     pub effective_trials: usize,
 }
 
-/// Evaluate gate with dynamic threshold from trial ledger + deflated Sharpe.
-///
-/// The minimum net Sharpe is NOT fixed — it rises with effective trial count
-/// via deflated Sharpe logic, so that after many trials only genuinely strong
-/// alphas pass.
 pub fn evaluate_gate(
     input: &GateInput,
     criteria: &GateCriteria,
     ledger: &TrialLedger,
 ) -> GateResult {
-    // Compute effective trials from ledger
     let n_eff = ledger.unique_count().max(1);
 
-    // Dynamic threshold from deflated Sharpe
     let deflated_min_sharpe = deflated_threshold(n_eff, criteria.sharpe_variance_across_trials);
 
     let mut checks = Vec::new();
 
-    // Primary statistic: deflated net Sharpe
     let sharpe_pass = input.net_sharpe_walkforward >= deflated_min_sharpe;
     checks.push((
         format!(
@@ -84,7 +68,6 @@ pub fn evaluate_gate(
         sharpe_pass,
     ));
 
-    // Secondary constraints (fixed engineering limits)
     checks.push((
         format!("ICIR {:.3} >= {}", input.icir, criteria.min_icir),
         input.icir >= criteria.min_icir,
@@ -115,12 +98,6 @@ pub fn evaluate_gate(
         input.positive_blocks_pct >= criteria.min_positive_blocks_pct as f64,
     ));
 
-    // Third deflation layer (closes OBS-004 / plan T013): the PSR-style
-    // probability that the observed Sharpe is spurious once the return
-    // distribution's skewness, kurtosis and sample length are accounted
-    // for. The expected-max threshold above answers "how high could luck
-    // climb"; this check answers "how likely is THIS result itself fake".
-    // Observed Sharpe enters in unit cross-trial variance per the API.
     let unit_sharpe = if criteria.sharpe_variance_across_trials > 0.0 {
         input.net_sharpe_walkforward / criteria.sharpe_variance_across_trials.sqrt()
     } else {
@@ -159,7 +136,6 @@ mod tests {
     use super::*;
     use crate::evaluation::trial_ledger::TrialLedger;
 
-    /// Candidate comfortably clearing every fixed engineering limit.
     fn base_input() -> GateInput {
         GateInput {
             net_sharpe_walkforward: 3.0,
@@ -168,8 +144,7 @@ mod tests {
             cost_drag_pct: 10.0,
             turnover_annualized: 1000.0,
             positive_blocks_pct: 80.0,
-            // Normal-distribution moments over a long sample: the shape
-            // correction below sees nothing suspicious here.
+
             skewness: 0.0,
             kurtosis: 3.0,
             sample_length_bars: 50_000,
@@ -186,8 +161,7 @@ mod tests {
 
     #[test]
     fn single_trial_ledger_leaves_only_fixed_limits() {
-        // N_eff floors at 1 and deflated_threshold returns 0.0 there:
-        // the gate degenerates to the fixed engineering limits alone.
+
         let result = evaluate_gate(&base_input(), &GateCriteria::default(), &ledger_with(1));
         assert_eq!(result.effective_trials, 1);
         assert_eq!(result.deflated_threshold_used, 0.0);
@@ -209,8 +183,7 @@ mod tests {
 
     #[test]
     fn marginal_alpha_survives_fresh_registry_dies_in_crowded_one() {
-        // The canon purpose of deflation: after many trials only genuinely
-        // strong alphas pass. Same candidate, only the registry size differs.
+
         let criteria = GateCriteria::default();
         let mut input = base_input();
         input.net_sharpe_walkforward = 1.0;
@@ -247,8 +220,7 @@ mod tests {
 
     #[test]
     fn sharpe_comparison_uses_geq_semantics_at_boundary() {
-        // At N_eff = 1 the deflated threshold is 0.0; a Sharpe of exactly
-        // epsilon above zero satisfies the documented >= comparison.
+
         let criteria = GateCriteria::default();
         let mut input = base_input();
         input.net_sharpe_walkforward = f64::EPSILON;
@@ -257,10 +229,6 @@ mod tests {
         assert!(result.checks[0].1, "boundary Sharpe must pass the >= check");
         assert_eq!(result.deflated_threshold_used, 0.0);
     }
-
-    // -------------------------------------------------------------------
-    // Distribution-shape correction (PSR-style), closing OBS-004
-    // -------------------------------------------------------------------
 
     #[test]
     fn clean_candidate_passes_all_seven_checks() {
@@ -271,8 +239,7 @@ mod tests {
 
     #[test]
     fn negative_skew_and_excess_kurtosis_raise_spurious_probability() {
-        // For a positive observed Sharpe the estimator's variance grows with
-        // negative skew and with kurtosis above normal, so confidence drops.
+
         let criteria = GateCriteria::default();
         let mut clean = base_input();
         clean.net_sharpe_walkforward = 2.0;
@@ -293,13 +260,10 @@ mod tests {
 
     #[test]
     fn shape_poisoned_candidate_clears_trial_threshold_but_fails_distribution_check() {
-        // The scenario that justifies the whole layer: enough Sharpe to
-        // clear the expected-max threshold at a tiny registry, yet return
-        // shapes so hostile (negative skew, kurtosis 40, short sample) that
-        // the result is not distinguishable from luck.
+
         let criteria = GateCriteria::default();
         let mut input = base_input();
-        input.net_sharpe_walkforward = 2.0; // unit-scale 4.0, far above sr0 ~ 0.52
+        input.net_sharpe_walkforward = 2.0;
         input.skewness = -3.0;
         input.kurtosis = 40.0;
         input.sample_length_bars = 30;

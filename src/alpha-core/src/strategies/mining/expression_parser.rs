@@ -1,81 +1,29 @@
-//! Recursive descent parser for the alpha expression DSL.
-//!
-//! Grammar (whitespace between tokens is insignificant):
-//!
-//! ```text
-//! expr      := term (('+' | '-') term)*
-//! term      := factor (('*' | '/') factor)*
-//! factor    := number | field | func_call | '(' expr ')' | '-' factor
-//! field     := identifier                (close, open, volume, bs_l5_close, ret, ...)
-//! func_call := ts_op '(' series_arg (',' series_arg)* ',' window ')'
-//!            | cs_op '(' series_arg (',' series_arg)* ')'
-//!            | param_op '(' series_arg ',' number (',' window)? ')'
-//! ts_op     := ts_mean | ts_std | ts_delta | ts_delay | ts_sum
-//!            | ts_rank | ts_corr | ts_zscore | ewma
-//!            | ts_min | ts_max | ts_median | ts_quantile | ts_skewness
-//!            | ts_kurtosis | ts_ir | ts_product | ts_argmax | ts_argmin
-//!            | ts_max_diff | ts_min_diff | ts_scale | ts_quantile_pos
-//!            | ts_decay_linear | ts_regression_resid | ts_regression_beta
-//!            | ts_covariance | ts_returns | ts_sign_delta | ts_trend_slope
-//!            | ts_backfill | ts_count_valid
-//! cs_op     := cs_rank | cs_zscore | cs_scale | cs_demean | abs | log
-//!            | sign | elem_max | elem_min | if_else
-//! window    := strictly positive integer literal
-//! ```
-//!
-//! Conventions:
-//! * Windowed time-series functions take one or more series arguments
-//!   followed by a strictly positive integer window (or EWMA span) as their
-//!   final argument, e.g. `ts_corr(close, volume, 20)`.
-//! * `ts_quantile` and `cs_scale` carry an extra numeric constant parameter
-//!   placed after the series arguments -- the quantile level in `[0, 1]`
-//!   and the absolute-sum target respectively, e.g.
-//!   `ts_quantile(close, 0.75, 20)` or `cs_scale(close, 1.0)`.
-//! * Cross-sectional / element-wise functions take only series arguments
-//!   and no window, e.g. `cs_rank(close)` or `if_else(cond, a, b)`.
-//! * A bare identifier passed to a time-series function is captured as
-//!   [`TsArg::Field`]; any other expression becomes [`TsArg::Expr`].
-//! * Arithmetic is left associative; unary minus binds tighter than `* /`,
-//!   which bind tighter than `+ -`. Unary minus never folds into its
-//!   operand: `-3.5` parses to `Neg(Number(3.5))`.
-//!
-//! The parser is std-only. Recursion depth follows AST nesting depth, which
-//! in practice is bounded by expression size.
-
 use std::fmt;
 
-// ---------------------------------------------------------------------------
-// AST
-// ---------------------------------------------------------------------------
-
-/// Abstract syntax node of the alpha DSL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AstNode {
-    /// Literal floating point constant.
+
     Number(f64),
-    /// Raw data field reference (close, open, volume, bs_l5_close, ret, ...).
+
     Field(String),
-    /// Element-wise binary arithmetic.
+
     BinaryOp {
         op: BinOp,
         left: Box<AstNode>,
         right: Box<AstNode>,
     },
-    /// Unary operator (currently negation only).
+
     UnaryOp { op: UnaryOp, operand: Box<AstNode> },
-    /// Rolling / time-series function application over `window` bars.
+
     TsFunc {
         func: TsFunc,
         args: Vec<TsArg>,
         window: usize,
-        /// Auxiliary scalar constant for functions with a trailing numeric
-        /// parameter (`ts_quantile` level, `cs_scale` target). `0.0` for
-        /// every other function.
+
         param: f64,
     },
 }
 
-/// Binary arithmetic operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -85,7 +33,7 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    /// Infix symbol used by the DSL.
+
     pub fn symbol(self) -> char {
         match self {
             BinOp::Add => '+',
@@ -96,21 +44,14 @@ impl BinOp {
     }
 }
 
-/// Unary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Neg,
 }
 
-/// Functions supported by the DSL: rolling time-series operators (which end
-/// in a window argument), plus the cross-sectional / element-wise family
-/// (which take no window).
-///
-/// `Ewma` covers the `ewma` production of the grammar; for it, `window`
-/// carries the smoothing span rather than a trailing lookback length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsFunc {
-    // ----- original rolling operators -------------------------------------
+
     Mean,
     Std,
     Delta,
@@ -120,85 +61,76 @@ pub enum TsFunc {
     Corr,
     Zscore,
     Ewma,
-    // ----- rolling statistics ----------------------------------------------
-    /// Rolling minimum (`ts_min`).
+
     Min,
-    /// Rolling maximum (`ts_max`).
+
     Max,
-    /// Rolling median (`ts_median`).
+
     Median,
-    /// Rolling q-th quantile; scalar param = level in [0, 1].
+
     Quantile,
-    /// Rolling standardised third moment (`ts_skewness`).
+
     Skewness,
-    /// Rolling excess kurtosis (`ts_kurtosis`).
+
     Kurtosis,
-    /// Rolling information ratio mean/std (`ts_ir`).
+
     Ir,
-    /// Rolling product with zero handling (`ts_product`).
+
     Product,
-    // ----- positioning and distance ----------------------------------------
-    /// Bars since window maximum (`ts_argmax`).
+
     ArgMax,
-    /// Bars since window minimum (`ts_argmin`).
+
     ArgMin,
-    /// Current minus window maximum (`ts_max_diff`).
+
     MaxDiff,
-    /// Current minus window minimum (`ts_min_diff`).
+
     MinDiff,
-    /// Min-max normalisation to [0, 1] (`ts_scale`).
+
     Scale,
-    /// Fraction of window strictly below current value
-    /// (`ts_quantile_pos`).
+
     QuantilePos,
-    // ----- decay ------------------------------------------------------------
-    /// Linearly decaying weighted average (`ts_decay_linear`).
+
     DecayLinear,
-    // ----- regression and relationship --------------------------------------
-    /// OLS residual at current bar (`ts_regression_resid`, 2 series args).
+
     RegressionResid,
-    /// OLS slope coefficient (`ts_regression_beta`, 2 series args).
+
     RegressionBeta,
-    /// Rolling sample covariance ddof=1 (`ts_covariance`, 2 series args).
+
     Covariance,
-    // ----- momentum and returns ---------------------------------------------
-    /// Percentage change vs d bars ago (`ts_returns`).
+
     Returns,
-    /// Sign of net change over d bars (`ts_sign_delta`).
+
     SignDelta,
-    /// OLS slope against bar index (`ts_trend_slope`).
+
     TrendSlope,
-    // ----- utility ------------------------------------------------------------
-    /// Fill NaN from up to d bars back (`ts_backfill`).
+
     Backfill,
-    /// Non-NaN count in trailing window (`ts_count_valid`).
+
     CountValid,
-    // ----- cross-sectional / element-wise (no window) -----------------------
-    /// Cross-sectional rank normalised to (0, 1] with averaged ties.
+
     CsRank,
-    /// Cross-sectional population z-score over valid entries.
+
     CsZscore,
-    /// Rescale so absolute values sum to the scalar param target.
+
     CsScale,
-    /// Subtract cross-sectional mean of valid entries.
+
     CsDemean,
-    /// Element-wise absolute value (`abs`).
+
     Abs,
-    /// Element-wise natural log; NaN for x <= 0 (`log`).
+
     Log,
-    /// Element-wise sign in {-1, 0, +1} (`sign`).
+
     Sign,
-    /// Element-wise maximum, NaN-propagating (`elem_max`, 2 args).
+
     ElemMax,
-    /// Element-wise minimum, NaN-propagating (`elem_min`, 2 args).
+
     ElemMin,
-    /// Element-wise conditional selection (`if_else`, 3 args).
+
     IfElse,
 }
 
 impl TsFunc {
-    /// Number of series arguments required (window and scalar parameter
-    /// arguments excluded).
+
     pub fn arity(self) -> usize {
         match self {
             TsFunc::Corr
@@ -212,7 +144,6 @@ impl TsFunc {
         }
     }
 
-    /// DSL name of the function.
     pub fn name(self) -> &'static str {
         match self {
             TsFunc::Mean => "ts_mean",
@@ -308,8 +239,6 @@ impl TsFunc {
         }
     }
 
-    /// True when the DSL form ends with a strictly positive integer window
-    /// argument. False for the cross-sectional / element-wise family.
     pub fn windowed(self) -> bool {
         matches!(
             self,
@@ -348,8 +277,6 @@ impl TsFunc {
         )
     }
 
-    /// Description of the mandatory numeric constant parameter for functions
-    /// that carry one (placed after the series arguments); `None` otherwise.
     pub fn scalar_param(self) -> Option<&'static str> {
         match self {
             TsFunc::Quantile => Some("a quantile level between 0.0 and 1.0"),
@@ -359,55 +286,48 @@ impl TsFunc {
     }
 }
 
-/// Argument of a time-series function.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TsArg {
-    /// Bare data field reference.
+
     Field(String),
-    /// Arbitrary nested expression.
+
     Expr(Box<AstNode>),
 }
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-/// Parse failure with source position (byte offset) where available.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
-    /// Input ended while an expression was still expected.
+
     UnexpectedEof,
-    /// A character outside the DSL alphabet.
+
     UnknownSymbol { ch: char, pos: usize },
-    /// A numeric literal that failed to parse (e.g. `1e`).
+
     MalformedNumber { text: String, pos: usize },
-    /// A token that cannot continue the current production.
+
     UnexpectedToken {
         found: String,
         pos: usize,
         expected: &'static str,
     },
-    /// Identifier followed by `(` that is not a known time-series function.
+
     UnknownFunction { name: String, pos: usize },
-    /// Function call without any arguments.
+
     MissingArguments { func: &'static str, pos: usize },
-    /// Wrong number of series arguments for the function.
+
     WrongArity {
         func: &'static str,
         expected: &'static str,
         got: usize,
         pos: usize,
     },
-    /// Final argument is not a strictly positive integer window.
+
     InvalidWindow { func: &'static str, pos: usize },
-    /// A function's numeric parameter (quantile level, scale target) is
-    /// missing, not a literal number, or outside its valid range.
+
     InvalidParam {
         func: &'static str,
         expected: &'static str,
         pos: usize,
     },
-    /// Complete expression parsed but tokens remain.
+
     TrailingInput { pos: usize },
 }
 
@@ -472,10 +392,6 @@ impl fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
-
-// ---------------------------------------------------------------------------
-// Lexer
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 enum TokKind {
@@ -635,10 +551,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     Ok(toks)
 }
 
-// ---------------------------------------------------------------------------
-// Parser
-// ---------------------------------------------------------------------------
-
 struct Parser {
     toks: Vec<Token>,
     idx: usize,
@@ -676,7 +588,6 @@ impl Parser {
         }
     }
 
-    // expr := term (('+' | '-') term)*
     fn parse_expr(&mut self) -> Result<AstNode, ParseError> {
         let mut lhs = self.parse_term()?;
         loop {
@@ -696,7 +607,6 @@ impl Parser {
         Ok(lhs)
     }
 
-    // term := factor (('*' | '/') factor)*
     fn parse_term(&mut self) -> Result<AstNode, ParseError> {
         let mut lhs = self.parse_factor()?;
         loop {
@@ -716,7 +626,6 @@ impl Parser {
         Ok(lhs)
     }
 
-    // factor := number | field | func_call | '(' expr ')' | '-' factor
     fn parse_factor(&mut self) -> Result<AstNode, ParseError> {
         let tok = match self.peek() {
             Some(t) => t.clone(),
@@ -748,7 +657,7 @@ impl Parser {
                 if looks_like_call {
                     match TsFunc::from_name(&name) {
                         Some(func) => {
-                            self.idx += 2; // consume identifier and '('
+                            self.idx += 2;
                             self.parse_call(func, tok.pos)
                         }
                         None => Err(ParseError::UnknownFunction { name, pos: tok.pos }),
@@ -766,11 +675,6 @@ impl Parser {
         }
     }
 
-    // func_call body. Windowed functions take series args followed by a
-    // strictly positive integer window; functions with a scalar parameter
-    // take that constant after the series args (before the window);
-    // cross-sectional / element-wise functions take series args only.
-    // The opening '(' has already been consumed by the caller.
     fn parse_call(&mut self, func: TsFunc, call_pos: usize) -> Result<AstNode, ParseError> {
         if matches!(self.peek_kind(), Some(TokKind::RParen)) {
             return Err(ParseError::MissingArguments {
@@ -793,7 +697,6 @@ impl Parser {
             }
         }
 
-        // Windowed functions end in the window literal.
         let mut window = 0usize;
         if func.windowed() {
             let (last_expr, last_pos) = parsed.pop().expect("at least one parsed argument");
@@ -815,8 +718,6 @@ impl Parser {
             };
         }
 
-        // Functions with a scalar parameter consume it next (it is the last
-        // remaining argument at this point).
         let mut param = 0.0f64;
         if let Some(expected) = func.scalar_param() {
             let (param_expr, param_pos) = match parsed.pop() {
@@ -884,10 +785,6 @@ impl Parser {
     }
 }
 
-/// Parse an alpha expression into an [`AstNode`].
-///
-/// The whole input must form exactly one expression; leftover tokens yield
-/// [`ParseError::TrailingInput`].
 pub fn parse(input: &str) -> Result<AstNode, ParseError> {
     let toks = tokenize(input)?;
     if toks.is_empty() {
@@ -903,12 +800,6 @@ pub fn parse(input: &str) -> Result<AstNode, ParseError> {
     Ok(ast)
 }
 
-// ---------------------------------------------------------------------------
-// AST utilities
-// ---------------------------------------------------------------------------
-
-/// Collect all data field names referenced by `ast`, deduplicated, in
-/// first-appearance (pre-order) order.
 pub fn collect_fields(ast: &AstNode) -> Vec<String> {
     let mut out = Vec::new();
     collect_into(ast, &mut out);
@@ -951,7 +842,6 @@ const TAG_TS: u8 = 5;
 const ARG_FIELD: u8 = 6;
 const ARG_EXPR: u8 = 7;
 
-/// Deterministic FNV-1a 64-bit hasher used by [`hash_ast`].
 struct Fnv {
     state: u64,
 }
@@ -987,8 +877,7 @@ fn hash_into(ast: &AstNode, h: &mut Fnv) {
     match ast {
         AstNode::Number(v) => {
             h.byte(TAG_NUMBER);
-            // Canonicalize negative zero so 0.0 and -0.0 land in the same
-            // hash bucket (they compare equal via PartialEq).
+
             let canonical = if *v == 0.0 { 0.0f64 } else { *v };
             h.u64(canonical.to_bits());
         }
@@ -1017,8 +906,7 @@ fn hash_into(ast: &AstNode, h: &mut Fnv) {
             h.byte(TAG_TS);
             h.byte(*func as u8);
             h.usz(*window);
-            // Canonicalize negative zero so +/-0.0 params hash identically
-            // (they compare equal via PartialEq).
+
             let canonical_param = if *param == 0.0 { 0.0f64 } else { *param };
             h.u64(canonical_param.to_bits());
             h.usz(args.len());
@@ -1039,19 +927,11 @@ fn hash_into(ast: &AstNode, h: &mut Fnv) {
     }
 }
 
-/// Deterministic structural hash of an AST, used to bucket candidate
-/// duplicates during DAG construction. Identical trees always produce equal
-/// hashes; different trees usually differ. Callers must confirm equality
-/// separately (see `dag_builder`).
 pub fn hash_ast(ast: &AstNode) -> u64 {
     let mut h = Fnv::new();
     hash_into(ast, &mut h);
     h.state
 }
-
-// ---------------------------------------------------------------------------
-// Display (canonical printer)
-// ---------------------------------------------------------------------------
 
 const PREC_ADD: u8 = 2;
 const PREC_MUL: u8 = 3;
@@ -1069,10 +949,6 @@ fn prec_of(node: &AstNode) -> u8 {
     }
 }
 
-/// Render `ast` back to DSL source. For any AST produced by [`parse`],
-/// `parse(&ast.to_string())` returns a structurally identical tree.
-/// (Hand-built trees that wrap a bare field in `TsArg::Expr` print as a bare
-/// field and therefore re-parse to `TsArg::Field`.)
 impl fmt::Display for AstNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut out = String::new();
@@ -1112,8 +988,7 @@ fn emit(node: &AstNode, out: &mut String) {
                     TsArg::Expr(inner) => wrap_emit(inner, PREC_UNARY, false, out),
                 }
             }
-            // The scalar parameter sits between the series args and the
-            // window so its printed form re-parses to the same position.
+
             if func.scalar_param().is_some() {
                 out.push(',');
                 out.push_str(&format!("{:?}", param));
@@ -1129,8 +1004,7 @@ fn emit(node: &AstNode, out: &mut String) {
 
 fn wrap_emit(child: &AstNode, parent_prec: u8, right_slot: bool, out: &mut String) {
     let child_prec = prec_of(child);
-    // Right operands need parentheses on ties so left associativity survives
-    // printing: `a-(b+c)` must not become `a-b+c`.
+
     let needs_parens = if right_slot {
         child_prec <= parent_prec
     } else {
@@ -1144,10 +1018,6 @@ fn wrap_emit(child: &AstNode, parent_prec: u8, right_slot: bool, out: &mut Strin
         emit(child, out);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1302,7 +1172,7 @@ mod tests {
 
     #[test]
     fn new_windowed_operators_parse_with_arity_and_param() {
-        // Single-series windowed operators: (source, variant, series field).
+
         for (src, func, field) in [
             ("ts_min(close, 5)", TsFunc::Min, "close"),
             ("ts_max(close, 5)", TsFunc::Max, "close"),
@@ -1332,7 +1202,6 @@ mod tests {
             );
         }
 
-        // Two-series regression family.
         for (src, func) in [
             ("ts_regression_resid(y, x, 30)", TsFunc::RegressionResid),
             ("ts_regression_beta(y, x, 30)", TsFunc::RegressionBeta),
@@ -1346,15 +1215,12 @@ mod tests {
             );
         }
 
-        // ts_quantile carries a scalar level parameter between args and
-        // window; ts_scale's target lives on cs_scale.
         assert_eq!(
             parse("ts_quantile(close, 0.75, 20)"),
             Ok(ts_param(TsFunc::Quantile, vec![fld_arg("close")], 0.75, 20))
         );
     }
 
-    /// Extract the trailing window integer used in `new_windowed_operators_parse_with_arity_and_param`.
     fn window_of(src: &str) -> usize {
         let inside = &src[..src.len() - 1];
         inside
@@ -1408,7 +1274,7 @@ mod tests {
                 0
             ))
         );
-        // Cross-sectional functions nest like any other expression.
+
         assert!(parse("cs_rank(ts_mean(close, 5))").is_ok());
     }
 
@@ -1458,7 +1324,7 @@ mod tests {
             TsFunc::ElemMin,
             TsFunc::IfElse,
         ];
-        // 9 original + 33 new operators.
+
         assert_eq!(all.len(), 42);
         for func in all {
             assert_eq!(
@@ -1468,15 +1334,15 @@ mod tests {
                 func.name()
             );
         }
-        // Only these two carry scalar parameters.
+
         assert!(TsFunc::Quantile.scalar_param().is_some());
         assert!(TsFunc::CsScale.scalar_param().is_some());
         assert_eq!(all.iter().filter(|f| f.scalar_param().is_some()).count(), 2);
-        // Window classification spot checks.
+
         assert!(TsFunc::Ewma.windowed());
         assert!(!TsFunc::CsRank.windowed());
         assert!(!TsFunc::IfElse.windowed());
-        // Arity table spot checks.
+
         assert_eq!(TsFunc::Corr.arity(), 2);
         assert_eq!(TsFunc::Covariance.arity(), 2);
         assert_eq!(TsFunc::ElemMin.arity(), 2);
@@ -1531,7 +1397,7 @@ mod tests {
             parse("ts_corr(close, open, volume, 5)"),
             Err(ParseError::WrongArity { .. })
         ));
-        // Input ends while ',' or ')' is still expected.
+
         assert!(matches!(
             parse("ts_mean(close, 5"),
             Err(ParseError::UnexpectedEof)
@@ -1559,15 +1425,13 @@ mod tests {
             Err(ParseError::MalformedNumber { .. })
         ));
 
-        // Display renders human-readable messages.
         let msg = parse("foo(x, 5)").unwrap_err().to_string();
         assert!(msg.contains("unknown function 'foo'"));
     }
 
     #[test]
     fn new_operator_error_cases() {
-        // Windowed operators reject a missing or non-integer window: the
-        // only series argument is consumed by the window slot.
+
         assert!(matches!(
             parse("ts_min(close)"),
             Err(ParseError::InvalidWindow { .. })
@@ -1576,7 +1440,7 @@ mod tests {
             parse("ts_min(close, 0)"),
             Err(ParseError::InvalidWindow { .. })
         ));
-        // Cross-sectional operators reject a trailing window argument.
+
         assert!(matches!(
             parse("cs_rank(close, 5)"),
             Err(ParseError::WrongArity { .. })
@@ -1589,7 +1453,7 @@ mod tests {
             parse("elem_max(a, b, c)"),
             Err(ParseError::WrongArity { .. })
         ));
-        // Scalar parameters must be numeric literals in range.
+
         assert!(matches!(
             parse("ts_quantile(close, ret, 10)"),
             Err(ParseError::InvalidParam { .. })
@@ -1602,8 +1466,7 @@ mod tests {
             parse("ts_quantile(close, -0.1, 10)"),
             Err(ParseError::InvalidParam { .. })
         ));
-        // A windowed call that is one argument short leaves nothing for the
-        // scalar parameter slot.
+
         assert!(matches!(
             parse("ts_quantile(close, 10)"),
             Err(ParseError::InvalidParam { .. })
@@ -1617,7 +1480,6 @@ mod tests {
             Err(ParseError::InvalidParam { .. })
         ));
 
-        // Display renders human-readable messages.
         let msg = parse("ts_quantile(close, 2.0, 5)").unwrap_err().to_string();
         assert!(msg.contains("quantile level"));
     }
@@ -1641,7 +1503,7 @@ mod tests {
             "ts_rank(close/open, 12)",
             "ts_zscore(ts_mean(close, 8), 480)",
             "-ts_delta(close, 1)*volume+ts_rank(ret, 20)",
-            // New operator families.
+
             "ts_min(ts_max(close, 5), 10)",
             "ts_argmax(close/volume, 30)-ts_argmin(close, 30)",
             "ts_quantile(close, 0.25, 20)",
@@ -1691,7 +1553,7 @@ mod tests {
         );
         assert_ne!(hash_ast(&a), hash_ast(&parse("ts_mean(open, 20)").unwrap()));
         assert_ne!(hash_ast(&a), hash_ast(&parse("ts_sum(close, 20)").unwrap()));
-        // The scalar parameter is part of operator identity.
+
         assert_ne!(
             hash_ast(&parse("ts_quantile(close, 0.25, 10)").unwrap()),
             hash_ast(&parse("ts_quantile(close, 0.75, 10)").unwrap())
@@ -1701,10 +1563,8 @@ mod tests {
             hash_ast(&parse("open+close").unwrap())
         );
 
-        // 0.0 and -0.0 compare equal, so they must hash identically.
         assert_eq!(hash_ast(&num(0.0)), hash_ast(&AstNode::Number(-0.0)));
 
-        // Hash is stable across repeated calls and independent of context.
         assert_eq!(hash_ast(&a), hash_ast(&a.clone()));
     }
 }

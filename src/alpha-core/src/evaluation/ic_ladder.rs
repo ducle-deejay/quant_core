@@ -1,4 +1,3 @@
-/// IC ladder: Rank IC computed at multiple horizons with block t-statistic.
 #[derive(Debug, Clone)]
 pub struct IcResult {
     pub horizon: usize,
@@ -6,8 +5,6 @@ pub struct IcResult {
     pub t_stat: f64,
 }
 
-/// Rank transform: position + 1 after a stable sort (no tie averaging,
-/// matching the rank convention in canonical/metrics).
 fn rank_transform(v: &[f64]) -> Vec<f64> {
     let mut indexed: Vec<usize> = (0..v.len()).collect();
     indexed.sort_by(|&a, &b| v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal));
@@ -18,8 +15,6 @@ fn rank_transform(v: &[f64]) -> Vec<f64> {
     ranks
 }
 
-/// A series with no dispersion carries no correlation information; ranking
-/// it would invent arbitrary order out of sort stability.
 fn has_dispersion(v: &[f64]) -> bool {
     let first = match v.first() {
         Some(&x) => x,
@@ -28,14 +23,6 @@ fn has_dispersion(v: &[f64]) -> bool {
     v.iter().any(|&x| (x - first).abs() > 1e-12)
 }
 
-/// Compute rolling Rank IC at a given horizon, grouped into daily blocks.
-///
-/// The statistic is Spearman rank correlation - Pearson applied to the
-/// rank-transformed score and forward return within each block - honouring
-/// the canon preference for outlier robustness. Blocks without dispersion
-/// on either side are skipped.
-///
-/// Returns (mean of block means, t-statistic of block means, block count).
 pub fn rank_ic_block(
     score: &[f64],
     ret: &[f64],
@@ -48,7 +35,6 @@ pub fn rank_ic_block(
         return (0.0, 0.0, 0);
     }
 
-    // forward cumulative return
     let mut fwd = vec![f64::NAN; n];
     for t in 0..n.saturating_sub(horizon) {
         fwd[t] = (1..=horizon)
@@ -57,9 +43,8 @@ pub fn rank_ic_block(
             .sum::<f64>();
     }
 
-    // rolling correlation in blocks
     let mut block_ics = Vec::new();
-    let mut start = window; // skip warmup
+    let mut start = window;
     while start < n - horizon {
         let end = (start + bars_per_day).min(n - horizon);
         if end <= start {
@@ -79,7 +64,6 @@ pub fn rank_ic_block(
             let score_ranks = rank_transform(&pairs.iter().map(|p| p.0).collect::<Vec<_>>());
             let return_ranks = rank_transform(&pairs.iter().map(|p| p.1).collect::<Vec<_>>());
 
-            // Pearson on ranks = Spearman
             let np = pairs.len() as f64;
             let ms: f64 = score_ranks.iter().sum::<f64>() / np;
             let mf: f64 = return_ranks.iter().sum::<f64>() / np;
@@ -119,7 +103,6 @@ pub fn rank_ic_block(
     (mean, t_stat, block_ics.len())
 }
 
-/// Compute the full IC ladder across multiple horizons.
 pub fn ic_ladder(
     score: &[f64],
     ret: &[f64],
@@ -144,17 +127,9 @@ pub fn ic_ladder(
 mod tests {
     use super::*;
 
-    // Contract tests derived from the frozen canon concept note on IC
-    // metrics and the horizon ladder: correlation of score at t with the
-    // cumulative return from t+1 through t+h, aggregated into daily
-    // blocks and reported as mean plus block t-statistic. Ledger rule M4.
-
     const WINDOW: usize = 20;
     const BARS_PER_DAY: usize = 10;
 
-    /// Deterministic lead-lag world: return at t+1 equals the score at t
-    /// times a small gain plus a slow sinusoid that breaks exact block
-    // equality so block ICs vary and the t-statistic stays informative.
     fn lead_lag_world(n: usize) -> (Vec<f64>, Vec<f64>) {
         let score: Vec<f64> = (0..n)
             .map(|t| ((t as f64) * 0.21).sin() + 0.3 * ((t as f64) * 0.53).cos())
@@ -207,7 +182,7 @@ mod tests {
 
     #[test]
     fn short_series_yields_zero_blocks_and_neutral_output() {
-        // shorter than warmup plus horizon: no information, neutral result
+
         let score = vec![1.0, -1.0, 1.0];
         let ret = vec![0.0, 0.1, -0.1];
         let (mean_ic, t_stat, blocks) = rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);
@@ -216,7 +191,7 @@ mod tests {
 
     #[test]
     fn constant_score_within_every_block_is_reported_neutral() {
-        // zero dispersion in score: correlation undefined, blocks skipped
+
         let score = vec![2.5; 400];
         let (_, ret) = lead_lag_world(400);
         let (mean_ic, _, blocks) = rank_ic_block(&score, &ret, 1, WINDOW, BARS_PER_DAY);

@@ -1,5 +1,3 @@
-//! Python bindings for Components 3-5: portfolio construction and sizing.
-
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -37,10 +35,6 @@ fn ensure_equal_series_lengths(name: &str, series: &[Vec<f64>], expected: usize)
     Ok(())
 }
 
-/// Regress a candidate series on a pool of series and return its residual.
-///
-/// Raises `ValueError` when the candidate or a pool member is empty, or when
-/// any pool member has a different number of bars than the candidate.
 #[pyfunction]
 fn orthogonalize_py(py: Python, candidate: Vec<f64>, pool: Vec<Vec<f64>>) -> PyResult<Vec<f64>> {
     ensure_non_empty("candidate", &candidate)?;
@@ -59,10 +53,6 @@ fn orthogonalize_py(py: Python, candidate: Vec<f64>, pool: Vec<Vec<f64>>) -> PyR
     Ok(py.detach(|| orthogonalize(&candidate, &pool)))
 }
 
-/// Compute a weighted composite from multiple score series.
-///
-/// All score series must be non-empty and have equal bar counts, and there
-/// must be one weight per series.
 #[pyfunction]
 fn composite_score_py(py: Python, scores: Vec<Vec<f64>>, weights: Vec<f64>) -> PyResult<Vec<f64>> {
     ensure_matrix_non_empty("scores", &scores)?;
@@ -82,7 +72,6 @@ fn composite_score_py(py: Python, scores: Vec<Vec<f64>>, weights: Vec<f64>) -> P
     Ok(py.detach(|| composite_score(&scores, &weights)))
 }
 
-/// Combine score series using the default inverse-volatility weighting rule.
 #[pyfunction]
 fn inverse_vol_combine_py(py: Python, scores: Vec<Vec<f64>>) -> PyResult<Vec<f64>> {
     ensure_matrix_non_empty("scores", &scores)?;
@@ -94,9 +83,6 @@ fn inverse_vol_combine_py(py: Python, scores: Vec<Vec<f64>>) -> PyResult<Vec<f64
     Ok(py.detach(|| InverseVol::default().combine(&scores)))
 }
 
-/// Size scores toward a target volatility, optionally applying a volatility floor.
-///
-/// `floor=None` selects plain targeting; `Some(floor)` selects floored targeting.
 #[pyfunction]
 fn vol_target_py(
     py: Python,
@@ -128,10 +114,6 @@ fn vol_target_py(
     }
 }
 
-/// Return default-ladder exposure multipliers for drawdown fractions.
-///
-/// The input is interpreted as drawdown from a fixed initial equity of 1.0;
-/// each value is converted to equity and evaluated against the default ladder.
 #[pyfunction]
 fn drawdown_multiplier_py(py: Python, drawdowns: Vec<f64>) -> PyResult<Vec<f64>> {
     ensure_non_empty("drawdowns", &drawdowns)?;
@@ -155,7 +137,6 @@ fn drawdown_multiplier_py(py: Python, drawdowns: Vec<f64>) -> PyResult<Vec<f64>>
     }))
 }
 
-/// Register Components 3-5 bindings onto the extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(orthogonalize_py, m)?)?;
     m.add_function(wrap_pyfunction!(composite_score_py, m)?)?;

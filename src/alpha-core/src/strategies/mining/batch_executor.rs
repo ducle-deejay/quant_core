@@ -1,30 +1,3 @@
-//! Vectorised execution of a [`ComputationDag`] over full time-series columns.
-//!
-//! [`execute_batch`] evaluates every unique DAG node once, in topological
-//! order, over entire arrays: each rolling operator is a single-pass,
-//! whole-series transform with O(1) amortised sliding accumulators (the
-//! rolling rank keeps a sorted window and advances it by binary search +
-//! insert). Results are memoised per node id so shared sub-expressions are
-//! computed exactly once per batch, and the returned matrix holds one score
-//! series (row) per requested alpha root.
-//!
-//! # Contracts
-//!
-//! * Columns are aligned: index `t` refers to the same bar in every series.
-//! * Binary/unary operators produce `max(len)` outputs; positions beyond the
-//!   shorter operand are NaN. Division follows IEEE-754 (`x/0 = +/-inf`,
-//!   `0/0 = NaN`).
-//! * Rolling functions output one value per input bar. The first
-//!   `window - 1` bars are NaN warmup. A window containing any NaN yields NaN
-//!   (except delay/delta, which simply shift their inputs).
-//! * Degenerate statistics are NaN: sample std with `window < 2`, z-scores
-//!   against zero-variance windows, correlations with an undefined
-//!   denominator.
-//! * Missing data fields evaluate to all-NaN columns of the longest column's
-//!   length (length 0 when `data` is empty); numeric constants broadcast to
-//!   that same default length.
-//! * `alpha_roots` entries must be valid DAG node ids (panics otherwise).
-
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -32,11 +5,6 @@ use super::dag_builder::ComputationDag;
 use super::expression_parser::{AstNode, BinOp, TsFunc, UnaryOp};
 use super::operators;
 
-/// Execute all DAG nodes on data columns, producing scores for each alpha.
-///
-/// `data` maps field names to their time-series arrays.
-/// `alpha_roots` are the DAG node IDs corresponding to each alpha's final
-/// output. Returns a matrix where row i = score series for alpha i.
 pub fn execute_batch(
     dag: &ComputationDag,
     data: &HashMap<String, Vec<f64>>,
@@ -125,8 +93,6 @@ fn arith_fn(op: BinOp) -> fn(f64, f64) -> f64 {
     }
 }
 
-/// Element-wise binary op over possibly unequal-length operands; positions
-/// missing one operand become NaN.
 fn zip_align(a: &[f64], b: &[f64], f: fn(f64, f64) -> f64) -> Vec<f64> {
     let n = a.len().max(b.len());
     (0..n)
@@ -137,14 +103,9 @@ fn zip_align(a: &[f64], b: &[f64], f: fn(f64, f64) -> f64) -> Vec<f64> {
         .collect()
 }
 
-/// Dispatch a parsed time-series / cross-sectional function over evaluated
-/// dependency columns. `window` is meaningful only for windowed functions;
-/// `param` only for those with a scalar parameter (quantile level, scale
-/// target). Cross-sectional and element-wise operators receive columns
-/// padded to a common length with NaN.
 fn apply_ts(func: TsFunc, inputs: &[&[f64]], window: usize, param: f64) -> Vec<f64> {
     match func {
-        // ----- original rolling operators ---------------------------------
+
         TsFunc::Delay => rolling_delay(inputs[0], window),
         TsFunc::Delta => rolling_delta(inputs[0], window),
         TsFunc::Sum => rolling_sum(inputs[0], window),
@@ -160,7 +121,7 @@ fn apply_ts(func: TsFunc, inputs: &[&[f64]], window: usize, param: f64) -> Vec<f
             rolling_corr(inputs[0], inputs[1], window)
         }
         TsFunc::Ewma => ewma_span(inputs[0], window),
-        // ----- rolling statistics ------------------------------------------
+
         TsFunc::Min => operators::ts_min(inputs[0], window),
         TsFunc::Max => operators::ts_max(inputs[0], window),
         TsFunc::Median => operators::ts_median(inputs[0], window),
@@ -169,16 +130,16 @@ fn apply_ts(func: TsFunc, inputs: &[&[f64]], window: usize, param: f64) -> Vec<f
         TsFunc::Kurtosis => operators::ts_kurtosis(inputs[0], window),
         TsFunc::Ir => operators::ts_ir(inputs[0], window),
         TsFunc::Product => operators::ts_product(inputs[0], window),
-        // ----- positioning and distance --------------------------------------
+
         TsFunc::ArgMax => operators::ts_argmax(inputs[0], window),
         TsFunc::ArgMin => operators::ts_argmin(inputs[0], window),
         TsFunc::MaxDiff => operators::ts_max_diff(inputs[0], window),
         TsFunc::MinDiff => operators::ts_min_diff(inputs[0], window),
         TsFunc::Scale => operators::ts_scale(inputs[0], window),
         TsFunc::QuantilePos => operators::ts_quantile_pos(inputs[0], window),
-        // ----- decay -----------------------------------------------------------
+
         TsFunc::DecayLinear => operators::ts_decay_linear(inputs[0], window),
-        // ----- regression and relationship -------------------------------------
+
         TsFunc::RegressionResid | TsFunc::RegressionBeta | TsFunc::Covariance => {
             assert!(
                 inputs.len() >= 2,
@@ -195,14 +156,14 @@ fn apply_ts(func: TsFunc, inputs: &[&[f64]], window: usize, param: f64) -> Vec<f
                 _ => operators::ts_covariance(inputs[0], inputs[1], window),
             }
         }
-        // ----- momentum and returns ---------------------------------------------
+
         TsFunc::Returns => operators::ts_returns(inputs[0], window),
         TsFunc::SignDelta => operators::ts_sign_delta(inputs[0], window),
         TsFunc::TrendSlope => operators::ts_trend_slope(inputs[0], window),
-        // ----- utility ------------------------------------------------------------
+
         TsFunc::Backfill => operators::ts_backfill(inputs[0], window),
         TsFunc::CountValid => operators::ts_count_valid(inputs[0], window),
-        // ----- cross-sectional / element-wise --------------------------------
+
         TsFunc::CsRank
         | TsFunc::CsZscore
         | TsFunc::CsDemean
@@ -251,17 +212,13 @@ fn apply_ts(func: TsFunc, inputs: &[&[f64]], window: usize, param: f64) -> Vec<f
                 "if_else node requires exactly 3 input dependencies"
             );
             let cols = aligned_columns(inputs);
-            // DSL conditions are numeric columns: finite and non-zero means
-            // take the 'then' branch; NaN conditions count as false.
+
             let cond: Vec<bool> = cols[0].iter().map(|&v| v.is_finite() && v != 0.0).collect();
             operators::if_else(&cond, &cols[1], &cols[2])
         }
     }
 }
 
-/// Own copies of the dependency columns padded to a common length so the
-/// whole-array cross-sectional operators see aligned inputs (shorter columns
-/// are NaN-filled, matching the binary-op alignment contract).
 fn aligned_columns(inputs: &[&[f64]]) -> Vec<Vec<f64>> {
     let n = inputs.iter().map(|c| c.len()).max().unwrap_or(0);
     inputs
@@ -274,17 +231,6 @@ fn aligned_columns(inputs: &[&[f64]]) -> Vec<Vec<f64>> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Rolling primitives
-//
-// All functions return one output bar per input bar; the first `window - 1`
-// bars are warmup NaN. A `window` of 0 (unreachable through the parser)
-// defensively yields all NaN.
-// ---------------------------------------------------------------------------
-
-/// Sliding-window moment accumulator: tracks count, sum and sum of squares of
-/// the values currently inside the window plus its NaN count, in O(1)
-/// amortised per bar. Powers ts_sum / ts_mean / ts_std / ts_zscore.
 struct MomentWindow {
     buf: VecDeque<f64>,
     cap: usize,
@@ -328,7 +274,6 @@ impl MomentWindow {
         }
     }
 
-    /// True once the window is full and free of NaN values.
     fn valid(&self) -> bool {
         self.nan_count == 0 && self.buf.len() == self.cap
     }
@@ -337,9 +282,6 @@ impl MomentWindow {
         self.sum / self.cap as f64
     }
 
-    /// Sample variance (ddof = 1). Returns None when undefined (window < 2,
-    /// NaN contamination) or numerically negative; exact zero is preserved so
-    /// flat windows yield a defined 0.0 std.
     fn sample_variance(&self) -> Option<f64> {
         if self.cap < 2 || !self.valid() {
             return None;
@@ -354,7 +296,6 @@ impl MomentWindow {
     }
 }
 
-/// Rolling sum over trailing windows.
 pub fn rolling_sum(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window > x.len() {
@@ -370,7 +311,6 @@ pub fn rolling_sum(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Rolling arithmetic mean over trailing windows.
 pub fn rolling_mean(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window > x.len() {
@@ -386,8 +326,6 @@ pub fn rolling_mean(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Rolling sample standard deviation (ddof = 1) over trailing windows.
-/// Windows shorter than 2 bars yield NaN; a constant window yields 0.0.
 pub fn rolling_std(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window > x.len() {
@@ -405,8 +343,6 @@ pub fn rolling_std(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Rolling z-score `(x[t] - mean_w(x)) / std_w(x)` with sample std.
-/// Zero-variance windows yield NaN.
 pub fn rolling_zscore(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window > x.len() {
@@ -426,18 +362,16 @@ pub fn rolling_zscore(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Shift a series forward by `window` bars: `out[t] = x[t - window]`.
 pub fn rolling_delay(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window >= x.len() {
         return out;
     }
-    // Single memcpy for the shifted region.
+
     out[window..].copy_from_slice(&x[..x.len() - window]);
     out
 }
 
-/// Difference against `window` bars ago: `out[t] = x[t] - x[t - window]`.
 pub fn rolling_delta(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window >= x.len() {
@@ -449,8 +383,6 @@ pub fn rolling_delta(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Sliding Pearson correlation between two series over trailing windows.
-/// Windows where either series has zero variance or contains NaN yield NaN.
 pub fn rolling_corr(x: &[f64], y: &[f64], window: usize) -> Vec<f64> {
     let n = x.len().min(y.len());
     let mut out = vec![f64::NAN; n.max(x.len()).max(y.len())];
@@ -501,11 +433,6 @@ pub fn rolling_corr(x: &[f64], y: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Percentile rank of `x[t]` within its trailing `window` bars, ties averaged,
-/// scaled to (0, 1]. Windows containing NaN yield NaN.
-///
-/// Maintains a chronology deque (for eviction) alongside a sorted copy of the
-/// live window; each bar costs one binary search plus one insert/remove.
 pub fn rolling_rank(x: &[f64], window: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if window == 0 || window > x.len() {
@@ -520,7 +447,7 @@ pub fn rolling_rank(x: &[f64], window: usize) -> Vec<f64> {
             if old.is_nan() {
                 nan_count -= 1;
             } else {
-                // `old` is bit-identical to a stored value (+/-0 interchangeable).
+
                 let pos = sorted.partition_point(|&s| s < old);
                 sorted.remove(pos);
             }
@@ -536,7 +463,7 @@ pub fn rolling_rank(x: &[f64], window: usize) -> Vec<f64> {
             let lt = sorted.partition_point(|&s| s < v) as f64;
             let le = sorted.partition_point(|&s| s <= v) as f64;
             let eq = le - lt;
-            // Average rank among ties (1-based), normalised by window length.
+
             let avg_rank = lt + (eq - 1.0) / 2.0 + 1.0;
             out[t] = avg_rank / window as f64;
         }
@@ -544,9 +471,6 @@ pub fn rolling_rank(x: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Exponentially weighted moving average with smoothing span (`window`),
-/// alpha = 2 / (span + 1). Seeded at the first finite observation; NaN bars
-/// carry the previous smoothed value forward unchanged (and emit it).
 pub fn ewma_span(x: &[f64], span: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     if span == 0 || x.is_empty() {
@@ -568,16 +492,10 @@ pub fn ewma_span(x: &[f64], span: usize) -> Vec<f64> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::super::expression_parser::TsArg;
     use super::*;
-
-    // ----- deterministic pseudo-random series ------------------------------
 
     fn gen_series(seed: u64, n: usize) -> Vec<f64> {
         let mut state = seed
@@ -593,8 +511,6 @@ mod tests {
             .collect()
     }
 
-    // ----- naive reference implementations (test oracle) -------------------
-
     fn na_shift(x: &[f64], w: usize) -> Vec<f64> {
         (0..x.len())
             .map(|t| if t >= w { x[t - w] } else { f64::NAN })
@@ -607,7 +523,6 @@ mod tests {
             .collect()
     }
 
-    /// Apply `f` to every full, NaN-free trailing window of size `w`.
     fn na_stat(x: &[f64], w: usize, f: impl Fn(&[f64]) -> f64) -> Vec<f64> {
         (0..x.len())
             .map(|t| {
@@ -728,7 +643,6 @@ mod tests {
             .collect()
     }
 
-    /// Independent recursive reference evaluator over raw ASTs.
     fn naive_eval(ast: &AstNode, data: &HashMap<String, Vec<f64>>) -> Vec<f64> {
         let default_len = data.values().map(|v| v.len()).max().unwrap_or(0);
         match ast {
@@ -774,8 +688,7 @@ mod tests {
                     TsFunc::Rank => na_rank(&series[0], *window),
                     TsFunc::Corr => na_corr(&series[0], &series[1], *window),
                     TsFunc::Ewma => na_ewma(&series[0], *window),
-                    // Newer operators are covered by the dedicated wiring
-                    // test against the operator library directly.
+
                     _ => vec![f64::NAN; default_len],
                 }
             }
@@ -811,8 +724,6 @@ mod tests {
         }
     }
 
-    // ----- rolling primitive accuracy --------------------------------------
-
     #[test]
     fn rolling_delay_and_delta_match_naive() {
         let x = gen_series(7, 40);
@@ -830,7 +741,7 @@ mod tests {
             assert_series_eq(&rolling_mean(&x, w), &na_mean(&x, w), "mean");
             assert_series_eq(&rolling_std(&x, w), &na_std(&x, w), "std");
         }
-        // Constant window: std is a defined 0.0, not NaN.
+
         let flat = vec![3.25f64; 10];
         let got = rolling_std(&flat, 5);
         assert!(got.iter().skip(4).all(|v| *v == 0.0));
@@ -855,7 +766,7 @@ mod tests {
         for w in [2usize, 5, 13, 40, 41] {
             assert_series_eq(&rolling_corr(&x, &y, w), &na_corr(&x, &y, w), "corr");
         }
-        // Zero variance on one side -> NaN.
+
         let flat = vec![5.0f64; 20];
         let got = rolling_corr(&flat, &y[..20], 5);
         assert!(got.iter().skip(4).all(|v| v.is_nan()));
@@ -863,12 +774,12 @@ mod tests {
 
     #[test]
     fn rolling_rank_matches_naive_including_ties_and_nan_windows() {
-        // Quantised values force frequent ties.
+
         let x: Vec<f64> = gen_series(31, 60).iter().map(|v| v.trunc()).collect();
         for w in [3usize, 8, 20] {
             assert_series_eq(&rolling_rank(&x, w), &na_rank(&x, w), "rank");
         }
-        // A NaN contaminates every window covering it, and only those.
+
         let mut xn = x.clone();
         xn[10] = f64::NAN;
         let got = rolling_rank(&xn, 5);
@@ -881,7 +792,7 @@ mod tests {
 
     #[test]
     fn ewma_matches_hand_computed_values_and_carries_across_gaps() {
-        let out = ewma_span(&[1.0, 2.0, 3.0, 4.0], 3); // alpha = 0.5
+        let out = ewma_span(&[1.0, 2.0, 3.0, 4.0], 3);
         assert_series_eq(&out, &[1.0, 1.5, 2.25, 3.125], "ewma");
 
         let gapped = ewma_span(&[1.0, f64::NAN, 2.0], 3);
@@ -893,8 +804,6 @@ mod tests {
             .iter()
             .all(|v| v.is_nan()));
     }
-
-    // ----- batch execution --------------------------------------------------
 
     #[test]
     fn binary_ops_division_and_negation_follow_ieee754() {
@@ -1019,7 +928,7 @@ mod tests {
             .map(|e| super::super::expression_parser::parse(e).expect(e))
             .collect();
         let dag = super::super::dag_builder::build_dag(&asts);
-        // Both alphas share the ts_mean node but keep distinct roots.
+
         assert_ne!(dag.roots[0], dag.roots[1]);
 
         let rows = execute_batch(&dag, &data, &dag.roots);
@@ -1039,9 +948,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// End-to-end wiring check for the expanded operator vocabulary: parsed
-    /// expressions executed through the DAG must equal direct calls into the
-    /// operator library on the same columns.
     #[test]
     #[allow(clippy::type_complexity)]
     fn new_operator_expressions_match_direct_operator_calls() {
@@ -1049,7 +955,7 @@ mod tests {
         let close: Vec<f64> = gen_series(91, n).iter().map(|v| v + 100.0).collect();
         let volume: Vec<f64> = gen_series(92, n).iter().map(|v| v.abs() + 1.0).collect();
         let ret = gen_series(93, n);
-        // A gap exercises NaN handling through the whole pipeline.
+
         let mut gapped = close.clone();
         gapped[7] = f64::NAN;
         let mut data = HashMap::new();
@@ -1058,8 +964,6 @@ mod tests {
         data.insert("volume".to_string(), volume.clone());
         data.insert("ret".to_string(), ret.clone());
 
-        // The boxed closures borrow the local columns, so the element type
-        // stays inline rather than in a `'static` type alias.
         let cases: Vec<(&str, Box<dyn Fn(usize) -> f64>)> = vec![
             (
                 "ts_min(clean, 6)",

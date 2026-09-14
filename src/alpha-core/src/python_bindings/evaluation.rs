@@ -1,5 +1,3 @@
-//! Python bindings for Component 2 evaluation metrics.
-
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -10,7 +8,6 @@ use crate::evaluation::ic_ladder::ic_ladder;
 use crate::evaluation::screening::{rank_survivors, screen_candidates, ScreeningThresholds};
 use crate::evaluation::walk_forward::walk_forward;
 
-/// One horizon's rank Information Coefficient result.
 #[pyclass]
 pub struct PyIcResult {
     #[pyo3(get)]
@@ -21,7 +18,6 @@ pub struct PyIcResult {
     pub t_stat: f64,
 }
 
-/// Walk-forward statistics for one block.
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBlockStats {
@@ -31,7 +27,6 @@ pub struct PyBlockStats {
     pub total_pnl: f64,
 }
 
-/// Aggregate walk-forward validation result.
 #[pyclass]
 pub struct PyWalkForwardResult {
     #[pyo3(get)]
@@ -42,7 +37,6 @@ pub struct PyWalkForwardResult {
     pub blocks: Vec<PyBlockStats>,
 }
 
-/// Screening funnel counts and the indices passing both gates.
 #[pyclass]
 pub struct PyScreeningOutcome {
     #[pyo3(get)]
@@ -57,7 +51,6 @@ pub struct PyScreeningOutcome {
     pub survivor_indices: Vec<usize>,
 }
 
-/// Compute rank Information Coefficient at each requested horizon.
 #[pyfunction]
 fn ic_ladder_py(
     py: Python<'_>,
@@ -88,7 +81,6 @@ fn ic_ladder_py(
         .collect())
 }
 
-/// Validate daily PnL in consecutive blocks and report stability statistics.
 #[pyfunction]
 fn walk_forward_py(
     py: Python<'_>,
@@ -112,7 +104,6 @@ fn walk_forward_py(
     })
 }
 
-/// Apply Information Coefficient and cost-drag screening gates.
 #[pyfunction]
 #[pyo3(signature = (ic_values, cost_drag_pcts, min_abs_ic=0.02, max_cost_drag_pct=40.0))]
 fn screen_candidates_py(
@@ -143,7 +134,6 @@ fn screen_candidates_py(
     })
 }
 
-/// Rank survivor indices by descending ranking score.
 #[pyfunction]
 fn rank_survivors_py(
     py: Python<'_>,
@@ -158,13 +148,11 @@ fn rank_survivors_py(
     Ok(py.detach(|| rank_survivors(&survivor_indices, &ranking_scores)))
 }
 
-/// Compute the expected maximum Sharpe threshold under trial selection.
 #[pyfunction]
 fn deflated_threshold_py(n_trials: usize, variance_of_sharpes: f64) -> f64 {
     deflated_threshold(n_trials, variance_of_sharpes)
 }
 
-/// Compute the probability that an observed Sharpe is spurious.
 #[pyfunction]
 fn deflated_sharpe_probability_py(
     observed_sharpe: f64,
@@ -176,7 +164,6 @@ fn deflated_sharpe_probability_py(
     deflated_sharpe_probability(observed_sharpe, n_trials, skewness, kurtosis, sample_length)
 }
 
-/// Register Component 2 evaluation bindings onto the extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIcResult>()?;
     m.add_class::<PyBlockStats>()?;

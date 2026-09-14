@@ -1,9 +1,3 @@
-/// Composite score computation: weighted sum of standardized scores.
-
-/// Compute composite score from multiple alpha scores with weights.
-///
-/// All scores must already be standardized (z-scored) by the canonical
-/// mapping in Component 1. Weights come from Stage 3 residual dossiers.
 pub fn composite_score(scores: &[Vec<f64>], weights: &[f64]) -> Vec<f64> {
     let n_bars = scores.first().map(|s| s.len()).unwrap_or(0);
     let mut composite = vec![0.0; n_bars];

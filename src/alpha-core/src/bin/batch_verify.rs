@@ -1,15 +1,3 @@
-//! Batch verification: run alpha expressions through the full pipeline
-//! on real VN30F1M data in a single execution, measuring throughput at every
-//! stage and reporting the screening survival funnel.
-//!
-//! Uses grammar-guided generation (AlphaGenerator) instead of manual seed
-//! expressions + GA breeding, eliminating parse failures entirely.
-//!
-//! Output is organised as four tables: pipeline stages, screening funnel,
-//! surviving candidates, and a system summary. The candidate table lists
-//! only alphas that passed BOTH screening gates (the ranking pool is the
-//! survivor set, not all candidates).
-
 use std::time::{Duration, Instant};
 
 use alpha_core::canonical::mapping::{canonical_map, CanonicalResult};
@@ -21,18 +9,13 @@ use alpha_core::strategies::mining::alpha_generator::{AlphaGenerator, GeneratorC
 use alpha_core::strategies::mining::batch_executor::execute_batch;
 use alpha_core::strategies::mining::dag_builder::build_dag;
 
-/// Information Coefficient gate applied during screening: |IC| must exceed it.
 const IC_GATE: f64 = 0.02;
-/// Maximum tolerated cost drag (percent of gross PnL) during screening.
-const COST_DRAG_GATE_PCT: f64 = 40.0;
-/// How many surviving candidates to list in the ranking table.
-const TOP_N: usize = 5;
-/// Character budget for the expression column of the candidate table.
-const EXPR_COLUMN_WIDTH: usize = 64;
 
-// ---------------------------------------------------------------------------
-// Data loading
-// ---------------------------------------------------------------------------
+const COST_DRAG_GATE_PCT: f64 = 40.0;
+
+const TOP_N: usize = 5;
+
+const EXPR_COLUMN_WIDTH: usize = 64;
 
 fn load_csv(path: &str) -> (std::collections::HashMap<String, Vec<f64>>, usize) {
     let content = std::fs::read_to_string(path).expect("Cannot open data file");
@@ -65,10 +48,6 @@ fn load_csv(path: &str) -> (std::collections::HashMap<String, Vec<f64>>, usize) 
     (data, dates.len().max(1))
 }
 
-// ---------------------------------------------------------------------------
-// Simple IC computation for screening
-// ---------------------------------------------------------------------------
-
 fn compute_ic_simple(score: &[f64], ret: &[f64]) -> f64 {
     let n = score.len().min(ret.len());
     let pairs: Vec<(f64, f64)> = (0..n.saturating_sub(1))
@@ -86,20 +65,12 @@ fn compute_ic_simple(score: &[f64], ret: &[f64]) -> f64 {
     cov / (ss * sr)
 }
 
-// ---------------------------------------------------------------------------
-// Per-candidate evaluation metrics collected after the pipeline runs
-// ---------------------------------------------------------------------------
-
 struct CandidateMetrics {
     sharpe: f64,
     max_drawdown: f64,
     ic: f64,
     cost_drag_pct: f64,
 }
-
-// ---------------------------------------------------------------------------
-// Table rendering (grid style; per-column alignment)
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 enum Align { Left, Right }
@@ -165,10 +136,6 @@ fn print_table(title: &str, headers: &[&str], aligns: &[Align], rows: &[Vec<Stri
     println!("{}", render_table(headers, aligns, rows));
 }
 
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
-
 fn fmt_duration(d: Duration) -> String {
     let ns = d.as_nanos();
     if ns < 1_000 {
@@ -210,10 +177,6 @@ fn step_log(step: usize, msg: &str) {
     println!("[Step {}/7] {} ... done", step, msg);
 }
 
-// ---------------------------------------------------------------------------
-// MAIN
-// ---------------------------------------------------------------------------
-
 fn main() {
     let total_start = Instant::now();
 
@@ -221,18 +184,12 @@ fn main() {
     println!("  Batch Verification - QuantCore Alpha Pipeline");
     println!("==================================================");
 
-    // -------------------------------------------------------
-    // Step 1: Load real data
-    // -------------------------------------------------------
     let t0 = Instant::now();
     let (data, n_sessions) = load_csv("data/VN30F1M.csv");
     let bars = data.get("close").map(|c| c.len()).unwrap_or(0);
     let t_load = t0.elapsed();
     step_log(1, "load real market data");
 
-    // -------------------------------------------------------
-    // Step 2: Generate expressions via grammar-guided generation
-    // -------------------------------------------------------
     let gen_cfg = GeneratorConfig {
         fields: vec![
             "close".into(), "volume".into(),
@@ -247,9 +204,6 @@ fn main() {
     let t_generate = t0.elapsed();
     step_log(2, "grammar-guided expression generation");
 
-    // -------------------------------------------------------
-    // Step 3: Build shared computation DAG
-    // -------------------------------------------------------
     let t0 = Instant::now();
     let dag = build_dag(&asts);
     let t_dag = t0.elapsed();
@@ -262,9 +216,6 @@ fn main() {
     } else { 0.0 };
     step_log(3, "shared computation DAG construction");
 
-    // -------------------------------------------------------
-    // Step 4: Execute batch -> score matrix
-    // -------------------------------------------------------
     let t0 = Instant::now();
     let score_matrix = execute_batch(&dag, &data, &dag.roots);
     let t_exec = t0.elapsed();
@@ -273,9 +224,6 @@ fn main() {
     } else { 0.0 };
     step_log(4, "batch score execution");
 
-    // -------------------------------------------------------
-    // Step 5: Canonical mapping (vectorised per alpha)
-    // -------------------------------------------------------
     let cfg = HarnessConfig::default();
     let ret = data.get("ret").cloned().unwrap_or_default();
     let bars_per_day = bars / n_sessions.max(1);
@@ -288,9 +236,6 @@ fn main() {
     let t_canonical = t0.elapsed();
     step_log(5, "canonical mapping");
 
-    // -------------------------------------------------------
-    // Step 6: PnL computation for all alphas
-    // -------------------------------------------------------
     let t0 = Instant::now();
     let pnl_results: Vec<PnlResult> = canonical_results.iter()
         .map(|cr| compute_pnl(&cr.position, &ret, &pnl_cfg))
@@ -298,9 +243,6 @@ fn main() {
     let t_pnl = t0.elapsed();
     step_log(6, "PnL computation");
 
-    // -------------------------------------------------------
-    // Step 7: Metrics for all alphas
-    // -------------------------------------------------------
     let t0 = Instant::now();
     let metrics: Vec<CandidateMetrics> = pnl_results.iter()
         .zip(score_matrix.iter())
@@ -320,11 +262,6 @@ fn main() {
 
     let total_elapsed = total_start.elapsed();
 
-    // -------------------------------------------------------
-    // Screening funnel + survivor set (both gates combined)
-    // -------------------------------------------------------
-    // Gate logic lives in evaluation::screening (pure, unit-tested) so the
-    // report layer cannot diverge from the gate definitions.
     let thresholds = ScreeningThresholds {
         min_abs_ic: IC_GATE,
         max_cost_drag_pct: COST_DRAG_GATE_PCT,
@@ -336,9 +273,6 @@ fn main() {
     let ranked_survivors = rank_survivors(&survivors, &sharpe_values);
     let total_candidates = funnel.total_candidates;
 
-    // -------------------------------------------------------
-    // Table 1: Pipeline stages
-    // -------------------------------------------------------
     let stage_headers = ["Step", "Stage", "Time", "Throughput"];
     let stage_aligns = [
         Align::Right, Align::Left, Align::Right, Align::Right,
@@ -398,9 +332,6 @@ fn main() {
     ];
     print_table("PIPELINE STAGES", &stage_headers, &stage_aligns, &stage_rows);
 
-    // -------------------------------------------------------
-    // Table 2: Screening funnel
-    // -------------------------------------------------------
     let funnel_headers = ["Gate", "Threshold", "Passed", "Total", "Pass Rate"];
     let funnel_aligns = [
         Align::Left, Align::Left, Align::Right, Align::Right, Align::Right,
@@ -430,9 +361,6 @@ fn main() {
     ];
     print_table("SCREENING FUNNEL", &funnel_headers, &funnel_aligns, &funnel_rows);
 
-    // -------------------------------------------------------
-    // Table 3: Top surviving candidates (survivors only, ranked by Sharpe)
-    // -------------------------------------------------------
     if ranked_survivors.is_empty() {
         println!("\n=== TOP SURVIVING CANDIDATES ===");
         println!("(no candidate passed both screening gates)");
@@ -463,9 +391,6 @@ fn main() {
         );
     }
 
-    // -------------------------------------------------------
-    // Table 4: System summary
-    // -------------------------------------------------------
     let best_surviving_sharpe = ranked_survivors.first()
         .map(|&idx| format!("{:.2}", metrics[idx].sharpe))
         .unwrap_or_else(|| "(none survived)".into());
@@ -495,7 +420,6 @@ fn main() {
     ];
     print_table("SYSTEM SUMMARY", &sys_headers, &sys_aligns, &sys_rows);
 
-    // helper functions
     fn count_ops(ast: &alpha_core::strategies::mining::expression_parser::AstNode) -> usize {
         use alpha_core::strategies::mining::expression_parser::{AstNode, TsArg};
         match ast {

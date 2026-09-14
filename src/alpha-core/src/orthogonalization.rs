@@ -1,20 +1,9 @@
-/// Orthogonalization: regress candidate PnL against pool PnLs,
-/// keep only the residual (pure incremental value).
-
-/// Contract tests derived from the frozen canon intent for Component 3:
-/// a candidate earns admission only through its RESIDUAL value after the
-/// pool's contribution is regressed out. Ledger rule M4.
-///
-/// The mathematical heart is the normal-equations guarantee: the residual
-/// must be orthogonal to every pool column.
-
 #[cfg(test)]
 mod orthogonal_contract_tests {
     use super::orthogonalize;
 
     #[test]
     fn residual_is_orthogonal_to_every_pool_column() {
-        // THE admission invariant of Component 3.
         let n = 300usize;
         let candidate: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.31).sin() * 2.0).collect();
         let pool: Vec<Vec<f64>> = vec![
@@ -37,7 +26,7 @@ mod orthogonal_contract_tests {
 
     #[test]
     fn candidate_inside_pool_span_is_fully_absorbed() {
-        // y = x1 + 2*x2 carries nothing beyond the pool: residual ~ 0
+
         let n = 200usize;
         let x1: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.23).sin()).collect();
         let x2: Vec<f64> = (0..n).map(|t| ((t as f64) * 0.11).cos()).collect();
@@ -51,8 +40,7 @@ mod orthogonal_contract_tests {
 
     #[test]
     fn exactly_anticorrelated_candidate_passes_through() {
-        // candidate = -regressor pointwise: perfect fit with beta -1,
-        // residual must vanish
+
         let n = 200usize;
         let regressor: Vec<f64> = (0..n)
             .map(|t| if t % 2 == 0 { 1.0 } else { -1.5 })
@@ -83,14 +71,6 @@ mod orthogonal_contract_tests {
     }
 }
 
-/// Simple OLS regression of candidate on pool members.
-/// Returns residual series after regressing out all pool columns.
-///
-/// Regression and residual calculation use the common prefix of the
-/// candidate and pool columns. Any candidate tail beyond that prefix is kept
-/// unchanged, since no pool observations exist to explain it.
-///
-/// For large pools, use ridge regularization or PCA reduction.
 pub fn orthogonalize(candidate: &[f64], pool: &[Vec<f64>]) -> Vec<f64> {
     let k = pool.len();
     let n = candidate.len().min(pool.iter().map(Vec::len).min().unwrap_or(0));
@@ -98,11 +78,6 @@ pub fn orthogonalize(candidate: &[f64], pool: &[Vec<f64>]) -> Vec<f64> {
         return candidate.to_vec();
     }
 
-    // Build design matrix X: each column is a pool member's PnL
-    // Solve X * beta ≈ candidate via normal equations
-    // X'X * beta = X'y
-
-    // Compute X'X (k x k)
     let mut xtx = vec![vec![0.0; k]; k];
     for i in 0..k {
         for j in 0..k {
@@ -110,16 +85,13 @@ pub fn orthogonalize(candidate: &[f64], pool: &[Vec<f64>]) -> Vec<f64> {
         }
     }
 
-    // Compute X'y (k,)
     let mut xty = vec![0.0; k];
     for i in 0..k {
         xty[i] = (0..n).map(|t| pool[i][t] * candidate[t]).sum();
     }
 
-    // Solve X'X beta = X'y using Gaussian elimination with partial pivoting
     let beta = solve_linear(&xtx, &xty);
 
-    // Residual = y - X * beta
     let mut residual = candidate.to_vec();
     for t in 0..n {
         let predicted: f64 = (0..k).map(|i| beta[i] * pool[i][t]).sum();
@@ -134,7 +106,6 @@ fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
         return vec![];
     }
 
-    // Gaussian elimination with partial pivoting
     let mut m = vec![vec![0.0; n + 1]; n];
     for i in 0..n {
         for j in 0..n {
@@ -144,7 +115,7 @@ fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
     }
 
     for col in 0..n {
-        // pivot
+
         let mut max_row = col;
         for row in col + 1..n {
             if m[row][col].abs() > m[max_row][col].abs() {
@@ -154,7 +125,7 @@ fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
         m.swap(col, max_row);
         if m[col][col].abs() < 1e-12 {
             continue;
-        } // singular column, skip
+        }
 
         for row in col + 1..n {
             let factor = m[row][col] / m[col][col];
@@ -164,7 +135,6 @@ fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
         }
     }
 
-    // back substitution
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         let mut sum = m[i][n];
@@ -184,9 +154,9 @@ mod tests {
 
     #[test]
     fn test_orthogonalize_removes_explained_part() {
-        // candidate = 2 * pool_0 + noise
+
         let pool_0 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let pool_1 = vec![0.5, 1.0, 1.5, 2.0, 2.5]; // correlated with pool_0
+        let pool_1 = vec![0.5, 1.0, 1.5, 2.0, 2.5];
         let noise = vec![0.01, -0.02, 0.03, -0.01, 0.02];
         let candidate: Vec<f64> = pool_0
             .iter()
@@ -198,26 +168,24 @@ mod tests {
         let pool = vec![pool_0.clone(), pool_1.clone()];
         let resid = orthogonalize(&candidate, &pool);
 
-        // residual should be close to noise (small values)
         let max_abs: f64 = resid.iter().map(|x| x.abs()).fold(0.0, f64::max);
         assert!(max_abs < 0.15, "residual too large: {:?}", resid);
     }
 
     #[test]
     fn test_orthogonalize_uncorrelated_keeps_signal() {
-        // candidate uncorrelated with pool -> residual ~= candidate
+
         let pool_0 = vec![1.0, -1.0, 1.0, -1.0, 1.0];
         let candidate = vec![1.0, 2.0, -1.0, 3.0, -2.0];
         let pool = vec![pool_0];
         let resid = orthogonalize(&candidate, &pool);
-        // residual should be close to original candidate (low correlation)
+
         let diff: f64 = resid
             .iter()
             .zip(candidate.iter())
             .map(|(r, c)| (r - c).powi(2))
             .sum();
-        // with only 5 points and OLS through origin, some signal removal is
-        // expected even for weakly correlated data; threshold is generous
+
         assert!(
             diff < candidate.iter().map(|x| x.powi(2)).sum::<f64>(),
             "residual should not have MORE energy than original"

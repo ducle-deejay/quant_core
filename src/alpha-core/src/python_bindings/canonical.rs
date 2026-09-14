@@ -1,5 +1,3 @@
-//! Python bindings for Component 1: canonical mapping and PnL identity.
-
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -11,12 +9,6 @@ use crate::canonical::mapping::{canonical_map, CanonicalResult};
 use crate::canonical::pnl::{compute_pnl, PnlConfig, PnlResult};
 use crate::harness_config::HarnessConfig;
 
-/// Result of the canonical score -> position mapping.
-///
-/// Attributes:
-///     position (list[float]): Canonical position per bar, in z units.
-///     turnover (list[float]): Absolute position change per bar.
-///     trades_per_day (float): Average number of trades executed per day.
 #[pyclass]
 pub struct PyCanonicalResult {
     #[pyo3(get)]
@@ -37,13 +29,6 @@ impl PyCanonicalResult {
     }
 }
 
-/// Gross/net PnL diagnostics for a canonical position series.
-///
-/// Attributes:
-///     gross (list[float]): Per-bar PnL before transaction costs.
-///     net (list[float]): Per-bar PnL after flat per-side costs.
-///     turnover_annualized (float): Total absolute turnover annualized.
-///     cost_drag_pct (float): Total cost as a percentage of gross PnL.
 #[pyclass]
 pub struct PyPnlResult {
     #[pyo3(get)]
@@ -67,15 +52,6 @@ impl PyPnlResult {
     }
 }
 
-/// Map a raw alpha-score series onto canonical positions.
-///
-/// Runs the full canonical pipeline: EWMA smoothing (`span`), rolling
-/// z-score normalization over a trailing window (`z_window`), a no-trade
-/// dead-zone (`band`) and a leverage cap (`cap`). Positions are expressed
-/// in z units on the same axis as the score.
-///
-/// Raises:
-///     ValueError: On empty input or invalid parameter values.
 #[pyfunction]
 fn canonical_map_py(
     py: Python,
@@ -98,8 +74,6 @@ fn canonical_map_py(
         ));
     }
 
-    // `canonical_map` does not model costs; carry over the harness default
-    // so the config remains a faithful `HarnessConfig`.
     let cfg = HarnessConfig {
         span,
         z_window,
@@ -112,14 +86,6 @@ fn canonical_map_py(
     Ok(PyCanonicalResult::from_core(result))
 }
 
-/// Compute gross and net PnL from a canonical position series.
-///
-/// Uses the exact identity ``pnl(t) = p(t-1) * r(t) - c * |p(t) - p(t-1)|``:
-/// the position decided at end of bar `t-1` earns the return of bar `t`,
-/// never `p(t) * r(t)`, so anti-lookahead holds by construction.
-///
-/// Raises:
-///     ValueError: If either series is empty or their lengths differ.
 #[pyfunction]
 fn compute_pnl_py(
     py: Python,
@@ -154,7 +120,6 @@ fn compute_pnl_py(
     Ok(PyPnlResult::from_core(result))
 }
 
-/// Register Component 1 bindings onto the extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCanonicalResult>()?;
     m.add_class::<PyPnlResult>()?;

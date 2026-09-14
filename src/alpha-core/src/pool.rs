@@ -1,10 +1,3 @@
-/// Lifecycle management for alphas that have passed the research pipeline.
-///
-/// The pool admits only residual (incremental) PnL, keeps a bounded set of
-/// members, and identifies members whose recent information coefficient has
-/// persistently breached their pre-committed kill threshold.
-
-/// A single alpha in the pool together with its admission dossier.
 #[derive(Clone, Debug)]
 pub struct PoolAlpha {
     pub name: String,
@@ -18,25 +11,22 @@ pub struct PoolAlpha {
     pub spec_sheet: SpecSheet,
 }
 
-/// Expectations committed before admission, rather than tuned after launch.
 #[derive(Clone, Debug)]
 pub struct SpecSheet {
     pub expected_holding_period_bars: usize,
     pub expected_net_sharpe: f64,
-    /// A block IC below this value counts as a kill-criterion breach.
+
     pub kill_criteria_ic_threshold: f64,
-    /// Number of consecutive breached blocks required to retire the alpha.
+
     pub kill_criteria_consecutive_blocks: usize,
 }
 
-/// A bounded, equal-weighted collection of live alphas.
 #[derive(Debug)]
 pub struct AlphaPool {
     members: Vec<PoolAlpha>,
     max_size: usize,
 }
 
-/// Reason an alpha was not admitted to the live pool.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdmissionError {
     PoolFull(usize),
@@ -45,7 +35,7 @@ pub enum AdmissionError {
 }
 
 impl AlphaPool {
-    /// Create an empty pool with at most `max_size` live members.
+
     pub fn new(max_size: usize) -> Self {
         Self {
             members: Vec::new(),
@@ -53,13 +43,6 @@ impl AlphaPool {
         }
     }
 
-    /// Attempt to admit a candidate after removing PnL explained by the pool.
-    ///
-    /// The candidate's pre-committed expected net Sharpe is used as the
-    /// minimum residual Sharpe. The first member has no overlap to remove and
-    /// is admitted directly. When capacity is exhausted, a qualified candidate
-    /// replaces the member with the lowest reported net Sharpe only when it is
-    /// strictly better.
     pub fn try_admit(&mut self, candidate: &PoolAlpha) -> Result<(), AdmissionError> {
         if self
             .members
@@ -72,8 +55,6 @@ impl AlphaPool {
             return Err(AdmissionError::PoolFull(self.max_size));
         }
 
-        // An empty pool has no common component to remove, so its first alpha
-        // is admitted irrespective of the residual threshold.
         if self.members.is_empty() {
             self.members.push(candidate.clone());
             return Ok(());
@@ -105,13 +86,11 @@ impl AlphaPool {
             self.members[worst_index] = candidate.clone();
             Ok(())
         } else {
-            // The public error enum has no separate capacity-quality variant;
-            // report the residual quality that was considered for admission.
+
             Err(AdmissionError::InsufficientIncrementalValue { residual_sharpe })
         }
     }
 
-    /// Remove a member by name, returning whether a member was removed.
     pub fn retire(&mut self, name: &str) -> bool {
         let Some(index) = self.members.iter().position(|member| member.name == name) else {
             return false;
@@ -120,10 +99,6 @@ impl AlphaPool {
         true
     }
 
-    /// Compute the equal-weight score across all live members.
-    ///
-    /// Score histories are aligned to their common available prefix to avoid
-    /// treating missing observations as zero-valued signals.
     pub fn composite_scores(&self) -> Option<Vec<f64>> {
         let n_bars = self
             .members
@@ -140,7 +115,6 @@ impl AlphaPool {
         Some(composite)
     }
 
-    /// Return member names in their current pool order.
     pub fn member_names(&self) -> Vec<String> {
         self.members
             .iter()
@@ -148,13 +122,6 @@ impl AlphaPool {
             .collect()
     }
 
-    /// Identify alphas whose latest consecutive rolling IC blocks breach spec.
-    ///
-    /// Each block spans the alpha's expected holding period. The IC is a
-    /// Spearman (rank) correlation between scores and realized recent returns.
-    /// A member is flagged once at least its configured number of trailing
-    /// blocks are below its threshold. A zero configured block count disables
-    /// the criterion because there is no meaningful persistence requirement.
     pub fn check_kill_criteria(&self, recent_returns: &[f64]) -> Vec<String> {
         self.members
             .iter()

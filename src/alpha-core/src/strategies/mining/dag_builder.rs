@@ -1,62 +1,35 @@
-//! Shared computation-graph construction from parsed alpha ASTs.
-//!
-//! [`build_dag`] flattens a batch of [`AstNode`]s into a directed acyclic
-//! graph of *unique* sub-expressions:
-//!
-//! 1. Every distinct subtree becomes exactly one [`DagNode`].
-//! 2. Nodes are deduplicated structurally (same operator + same children +
-//!    same window/constants), so sub-expressions shared across the whole
-//!    batch are computed exactly once by
-//!    [`crate::strategies::mining::batch_executor::execute_batch`].
-//! 3. Edges point from parent to child through `dependencies` (indices into
-//!    `nodes`, in argument order); leaf nodes -- raw data fields and numeric
-//!    constants -- have no dependencies and carry `is_leaf == true`.
-//! 4. `execution_order` is a topological order: every node appears after all
-//!    of its dependencies, so a single forward pass evaluates the graph.
-//!
-//! Interning recurses over AST nesting; recursion depth is bounded by
-//! expression depth. Because children are always interned before their
-//! parents, dependency ids are strictly smaller than parent ids, which also
-//! makes construction deterministic: the same input batch always yields the
-//! same node ids.
-
 use std::collections::HashMap;
 
 use super::expression_parser::{hash_ast, AstNode, TsArg};
 
-/// One unique sub-expression in the shared computation graph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DagNode {
-    /// Index of this node in [`ComputationDag::nodes`] (always equals its
-    /// position in that vector).
+
     pub id: usize,
-    /// The (sub)expression this node computes.
+
     pub ast: AstNode,
-    /// Direct inputs: ids of child nodes, in argument order.
+
     pub dependencies: Vec<usize>,
-    /// True for source nodes without dependencies (data fields and numeric
-    /// constants).
+
     pub is_leaf: bool,
 }
 
-/// A deduplicated computation graph covering a batch of alpha expressions.
 #[derive(Debug, Clone, Default)]
 pub struct ComputationDag {
-    /// Unique sub-expression nodes; `nodes[i].id == i`.
+
     pub nodes: Vec<DagNode>,
-    /// Topological order over `nodes` (all dependencies before dependents).
+
     pub execution_order: Vec<usize>,
-    /// Root node id of each input AST, in input order.
+
     pub roots: Vec<usize>,
 }
 
 impl ComputationDag {
-    /// Number of unique nodes in the graph.
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
-    /// True when the graph contains no nodes.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -69,7 +42,7 @@ struct DagInterner {
 }
 
 impl DagInterner {
-    /// Recursively intern `ast` and return the id of its canonical node.
+
     fn intern(&mut self, ast: &AstNode) -> usize {
         let dependencies = match ast {
             AstNode::Number(_) | AstNode::Field(_) => Vec::new(),
@@ -86,8 +59,6 @@ impl DagInterner {
                 .collect(),
         };
 
-        // Bucket by structural hash, then confirm exact equality within the
-        // bucket so hash collisions can never merge distinct expressions.
         let hash = hash_ast(ast);
         if let Some(ids) = self.buckets.get(&hash) {
             for &id in ids {
@@ -114,11 +85,8 @@ impl DagInterner {
     }
 }
 
-/// Iterative post-order DFS producing a topological order (dependencies
-/// first). Cycles are impossible by construction because every child is
-/// interned before its parent, so `dependency < dependent` always holds.
 fn topological_order(nodes: &[DagNode]) -> Vec<usize> {
-    // 0 = unvisited, 1 = on stack, 2 = emitted.
+
     let mut state = vec![0u8; nodes.len()];
     let mut order = Vec::with_capacity(nodes.len());
     for start in 0..nodes.len() {
@@ -146,10 +114,6 @@ fn topological_order(nodes: &[DagNode]) -> Vec<usize> {
     order
 }
 
-/// Build a shared, deduplicated computation graph covering all input ASTs.
-///
-/// Returns the graph whose `roots` vector maps one-to-one onto `asts`
-/// (root `i` computes `asts[i]`).
 pub fn build_dag(asts: &[AstNode]) -> ComputationDag {
     let mut interner = DagInterner::default();
     let roots = asts.iter().map(|ast| interner.intern(ast)).collect();
@@ -185,7 +149,7 @@ mod tests {
             "close*close + ts_mean(volume, 5)",
             "close*close - ts_mean(volume, 5)",
         ]);
-        // Unique subtrees: close, volume, close*close, ts_mean, add, sub.
+
         assert_eq!(dag.len(), 6);
 
         let mul = AstNode::BinaryOp {
@@ -216,7 +180,6 @@ mod tests {
         assert_eq!(dag.nodes[add_root].dependencies, vec![mul_id, mean_id]);
         assert_eq!(dag.nodes[sub_root].dependencies, vec![mul_id, mean_id]);
 
-        // Leaf bookkeeping.
         let close_id = dag.nodes[mul_id].dependencies[0];
         assert!(dag.nodes[close_id].is_leaf);
         assert!(dag.nodes[close_id].dependencies.is_empty());
@@ -230,7 +193,7 @@ mod tests {
             "ts_zscore(ts_mean(close, 8), 480)",
             "ts_zscore(ts_mean(close, 8), 480)",
         ]);
-        // Unique: close, ts_mean, ts_zscore.
+
         assert_eq!(dag.len(), 3);
         assert_eq!(dag.roots[0], dag.roots[1]);
     }
@@ -241,12 +204,11 @@ mod tests {
             "ts_corr(close/volume, ts_delay(close, 1), 60)",
             "ts_zscore(close/ts_delay(close, 1) - 1.0, 120)",
         ]);
-        // execution_order is a permutation of all node ids.
+
         let mut seen = dag.execution_order.clone();
         seen.sort_unstable();
         assert_eq!(seen, (0..dag.len()).collect::<Vec<_>>());
 
-        // Every dependency precedes its dependent.
         let position: Vec<usize> = {
             let mut pos = vec![0usize; dag.len()];
             for (slot, &id) in dag.execution_order.iter().enumerate() {

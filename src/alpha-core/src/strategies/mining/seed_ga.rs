@@ -1,73 +1,24 @@
-//! Genetic-algorithm breeding engine for alpha expression mining.
-//!
-//! The GA evolves a population of candidate alpha expressions (parsed
-//! [`AstNode`]s) toward higher predictive quality. Fitness is *not* computed
-//! here: the caller supplies a batch evaluation callback, typically one that
-//! builds shared computation DAGs via [`build_dag`], executes them with
-//! [`execute_batch`] on real market data, and scores each candidate as
-//! `ICIR * sqrt(|R_ann|) / max(TO, floor)` -- information coefficient
-//! stability scaled by annualised return and penalised for turnover. The GA
-//! only needs the resulting score vector to drive selection.
-//!
-//! # Generation cycle
-//!
-//! 1. **Evaluate** every individual through the caller callback.
-//! 2. **Sort** by fitness descending; copy the top `elite_count` unchanged
-//!    into the next generation. Elitism guarantees the best alphas found so
-//!    far are never lost to stochastic breeding -- the live "book" of
-//!    candidates can only improve monotonically.
-//! 3. **Select** parents by tournament: the best of `tournament_size` random
-//!    individuals wins. Larger tournaments increase selection pressure
-//!    (exploitation); smaller ones preserve diversity (exploration).
-//! 4. **Breed** each pair with probability `crossover_rate` by subtree
-//!    crossover, otherwise clone the parents.
-//! 5. **Mutate** each child with probability `mutation_rate` using one of:
-//!    operator substitution (e.g. `ts_mean` -> `ts_std`, momentum vs.
-//!    dispersion transforms), field swap (move to a different data column),
-//!    window perturbation (scale lookback by a factor in `[0.5, 2.0]`),
-//!    or subtree replacement with a fresh random expression.
-//!
-//! Tree depth is capped at `max_tree_depth` so expressions stay readable,
-//! re-parseable and cheap to execute; crossovers that would exceed the cap
-//! are retried at new cut points and finally fall back to parent clones.
-//!
-//! # Reproducibility
-//!
-//! No external RNG crate is used. [`XorShift`] (xorshift64*) implements the
-//! local [`Rng`] trait; any custom generator can be plugged in the same way.
-//! A fixed seed yields a fully deterministic mining run.
-//!
-//! Canonical-form note: individuals are expected to come from `parse` (or
-//! this module's builders), i.e. negative literals are represented as
-//! `UnaryOp::Neg(Number(..))`, never `Number(negative)`. This keeps
-//! `parse(&ast.to_string()) == ast` true for every bred expression.
-
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::expression_parser::{collect_fields, AstNode, BinOp, TsArg, TsFunc};
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-/// Tuning knobs of the breeding loop.
 #[derive(Debug, Clone)]
 pub struct GaConfig {
-    /// Number of candidate expressions carried between generations.
+
     pub population_size: usize,
-    /// Top individuals copied into the next generation unchanged.
+
     pub elite_count: usize,
-    /// Tournament selection pressure: best of `k` random individuals wins.
+
     pub tournament_size: usize,
-    /// Probability that a selected pair breeds via subtree crossover.
+
     pub crossover_rate: f64,
-    /// Probability that an offspring undergoes mutation.
+
     pub mutation_rate: f64,
-    /// Hard cap on the number of breeding generations in [`run_ga`].
+
     pub max_generations: usize,
-    /// Maximum AST depth; prevents unbounded expression growth.
+
     pub max_tree_depth: usize,
 }
 
@@ -85,29 +36,20 @@ impl Default for GaConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Individual
-// ---------------------------------------------------------------------------
-
-/// Fitness assigned to an individual that has not been evaluated yet.
 pub const UNEVALUATED_FITNESS: f64 = f64::NEG_INFINITY;
 
-/// One candidate alpha expression in the evolving population.
 #[derive(Debug, Clone)]
 pub struct Individual {
-    /// Candidate expression tree.
+
     pub ast: AstNode,
-    /// Cached `Display` rendering of `ast` (the DSL source handed to the
-    /// evaluator / DAG builder).
+
     pub dsl_string: String,
-    /// Evaluator-assigned fitness; [`UNEVALUATED_FITNESS`] until scored.
+
     pub fitness: f64,
-    /// Generation this individual was born in (seeds are generation 0).
+
     pub generation: usize,
 }
 
-/// Build an individual from an AST, canonicalising it and caching its DSL
-/// rendering.
 fn make_individual(ast: AstNode, generation: usize) -> Individual {
     let ast = canonicalize(ast);
     let dsl_string = ast.to_string();
@@ -119,25 +61,14 @@ fn make_individual(ast: AstNode, generation: usize) -> Individual {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Random number generation (std-only)
-// ---------------------------------------------------------------------------
-
-/// Minimal pseudo-random source used by the breeding operators.
-///
-/// Deliberately tiny so the GA carries no external dependency; implement
-/// this trait to plug in any other generator.
 pub trait Rng {
-    /// Next raw 64-bit state word.
+
     fn next_u64(&mut self) -> u64;
 
-    /// Uniform `f64` in `[0, 1)` built from 53 random bits.
     fn next_f64(&mut self) -> f64 {
         ((self.next_u64() >> 11) as f64) / ((1u64 << 53) as f64)
     }
 
-    /// Uniform `usize` in `[0, n)`; `n <= 1` yields 0. Uses rejection
-    /// sampling to avoid modulo bias.
     fn below(&mut self, n: usize) -> usize {
         if n <= 1 {
             return 0;
@@ -152,7 +83,6 @@ pub trait Rng {
         }
     }
 
-    /// Uniform `usize` in `[lo, hi)`; empty ranges yield `lo`.
     fn range_usize(&mut self, lo: usize, hi: usize) -> usize {
         if hi <= lo {
             return lo;
@@ -160,7 +90,6 @@ pub trait Rng {
         lo + self.below(hi - lo)
     }
 
-    /// True with probability `p`.
     fn chance(&mut self, p: f64) -> bool {
         if p >= 1.0 {
             return true;
@@ -171,7 +100,6 @@ pub trait Rng {
         self.next_f64() < p
     }
 
-    /// Pick a uniform reference into `items`; `None` when empty.
     fn choose<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
         if items.is_empty() {
             None
@@ -180,7 +108,6 @@ pub trait Rng {
         }
     }
 
-    /// In-place Fisher-Yates shuffle.
     fn shuffle<T>(&mut self, items: &mut [T]) {
         let n = items.len();
         if n < 2 {
@@ -195,18 +122,15 @@ pub trait Rng {
     }
 }
 
-/// xorshift64* generator: fast, statistically adequate and fully
-/// reproducible from a single seed.
 #[derive(Debug, Clone)]
 pub struct XorShift {
     state: u64,
 }
 
 impl XorShift {
-    /// Create a generator from `seed`; zero seeds are remapped so the
-    /// xorshift state never degenerates.
+
     pub fn new(seed: u64) -> Self {
-        // splitmix64 finalizer scrambles correlated seeds (e.g. small ints).
+
         let mut z = seed ^ 0x9E37_79B9_7F4A_7C15;
         z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z ^= z >> 31;
@@ -218,8 +142,6 @@ impl XorShift {
         XorShift { state: z }
     }
 
-    /// Seed from wall-clock nanoseconds, for interactive runs where
-    /// reproducibility does not matter.
     pub fn from_time() -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -246,14 +168,8 @@ impl Rng for XorShift {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Constants steering material generation
-// ---------------------------------------------------------------------------
-
-/// Data columns used when no field vocabulary is known (seed-free runs).
 const DEFAULT_FIELD_POOL: [&str; 4] = ["close", "open", "volume", "ret"];
 
-/// Single-series rolling functions usable for operator substitution.
 const ARITY1_FUNCS: [TsFunc; 8] = [
     TsFunc::Mean,
     TsFunc::Std,
@@ -265,40 +181,22 @@ const ARITY1_FUNCS: [TsFunc; 8] = [
     TsFunc::Ewma,
 ];
 
-/// Arithmetic operators available to random material.
 const BIN_OPS: [BinOp; 4] = [BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div];
 
-/// Small positive constants only: negative literals must be expressed as
-/// `UnaryOp::Neg` to keep the Display round-trip exact.
 const ATOMIC_NUMBERS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 
-/// Inclusive bounds for windows generated from scratch.
 const MIN_RANDOM_WINDOW: usize = 2;
 const MAX_RANDOM_WINDOW: usize = 64;
 
-/// Absolute ceiling applied when perturbing an existing window, so a run of
-/// multiplicative growth cannot inflate a lookback without bound.
 const WINDOW_HARD_CAP: usize = 1024;
 
-/// Retries with fresh cut points before a depth-violating crossover falls
-/// back to parent clones.
 const CROSSOVER_RETRIES: usize = 12;
 
-// Mutation kinds (indices into the shuffled dispatch table).
 const OP_SUBSTITUTION: usize = 0;
 const FIELD_SWAP: usize = 1;
 const WINDOW_PERTURBATION: usize = 2;
 const SUBTREE_REPLACEMENT: usize = 3;
 
-// ---------------------------------------------------------------------------
-// Tree metrics and slot addressing
-// ---------------------------------------------------------------------------
-
-/// Nesting depth of `ast` in levels (a bare field or number has depth 1).
-///
-/// Bare fields inside a time-series call count as one level below it, so
-/// `ts_corr(close, volume, 20)` and `ts_corr(close/close, volume, 20)` have
-/// depths 2 and 3 respectively -- growth control treats them consistently.
 pub fn ast_depth(ast: &AstNode) -> usize {
     match ast {
         AstNode::Number(_) | AstNode::Field(_) => 1,
@@ -317,7 +215,6 @@ pub fn ast_depth(ast: &AstNode) -> usize {
     }
 }
 
-/// Total node count of `ast`, including bare fields inside ts arguments.
 pub fn ast_size(ast: &AstNode) -> usize {
     match ast {
         AstNode::Number(_) | AstNode::Field(_) => 1,
@@ -335,13 +232,6 @@ pub fn ast_size(ast: &AstNode) -> usize {
     }
 }
 
-/// Pre-order enumeration of addressable AST slots ("nodes").
-///
-/// A slot is every `AstNode` reachable through `UnaryOp`/`BinaryOp`
-/// children and through `TsArg::Expr` payloads; bare `TsArg::Field` leaves
-/// are not separate slots (they are addressed by the dedicated field-swap
-/// machinery instead). Each entry carries the node and its level from the
-/// root (root = 1).
 fn walk_slots<'a>(node: &'a AstNode, level: usize, out: &mut Vec<(&'a AstNode, usize)>) {
     out.push((node, level));
     match node {
@@ -367,7 +257,6 @@ fn slots_of(ast: &AstNode) -> Vec<(&AstNode, usize)> {
     out
 }
 
-/// Overwrite the pre-order slot `target` with `replacement`.
 fn set_slot_at(root: &mut AstNode, target: usize, replacement: AstNode) {
     let mut holder = Some(replacement);
     let mut counter = 0usize;
@@ -405,9 +294,6 @@ fn set_slot(
     }
 }
 
-/// Restore parser-canonical form: `TsArg::Expr(Field(f))` collapses to
-/// `TsArg::Field(f)` exactly as the parser would have produced it. This keeps
-/// `parse(&ast.to_string()) == ast` for every bred tree.
 fn canonicalize(ast: AstNode) -> AstNode {
     match ast {
         AstNode::Number(_) | AstNode::Field(_) => ast,
@@ -442,10 +328,6 @@ fn canonicalize(ast: AstNode) -> AstNode {
         },
     }
 }
-
-// ---------------------------------------------------------------------------
-// Field occurrence addressing (spans AstNode::Field and TsArg::Field)
-// ---------------------------------------------------------------------------
 
 fn walk_fields<'a>(node: &'a AstNode, out: &mut Vec<&'a str>) {
     match node {
@@ -499,8 +381,6 @@ fn replace_nth_field(node: &mut AstNode, target: usize, counter: &mut usize, new
     }
 }
 
-/// Field vocabulary available for swaps: everything the tree already uses
-/// plus the default tradable columns.
 fn field_pool(ast: &AstNode) -> Vec<String> {
     let mut pool = collect_fields(ast);
     for name in DEFAULT_FIELD_POOL {
@@ -510,10 +390,6 @@ fn field_pool(ast: &AstNode) -> Vec<String> {
     }
     pool
 }
-
-// ---------------------------------------------------------------------------
-// Random material synthesis
-// ---------------------------------------------------------------------------
 
 fn random_field(rng: &mut impl Rng, fields: &[String]) -> String {
     if fields.is_empty() {
@@ -558,7 +434,6 @@ fn random_ts_call(rng: &mut impl Rng, budget: usize, fields: &[String]) -> AstNo
     }
 }
 
-/// Synthesize a random expression of depth at most `budget`.
 fn random_expression(rng: &mut impl Rng, budget: usize, fields: &[String]) -> AstNode {
     if budget <= 1 {
         return random_atom(rng, fields);
@@ -580,16 +455,6 @@ fn random_expression(rng: &mut impl Rng, budget: usize, fields: &[String]) -> As
     }
 }
 
-// ---------------------------------------------------------------------------
-// Genetic operators
-// ---------------------------------------------------------------------------
-
-/// Subtree crossover: swap uniformly chosen subtrees between two parents.
-///
-/// Total node count is conserved (`size(child_a) + size(child_b)` equals the
-/// parents' total), but either child may temporarily exceed `max_tree_depth`;
-/// callers enforcing a depth budget should retry or fall back (see
-/// [`evolve_generation`], which does exactly that).
 pub fn crossover(a: &AstNode, b: &AstNode, rng: &mut impl Rng) -> (AstNode, AstNode) {
     let slots_a = slots_of(a);
     let slots_b = slots_of(b);
@@ -606,14 +471,6 @@ pub fn crossover(a: &AstNode, b: &AstNode, rng: &mut impl Rng) -> (AstNode, AstN
     (canonicalize(child_a), canonicalize(child_b))
 }
 
-/// Mutate `ast` by randomly perturbing one aspect of the tree.
-///
-/// Mutation kinds are tried in random order until one applies:
-/// operator substitution, field swap, window perturbation, subtree
-/// replacement. The result is guaranteed valid DSL and, whenever the input
-/// already fits within `max_depth`, so is the output. Trees with no
-/// applicable kind (e.g. a bare constant under a zero depth budget) are
-/// returned unchanged.
 pub fn mutate(ast: &AstNode, rng: &mut impl Rng, max_depth: usize) -> AstNode {
     if max_depth == 0 {
         return ast.clone();
@@ -647,9 +504,6 @@ fn try_mutate_kind(
     }
 }
 
-/// 1. Operator substitution: retarget a rolling transform (momentum ->
-///    volatility -> ranking ...), flip an arithmetic operator, swap
-///    correlation argument order, or drop a negation.
 fn mutate_operator(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     let slots = slots_of(ast);
     let mut candidates = Vec::new();
@@ -677,10 +531,7 @@ fn substituted_variant(slot: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
             param,
         } => {
             if args.len() >= 2 {
-                // Two-series functions (ts_corr and the regression family):
-                // reversing the argument order explores signed relationships
-                // (price vs. volume). The operator itself is unchanged, so
-                // its scalar parameter carries over.
+
                 let mut swapped = args.clone();
                 swapped.reverse();
                 Some(AstNode::TsFunc {
@@ -722,8 +573,6 @@ fn substituted_variant(slot: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     }
 }
 
-/// 2. Field swap: redirect one data reference to another column, keeping the
-///    signal shape but changing the information source.
 fn mutate_field(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     let mut occurrences: Vec<&str> = Vec::new();
     walk_fields(ast, &mut occurrences);
@@ -746,9 +595,6 @@ fn mutate_field(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     Some(out)
 }
 
-/// 3. Window perturbation: scale a lookback/span by a factor in [0.5, 2.0]
-///    (clamped to `[1, WINDOW_HARD_CAP]`), probing how sensitive the signal
-///    is to its sampling horizon.
 fn mutate_window(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     let slots = slots_of(ast);
     let mut candidates = Vec::new();
@@ -765,7 +611,7 @@ fn mutate_window(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
         param,
     } = slots[idx].0
     {
-        let factor = 0.5 + 1.5 * rng.next_f64(); // uniform in [0.5, 2.0]
+        let factor = 0.5 + 1.5 * rng.next_f64();
         let scaled = (*window as f64 * factor).round() as i64;
         let new_window = scaled.clamp(1, WINDOW_HARD_CAP as i64) as usize;
         let replacement = AstNode::TsFunc {
@@ -781,13 +627,11 @@ fn mutate_window(ast: &AstNode, rng: &mut impl Rng) -> Option<AstNode> {
     None
 }
 
-/// 4. Subtree replacement: splice in a freshly generated random expression,
-///    depth-bounded so the overall tree stays within `max_depth`.
 fn mutate_subtree(ast: &AstNode, rng: &mut impl Rng, max_depth: usize) -> Option<AstNode> {
     let slots = slots_of(ast);
     let idx = rng.below(slots.len());
     let (_, level) = slots[idx];
-    // Replacing a slot at level L changes total depth to (L - 1) + new depth.
+
     let remaining = max_depth as i64 - level as i64 + 1;
     if remaining < 1 {
         return None;
@@ -800,11 +644,6 @@ fn mutate_subtree(ast: &AstNode, rng: &mut impl Rng, max_depth: usize) -> Option
     Some(out)
 }
 
-// ---------------------------------------------------------------------------
-// Selection
-// ---------------------------------------------------------------------------
-
-/// Map fitness onto a totally ordered scale (NaN ranks as worst possible).
 fn comparable_fitness(f: f64) -> f64 {
     if f.is_nan() {
         f64::NEG_INFINITY
@@ -819,8 +658,6 @@ fn cmp_fitness_desc(a: &Individual, b: &Individual) -> Ordering {
         .unwrap_or(Ordering::Equal)
 }
 
-/// Tournament selection: best-of-`k` random individuals. Repeats are
-/// allowed; larger `k` means stronger selection pressure.
 fn tournament_select<'a>(
     population: &'a [Individual],
     k: usize,
@@ -845,17 +682,6 @@ fn tournament_select<'a>(
     best
 }
 
-// ---------------------------------------------------------------------------
-// Population management and the evolution loop
-// ---------------------------------------------------------------------------
-
-/// Initialize the population from seed expressions plus randomized variants.
-///
-/// Seeds enter first (deduplicated, generation 0), then the remainder of
-/// `population_size` is filled with mutated seed copies and freshly
-/// synthesized expressions, biased toward the field vocabulary observed in
-/// the seeds so random material stays inside the tradable data universe.
-/// Duplicate DSL strings are avoided when cheaply possible.
 pub fn initialize_population(
     seeds: &[AstNode],
     config: &GaConfig,
@@ -904,9 +730,6 @@ pub fn initialize_population(
     population
 }
 
-/// Evaluate the population through the callback, then sort by fitness
-/// descending. Score vectors shorter than the population leave the trailing
-/// individuals unevaluated rather than panicking.
 fn assign_fitness_and_sort(
     population: &mut Vec<Individual>,
     evaluate_fn: &dyn Fn(&[Individual]) -> Vec<f64>,
@@ -921,22 +744,6 @@ fn assign_fitness_and_sort(
     population.sort_by(cmp_fitness_desc);
 }
 
-/// Run one generation: evaluate -> select -> breed -> mutate.
-///
-/// Contract:
-/// * On entry, `population` holds the current generation (possibly with
-///   unevaluated newborns).
-/// * The callback receives the whole population and returns one fitness per
-///   individual, aligned with input order.
-/// * After evaluation the population is sorted best-first, elites are
-///   preserved verbatim, and offspring refill up to `config.population_size`
-///   (growing or shrinking the vector as needed). Offspring carry
-///   [`UNEVALUATED_FITNESS`] and `generation = max(parent generations) + 1`;
-///   they will be scored by the next call.
-///
-/// Edge cases: an empty population is a no-op; elite counts and tournament
-/// sizes larger than the population are clamped; all-equal or all-zero
-/// fitness still yields a valid (random-drift) evolution step.
 pub fn evolve_generation(
     population: &mut Vec<Individual>,
     config: &GaConfig,
@@ -947,17 +754,14 @@ pub fn evolve_generation(
         return;
     }
 
-    // 1. Evaluate current generation and rank it.
     assign_fitness_and_sort(population, evaluate_fn);
 
     let target = config.population_size.max(1);
     let elite_count = config.elite_count.min(population.len()).min(target);
     let tournament_k = config.tournament_size.max(1);
 
-    // 2. Elitism: carry the survivors over untouched.
     let mut next: Vec<Individual> = population[..elite_count].to_vec();
 
-    // 3./4./5. Breed offspring until the population is full again.
     let child_generation = population
         .iter()
         .map(|ind| ind.generation)
@@ -969,8 +773,6 @@ pub fn evolve_generation(
         let parent_a = tournament_select(population, tournament_k, rng);
         let parent_b = tournament_select(population, tournament_k, rng);
 
-        // Crossover with a fresh depth check; identical parents are cloned
-        // outright since swapping their own subtrees adds nothing.
         let (mut child_a, mut child_b) =
             if parent_a.dsl_string == parent_b.dsl_string || !rng.chance(config.crossover_rate) {
                 (parent_a.ast.clone(), parent_b.ast.clone())
@@ -995,9 +797,6 @@ pub fn evolve_generation(
     *population = next;
 }
 
-/// Subtree crossover retried at fresh cut points until both children respect
-/// `max_depth`; after `CROSSOVER_RETRIES` failures it degrades gracefully to
-/// cloning the parents (which already fit the budget).
 fn breed_within_depth(
     a: &AstNode,
     b: &AstNode,
@@ -1013,15 +812,6 @@ fn breed_within_depth(
     (a.clone(), b.clone())
 }
 
-/// Full GA loop: initialize from seeds, then evolve for `max_generations`
-/// generations, finishing with one final evaluation pass.
-///
-/// Returns the final population sorted by fitness descending, with every
-/// individual carrying a fresh fitness score. The evaluate callback is
-/// invoked once per generation plus once for the final ranking
-/// (`max_generations + 1` calls). Empty seeds still yield a randomized
-/// initial population; an empty result is impossible unless
-/// `population_size` is zero, which is clamped to 1.
 pub fn run_ga(
     seeds: &[AstNode],
     config: &GaConfig,
@@ -1041,10 +831,6 @@ pub fn run_ga(
     assign_fitness_and_sort(&mut population, &evaluate_fn);
     population
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1085,8 +871,6 @@ mod tests {
         assert_eq!(reparsed, *ast, "round-trip mismatch for '{}'", printed);
     }
 
-    /// Deterministic pseudo-fitness derived from the DSL text, so elitism
-    /// dynamics can be asserted without market data.
     fn string_fitness(s: &str) -> f64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in s.bytes() {
@@ -1119,9 +903,6 @@ mod tests {
         data
     }
 
-    /// Mean of `alpha[t] * forward_return[t]` over finite pairs: a crude
-    /// stand-in for information coefficient used to exercise the full
-    /// evaluator pipeline in tests.
     fn ic_proxy(alpha: &[f64], forward_ret: &[f64]) -> f64 {
         let mut acc = 0.0;
         let mut count = 0usize;
@@ -1145,8 +926,6 @@ mod tests {
             }
         }
     }
-
-    // ----- RNG -------------------------------------------------------------
 
     #[test]
     fn xorshift_is_reproducible_and_seed_sensitive() {
@@ -1177,8 +956,6 @@ mod tests {
         assert!(heads > 1700 && heads < 2300, "coin balance off: {}", heads);
     }
 
-    // ----- parser integration ----------------------------------------------
-
     #[test]
     fn seeds_parse_into_valid_asts() {
         let asts = seed_asts();
@@ -1187,12 +964,10 @@ mod tests {
             assert_round_trip(ast);
             assert!(!collect_fields(ast).is_empty(), "{}", src);
         }
-        // Nested composition parses too.
+
         let nested = parse("-ts_zscore(ts_corr(ts_mean(close, 5), volume, 20), 60)").unwrap();
         assert_eq!(ast_depth(&nested), 5);
     }
-
-    // ----- crossover -------------------------------------------------------
 
     #[test]
     fn crossover_produces_valid_trees_with_conserved_total_size() {
@@ -1224,8 +999,6 @@ mod tests {
             assert_round_trip(&cb);
         }
     }
-
-    // ----- mutation --------------------------------------------------------
 
     #[test]
     fn mutation_preserves_tree_validity_and_depth_budget() {
@@ -1270,7 +1043,7 @@ mod tests {
 
     #[test]
     fn mutation_respects_zero_and_tiny_depth_budgets() {
-        // Both bases fit the depth-3 budget (depth 3 and depth 2).
+
         let bases = [
             parse("-ts_delta(close, 3)").unwrap(),
             parse("volume - ts_mean(open, 5)").unwrap(),
@@ -1287,8 +1060,6 @@ mod tests {
             }
         }
     }
-
-    // ----- selection -------------------------------------------------------
 
     #[test]
     fn tournament_select_prefers_the_best_candidate() {
@@ -1310,17 +1081,15 @@ mod tests {
     fn fitness_ordering_treats_nan_as_worst() {
         let mut a = make_individual(parse("close").unwrap(), 0);
         let mut b = make_individual(parse("open").unwrap(), 0);
-        // Descending comparator: Greater means `a` ranks below `b`.
+
         a.fitness = f64::NAN;
         b.fitness = -1.0;
         assert_eq!(cmp_fitness_desc(&a, &b), Ordering::Greater);
         assert_eq!(cmp_fitness_desc(&b, &a), Ordering::Less);
-        // Unevaluated (-inf) and NaN share the bottom rank.
+
         b.fitness = UNEVALUATED_FITNESS;
         assert_eq!(cmp_fitness_desc(&a, &b), Ordering::Equal);
     }
-
-    // ----- population initialization ---------------------------------------
 
     #[test]
     fn initialized_population_embeds_seeds_and_unique_dsl_strings() {
@@ -1354,7 +1123,7 @@ mod tests {
             population_size: 3,
             ..test_config()
         };
-        let seeds = seed_asts(); // 4 distinct seeds > capacity 3
+        let seeds = seed_asts();
         let mut rng = XorShift::new(7);
         let pop = initialize_population(&seeds, &cfg, &mut rng);
         assert_eq!(pop.len(), 3);
@@ -1372,8 +1141,6 @@ mod tests {
             assert!(ast_depth(&ind.ast) <= cfg.max_tree_depth);
         }
     }
-
-    // ----- evolution -------------------------------------------------------
 
     #[test]
     fn population_size_maintained_across_generations() {
@@ -1506,8 +1273,6 @@ mod tests {
         assert_round_trip(&final_pop[0].ast);
     }
 
-    // ----- end-to-end with the batch executor -------------------------------
-
     #[test]
     fn run_ga_end_to_end_with_batch_executor_fitness() {
         let cfg = GaConfig {
@@ -1526,7 +1291,7 @@ mod tests {
         let eval = move |pop: &[Individual]| -> Vec<f64> {
             pop.iter()
                 .map(|ind| {
-                    // The cached DSL string must always be parseable.
+
                     let ast = match parse(&ind.dsl_string) {
                         Ok(ast) => ast,
                         Err(_) => return f64::NEG_INFINITY,
@@ -1549,7 +1314,6 @@ mod tests {
             "offspring generations should advance to the last generation"
         );
 
-        // Sorted by fitness descending.
         for pair in final_pop.windows(2) {
             assert!(
                 comparable_fitness(pair[0].fitness) >= comparable_fitness(pair[1].fitness),
@@ -1559,7 +1323,6 @@ mod tests {
             );
         }
 
-        // Every survivor round-trips and matches its cached DSL string.
         for ind in &final_pop {
             assert_round_trip(&ind.ast);
             assert_eq!(ind.dsl_string, ind.ast.to_string());

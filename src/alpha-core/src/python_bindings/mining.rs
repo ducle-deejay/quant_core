@@ -1,5 +1,3 @@
-//! Python bindings for Component 0 mining (parser, DAG executor, GA loop).
-
 use std::collections::HashMap;
 
 use pyo3::exceptions::PyValueError;
@@ -12,10 +10,6 @@ use crate::strategies::mining::{
     XorShift,
 };
 
-/// Parse an expression and return its canonical DSL serialization.
-///
-/// Raises:
-///     ValueError: If `dsl` is not a valid mining expression.
 #[pyfunction]
 fn validate_expression_py(py: Python<'_>, dsl: &str) -> PyResult<String> {
     py.detach(|| {
@@ -25,13 +19,6 @@ fn validate_expression_py(py: Python<'_>, dsl: &str) -> PyResult<String> {
     })
 }
 
-/// Execute several mining expressions over close and volume columns.
-///
-/// Returns one score series per expression. Expressions are parsed and then
-/// evaluated through one shared computation DAG.
-///
-/// Raises:
-///     ValueError: If an input column is empty or an expression is invalid.
 #[pyfunction]
 fn execute_batch_py(
     py: Python<'_>,
@@ -61,15 +48,6 @@ fn execute_batch_py(
     })
 }
 
-/// Run the mining genetic algorithm and return its best DSL expression.
-///
-/// The generator is restricted to `close` and `volume`; fitness is the mean
-/// product of each finite score and the next-bar close return, evaluated via
-/// the batch executor. Tournament selection, crossover, mutation, and elitism
-/// use the shared seed-GA implementation.
-///
-/// Raises:
-///     ValueError: If either input column is empty or `population_size` is 0.
 #[pyfunction]
 fn ga_best_expression_py(
     py: Python<'_>,
@@ -123,10 +101,7 @@ fn ga_best_expression_py(
                     let dag = build_dag(std::slice::from_ref(&ast));
                     let rows = execute_batch(&dag, &data, &dag.roots);
                     let n = rows[0].len().min(forward_returns.len());
-                    // Scale-free fitness: z-score the score row before the
-                    // mean score x next-bar-return product, so the GA breeds
-                    // INFORMATION, not magnitude monsters (practitioner
-                    // review: raw fitness made ts_sum^2*close^3 products win).
+
                     let mut xs: Vec<f64> = Vec::new();
                     let mut ys: Vec<f64> = Vec::new();
                     for t in 0..n {
@@ -165,18 +140,6 @@ fn ga_best_expression_py(
     })
 }
 
-/// Breed the genetic algorithm from researcher-provided seed expressions and
-/// return the final population's DSL strings ranked by fitness (best first).
-///
-/// Unlike [`ga_best_expression_py`], the initial population is bred from the
-/// given seeds (WorldQuant-style: only evaluation-passing seeds enter
-/// mining, decision note DEC-017). Fitness is the same mean score x
-/// next-bar-return statistic; a custom fitness remains a Python-side GA
-/// loop (research module).
-///
-/// Raises:
-///     ValueError: If ``seeds`` is empty, an input column is empty or
-///     non-finite, ``population_size`` is 0, or a rate lies outside [0, 1].
 #[pyfunction]
 #[pyo3(signature = (seeds, close, volume, population_size, generations, seed, elite_count=None, tournament_size=None, crossover_rate=None, mutation_rate=None, max_tree_depth=None))]
 fn ga_breed_py(
@@ -252,10 +215,7 @@ fn ga_breed_py(
                     let dag = build_dag(std::slice::from_ref(&ast));
                     let rows = execute_batch(&dag, &data, &dag.roots);
                     let n = rows[0].len().min(forward_returns.len());
-                    // Scale-free fitness: z-score the score row before the
-                    // mean score x next-bar-return product, so the GA breeds
-                    // INFORMATION, not magnitude monsters (practitioner
-                    // review: raw fitness made ts_sum^2*close^3 products win).
+
                     let mut xs: Vec<f64> = Vec::new();
                     let mut ys: Vec<f64> = Vec::new();
                     for t in 0..n {
@@ -294,7 +254,6 @@ fn ga_breed_py(
     })
 }
 
-/// Register Component 0 bindings onto the extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_expression_py, m)?)?;
     m.add_function(wrap_pyfunction!(execute_batch_py, m)?)?;

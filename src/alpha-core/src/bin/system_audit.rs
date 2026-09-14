@@ -1,28 +1,3 @@
-//! System audit: best-practice validation battery for the whole harness.
-//!
-//! Unit tests protect individual functions; this binary protects the
-//! CONTRACTS BETWEEN components on real market data. It runs five sections:
-//!
-//! 1. METAMORPHIC   - behaviour must be invariant under information-free
-//!                    input transformations (scaling, shifting, mirroring,
-//!                    prepending operator-warmup NaN). This is the net that
-//!                    catches silent poisoning bugs.
-//! 2. INVARIANTS    - every randomly generated alpha is pushed through the
-//!                    full stack and must satisfy structural laws (finite
-//!                    metrics, capped positions, PnL identity bar-by-bar,
-//!                    cross-module turnover consistency).
-//! 3. DIFFERENTIAL  - optimised hot paths are compared against independent
-//!                    naive references (O(n*w) z-score, manual Sharpe).
-//! 4. CANARIES      - known-answer alphas: a deliberate look-ahead oracle
-//!                    MUST produce a large positive Net Sharpe, its mirror
-//!                    a large negative one; zero costs MUST leave net equal
-//!                    to gross. Catches convention flips end-to-end.
-//! 5. SCREENING     - property loop over adversarial gate inputs: funnel
-//!                    counts consistent, ranking pool drawn only from
-//!                    survivors, deterministic ordering.
-//!
-//! Exit code is non-zero when any check fails, so this can gate CI.
-
 use std::time::Instant;
 
 use alpha_core::canonical::mapping::{canonical_map, ewma_smooth, rolling_zscore, sanitize_scores};
@@ -36,10 +11,6 @@ use alpha_core::strategies::mining::dag_builder::build_dag;
 
 const SWEEP_SIZE: usize = 500;
 const METAMORPHIC_SERIES: usize = 16;
-
-// ---------------------------------------------------------------------------
-// Deterministic pseudo-random source (no external dependency)
-// ---------------------------------------------------------------------------
 
 struct Rng(u64);
 
@@ -55,15 +26,10 @@ impl Rng {
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
-    /// Uniform in [0, 1).
     fn f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
-
-// ---------------------------------------------------------------------------
-// Data loading (mirrors batch-verify)
-// ---------------------------------------------------------------------------
 
 fn load_csv(path: &str) -> (std::collections::HashMap<String, Vec<f64>>, usize) {
     let content = std::fs::read_to_string(path).expect("Cannot open data file");
@@ -96,12 +62,6 @@ fn load_csv(path: &str) -> (std::collections::HashMap<String, Vec<f64>>, usize) 
     (data, dates.len().max(1))
 }
 
-// ---------------------------------------------------------------------------
-// Naive references for differential testing
-// ---------------------------------------------------------------------------
-
-/// Two-pass O(n*w) z-score over the trailing window [t-window .. t-1],
-/// mirroring the sliding-window semantics of the optimised version.
 fn naive_rolling_zscore(smoothed: &[f64], window: usize) -> Vec<f64> {
     let n = smoothed.len();
     let mut z = vec![0.0; n];
@@ -118,10 +78,6 @@ fn naive_rolling_zscore(smoothed: &[f64], window: usize) -> Vec<f64> {
     }
     z
 }
-
-// ---------------------------------------------------------------------------
-// Check bookkeeping
-// ---------------------------------------------------------------------------
 
 struct CheckOutcome {
     name: String,
@@ -146,7 +102,6 @@ fn print_section(title: &str, outcomes: &[CheckOutcome]) {
     }
 }
 
-/// Fraction of mismatching elements between two position series.
 fn mismatch_count(a: &[f64], b: &[f64], tol: f64) -> usize {
     a.iter().zip(b.iter()).filter(|(x, y)| (*x - *y).abs() > tol).count()
 }
@@ -157,10 +112,6 @@ fn std_dev(v: &[f64]) -> f64 {
     let mean = v.iter().sum::<f64>() / n;
     (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n).sqrt()
 }
-
-// ---------------------------------------------------------------------------
-// MAIN
-// ---------------------------------------------------------------------------
 
 fn main() {
     let total_start = Instant::now();
@@ -177,8 +128,6 @@ fn main() {
     println!("Loaded {} bars across {} sessions ({} bars/day)",
              bars, n_sessions, bars_per_day);
 
-    // Shared pipeline front-end: generate alphas, execute scores once, and
-    // feed every section from the same series.
     let gen_cfg = GeneratorConfig {
         fields: vec!["close".into(), "volume".into()],
         ..Default::default()
@@ -190,13 +139,8 @@ fn main() {
 
     let mut all_failed = 0usize;
 
-    // =======================================================================
-    // Section 1: Metamorphic relations on REAL alpha scores
-    // =======================================================================
     let mut s1: Vec<CheckOutcome> = Vec::new();
 
-    // Pick the highest-variance real score so the reference genuinely trades
-    // (a flat reference makes the comparison vacuous).
     let ref_idx = score_matrix.iter().take(METAMORPHIC_SERIES)
         .enumerate()
         .max_by(|(_, a), (_, b)| {
@@ -208,7 +152,6 @@ fn main() {
     let base = canonical_map(&base_score, &cfg, bars_per_day);
     let base_trades = base.trades_per_day;
 
-    // 1a. Positive scaling carries no information.
     let scaled: Vec<f64> = base_score.iter().map(|v| v * 137.0).collect();
     let scaled_res = canonical_map(&scaled, &cfg, bars_per_day);
     let mm = mismatch_count(&base.position, &scaled_res.position, 1e-6);
@@ -220,8 +163,6 @@ fn main() {
                 mm, allow, base_trades),
     ));
 
-    // 1b. Constant shift carries no information (anchored z-score makes this
-    // stable even for huge offsets; unanchored E[x^2]-mean^2 would not be).
     let shifted: Vec<f64> = base_score.iter().map(|v| v - 987654.0).collect();
     let shifted_res = canonical_map(&shifted, &cfg, bars_per_day);
     let mm = mismatch_count(&base.position, &shifted_res.position, 1e-6);
@@ -231,7 +172,6 @@ fn main() {
         format!("{} mismatched positions (allowed {})", mm, allow),
     ));
 
-    // 1c. Mirroring the score mirrors the position exactly.
     let mirrored: Vec<f64> = base_score.iter().map(|v| -v).collect();
     let mirrored_res = canonical_map(&mirrored, &cfg, bars_per_day);
     let mm = mismatch_count(
@@ -244,8 +184,6 @@ fn main() {
         format!("{} mismatched positions (required 0)", mm),
     ));
 
-    // 1d. Prepending operator-warmup NaN must not change post-warmup
-    // behaviour. This is THE regression guard for silent NaN poisoning.
     let prefix_len = 300;
     let mut prefixed = vec![f64::NAN; prefix_len];
     prefixed.extend_from_slice(&base_score);
@@ -268,9 +206,6 @@ fn main() {
     print_section("SECTION 1 - METAMORPHIC (real alpha scores)", &s1);
     all_failed += s1.iter().filter(|o| !o.ok).count();
 
-    // =======================================================================
-    // Section 2: Structural invariants over the full random-alpha sweep
-    // =======================================================================
     let mut s2: Vec<CheckOutcome> = Vec::new();
     let mut bad_nonfinite_pos = 0usize;
     let mut bad_cap = 0usize;
@@ -293,7 +228,6 @@ fn main() {
         if cr.position.iter().any(|p| !p.is_finite()) { bad_nonfinite_pos += 1; }
         if cr.position.iter().any(|p| p.abs() > cfg.cap + 1e-9) { bad_cap += 1; }
 
-        // Bar-by-bar PnL identity, sampled deterministically for speed.
         for t in (1..cr.position.len()).step_by(97) {
             let change = (cr.position[t] - cr.position[t - 1]).abs();
             if (pnl.net[t] - (pnl.gross[t] - change * pnl_cfg.cost_per_side)).abs() > 1e-12 {
@@ -302,16 +236,12 @@ fn main() {
             }
         }
 
-        // Cross-module turnover consistency: canonical_map's turnover vector
-        // and compute_pnl's annualised turnover must describe the same
-        // position path.
         let canon_sum: f64 = cr.turnover.iter().sum();
         let implied = pnl.turnover_annualized / 250.0 * days;
         if (canon_sum - implied).abs() > 1e-6 * implied.abs().max(1.0) {
             bad_turnover += 1;
         }
 
-        // trades_per_day equals actual position changes per day.
         let changes = cr.position.windows(2)
             .filter(|w| (w[1] - w[0]).abs() > f64::EPSILON)
             .count();
@@ -320,7 +250,6 @@ fn main() {
         }
         if changes > 0 { trading_alphas += 1; }
 
-        // Metrics must be finite for a finite input path.
         let daily: Vec<f64> = pnl.net.chunks(bars_per_day)
             .map(|c| c.iter().sum::<f64>()).collect();
         let sr = sharpe(&daily, bars_per_day);
@@ -352,9 +281,6 @@ fn main() {
     print_section(&format!("SECTION 2 - INVARIANT SWEEP ({} alphas)", SWEEP_SIZE), &s2);
     all_failed += s2.iter().filter(|o| !o.ok).count();
 
-    // =======================================================================
-    // Section 3: Differential testing against naive references
-    // =======================================================================
     let mut s3: Vec<CheckOutcome> = Vec::new();
 
     let smooth_real = ewma_smooth(&base_score, cfg.span);
@@ -380,7 +306,6 @@ fn main() {
                 worst_rel, diffs.len()),
     ));
 
-    // Manual Sharpe on the daily aggregation of the reference path.
     let daily_ref: Vec<f64> = {
         let pnl = compute_pnl(&base.position, &ret, &pnl_cfg);
         pnl.net.chunks(bars_per_day).map(|c| c.iter().sum::<f64>()).collect()
@@ -402,9 +327,6 @@ fn main() {
     print_section("SECTION 3 - DIFFERENTIAL (optimised vs naive)", &s3);
     all_failed += s3.iter().filter(|o| !o.ok).count();
 
-    // =======================================================================
-    // Section 4: Known-answer canaries (synthetic, deliberate look-ahead)
-    // =======================================================================
     let mut s4: Vec<CheckOutcome> = Vec::new();
 
     let n_canary = 20_000;
@@ -416,7 +338,6 @@ fn main() {
     let mut ret_c = vec![0.0; n_canary];
     for t in 1..n_canary { ret_c[t] = close_c[t] / close_c[t - 1] - 1.0; }
 
-    // Oracle score: perfect knowledge of next bar's return direction.
     let oracle: Vec<f64> = (0..n_canary)
         .map(|t| if t + 1 < n_canary {
             if ret_c[t + 1] > 0.0 { 5.0 } else { -5.0 }
@@ -448,10 +369,6 @@ fn main() {
         format!("Net Sharpe {:.2} (required < -5)", sr_anti),
     ));
 
-    // Gross PnL must mirror exactly under sign negation of the score
-    // (positions mirror, returns are shared). NET Sharpe is deliberately NOT
-    // antisymmetric: costs subtract from both paths, so the two net Sharpes
-    // need not cancel.
     let gross_long = compute_pnl(&oracle_long.position, &ret_c, &pnl_cfg).gross;
     let gross_mirror = compute_pnl(&anti_res.position, &ret_c, &pnl_cfg).gross;
     let worst_gross_asym = gross_long.iter().zip(gross_mirror.iter())
@@ -463,7 +380,6 @@ fn main() {
         format!("worst |gross + mirrored gross| = {:.2e}", worst_gross_asym),
     ));
 
-    // Zero-cost configuration: net must equal gross elementwise.
     let zero_cfg = PnlConfig { cost_per_side: 0.0, bars_per_day };
     let pnl_zero = compute_pnl(&oracle_long.position, &ret_c, &zero_cfg);
     let identical = pnl_zero.net.iter().zip(pnl_zero.gross.iter()).all(|(n, g)| n == g);
@@ -476,9 +392,6 @@ fn main() {
     print_section("SECTION 4 - KNOWN-ANSWER CANARIES", &s4);
     all_failed += s4.iter().filter(|o| !o.ok).count();
 
-    // =======================================================================
-    // Section 5: Screening property loop
-    // =======================================================================
     let mut s5: Vec<CheckOutcome> = Vec::new();
     let thresholds = ScreeningThresholds::default();
     let mut rng = Rng::new(0xDEADBEEF);
@@ -493,13 +406,11 @@ fn main() {
         let (funnel, survivors) = screen_candidates(&ics, &drags, &thresholds);
         let ranked = rank_survivors(&survivors, &scores);
 
-        // Funnel arithmetic.
         if funnel.total_candidates != len { prop_fail += 1; }
         if funnel.survivor_count != survivors.len() { prop_fail += 1; }
         if funnel.ic_pass_count + funnel.drag_pass_count
             < funnel.survivor_count { prop_fail += 1; }
 
-        // Ranking pool ⊆ survivor set, ordered by descending score.
         if ranked.len() != survivors.len() { prop_fail += 1; }
         for w in ranked.windows(2) {
             if scores[w[0]] < scores[w[1]] { prop_fail += 1; }
@@ -520,9 +431,6 @@ fn main() {
     print_section("SECTION 5 - SCREENING PROPERTIES", &s5);
     all_failed += s5.iter().filter(|o| !o.ok).count();
 
-    // =======================================================================
-    // Verdict
-    // =======================================================================
     println!("\n============================================================");
     if all_failed == 0 {
         println!("  SYSTEM AUDIT PASSED - all sections green ({:.1}s)",

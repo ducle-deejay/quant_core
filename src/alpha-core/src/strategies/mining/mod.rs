@@ -1,6 +1,3 @@
-//! Alpha expression mining: DSL parsing, shared DAG construction, and
-//! vectorised batch execution over time-series columns.
-
 pub mod batch_executor;
 pub mod dag_builder;
 pub mod expression_parser;
