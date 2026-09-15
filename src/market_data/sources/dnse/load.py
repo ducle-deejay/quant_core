@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.sources.dnse.quality import validate_transformed_batch
 
@@ -19,7 +19,7 @@ def load_day(
     transformed: Iterable[list[Any]],
 ) -> dict[str, int]:
     """Load transformed DNSE batches through the Nautilus catalog public API."""
-    catalog = ParquetDataCatalog.from_uri(str(catalog_path))
+    catalog = ParquetDataCatalog(catalog_path)
     counts: Counter[str] = Counter()
     for batch in transformed:
         validate_transformed_batch(batch)
@@ -33,7 +33,15 @@ def load_day(
             batch = [instrument for instrument in batch if instrument.id.value not in existing]
             if not batch:
                 continue
-        catalog.write_data(batch, skip_disjoint_check=True)
+            catalog.write_instruments(batch)
+            counts[type(batch[0]).__name__] += len(batch)
+            continue
+        writer = {
+            "Bar": catalog.write_bars,
+            "TradeTick": catalog.write_trade_ticks,
+            "OrderBookDepth10": catalog.write_order_book_depths,
+        }[type(batch[0]).__name__]
+        writer(batch)
         counts[type(batch[0]).__name__] += len(batch)
 
     available = set(catalog.list_data_types())

@@ -5,8 +5,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from nautilus_trader.model.instruments import FuturesContract
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from nautilus_trader.model import FuturesContract
+from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.sources.mirae.quality import validate_transformed_bars
 from market_data.sources.mirae.transform import BAR_TYPE
@@ -26,7 +26,7 @@ def load_day(
     (sorted ints) so the daily orchestrator can verify that the Mirae
     backfill resolved every DNSE-missing timestamp.
     """
-    catalog = ParquetDataCatalog.from_uri(str(catalog_path))
+    catalog = ParquetDataCatalog(catalog_path)
     counts: Counter[str] = Counter()
     existing_timestamps: set[int] = set()
     added_timestamps: list[int] = []
@@ -45,15 +45,15 @@ def load_day(
                 if instrument.id.value not in existing_instruments
             ]
             if new_instruments:
-                catalog.write_data(new_instruments, skip_disjoint_check=True)
+                catalog.write_instruments(new_instruments)
                 counts["FuturesContract"] += len(new_instruments)
             continue
 
         validate_transformed_bars(batch)
         existing_timestamps.update(
             bar.ts_event
-            for bar in catalog.bars(
-                bar_types=[BAR_TYPE],
+            for bar in catalog.query_bars(
+                identifiers=[BAR_TYPE],
                 start=batch[0].ts_event,
                 end=batch[-1].ts_event + 1,
             )
@@ -62,7 +62,7 @@ def load_day(
         counts["SkippedBar"] += len(batch) - len(missing)
         if not missing:
             continue
-        catalog.write_data(missing, skip_disjoint_check=True)
+        catalog.write_bars(missing)
         existing_timestamps.update(bar.ts_event for bar in missing)
         counts["Bar"] += len(missing)
         added_timestamps.extend(bar.ts_event for bar in missing)
