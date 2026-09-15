@@ -109,6 +109,8 @@ def build_futures_contract(
     activation: str | None,
     expiration: str,
     *,
+    ts_event: int | None = None,
+    ts_init: int | None = None,
     info: dict[str, object] | None = None,
 ) -> FuturesContract:
     """Compose a monthly Nautilus futures contract from explicit metadata."""
@@ -131,8 +133,8 @@ def build_futures_contract(
         underlying=spec.underlying,
         activation_ns=activation_ns,
         expiration_ns=expiration_ns,
-        ts_event=activation_ns,
-        ts_init=activation_ns,
+        ts_event=activation_ns if ts_event is None else ts_event,
+        ts_init=activation_ns if ts_init is None else ts_init,
         info=info,
     )
 
@@ -141,6 +143,9 @@ def build_continuous_futures_contract(
     spec: FuturesInstrumentSpec,
     ts_init: str | None = None,
     expiration: str | None = None,
+    *,
+    ts_event_ns: int | None = None,
+    record_ts_init_ns: int | None = None,
 ) -> FuturesContract:
     """Compose the continuous signal instrument used by the data pipeline."""
     if (ts_init is None) != (expiration is None):
@@ -167,8 +172,8 @@ def build_continuous_futures_contract(
         underlying=spec.underlying,
         activation_ns=ts_init_ns,
         expiration_ns=expiration_ns,
-        ts_event=ts_init_ns,
-        ts_init=ts_init_ns,
+        ts_event=ts_init_ns if ts_event_ns is None else ts_event_ns,
+        ts_init=ts_init_ns if record_ts_init_ns is None else record_ts_init_ns,
     )
 
 
