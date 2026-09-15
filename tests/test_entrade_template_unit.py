@@ -57,6 +57,8 @@ from trading.adapters.entrade_template.execution import (
     entrade_order_type,
 )
 from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
+from trading.adapters.entrade_template.api.entrade_api import EntradeClient
+from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
 from trading.adapters.entrade_template.providers import DnseInstrumentProvider
 from trading.adapters.entrade_template.providers import EntradeInstrumentProvider
 from trading.instruments import FuturesInstrumentSpec
@@ -541,6 +543,36 @@ def _entrade_client(
         client=api,
     )
     return client, api, provider
+
+
+@pytest.mark.parametrize(
+    ("account", "margin_portfolio_parameter"),
+    [
+        (EntradeAccount.DEMO, "bankMarginPortfolioId"),
+        (EntradeAccount.LIVE, "bankMarginPortfolio"),
+    ],
+)
+def test_entrade_buying_power_uses_account_specific_margin_parameter(
+    account: EntradeAccount,
+    margin_portfolio_parameter: str,
+) -> None:
+    client = EntradeClient(EntradeClientConfig(account=account))
+
+    with patch.object(client, "_request", return_value={}) as request:
+        client.get_buying_power(
+            investor_id=123,
+            margin_portfolio_id=32,
+            symbol="41I1G8000",
+            side="NB",
+            price=1535.2,
+        )
+
+    assert request.call_args.kwargs["params"] == {
+        margin_portfolio_parameter: 32,
+        "price": 1535.2,
+        "symbol": "41I1G8000",
+        "side": "NB",
+    }
 
 
 def test_entrade_connect_rejects_an_authenticated_account_mismatch() -> None:

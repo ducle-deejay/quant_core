@@ -218,11 +218,16 @@ class EntradeClient(EntradeTransport):
         side: str,
         price: float,
     ) -> dict[str, Any]:
+        margin_portfolio_parameter = (
+            "bankMarginPortfolioId"
+            if self.config.account == EntradeAccount.DEMO
+            else "bankMarginPortfolio"
+        )
         return self._request(
             "GET",
             f"/{self.api_prefix}/derivative/investors/{investor_id}/ppse",
             params={
-                "bankMarginPortfolio": margin_portfolio_id,
+                margin_portfolio_parameter: margin_portfolio_id,
                 "price": price,
                 "symbol": symbol,
                 "side": side,
