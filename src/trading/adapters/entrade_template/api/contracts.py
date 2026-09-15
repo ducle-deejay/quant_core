@@ -60,12 +60,19 @@ class EntradeMonthlyContract:
             tzinfo=VN_TZINFO,
         ).astimezone(UTC)
 
-    def to_nautilus_instrument(self, spec: FuturesInstrumentSpec) -> FuturesContract:
+    def to_nautilus_instrument(
+        self,
+        spec: FuturesInstrumentSpec,
+        ts_event: int | None = None,
+        ts_init: int | None = None,
+    ) -> FuturesContract:
         activation = self.activation or UNKNOWN_ACTIVATION
         return build_futures_contract(
             spec=spec.with_symbol(self.symbol),
             activation=activation.isoformat(),
             expiration=self.expiration.isoformat(),
+            ts_event=ts_event,
+            ts_init=ts_init,
         )
 
 

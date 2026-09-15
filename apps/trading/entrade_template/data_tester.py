@@ -5,13 +5,21 @@ Follows the NautilusTrader per-adapter live tester convention
 OpenAPI, subscribes to the configured instrument's quotes and bars, and logs
 everything through DataTester. No orders are placed.
 
+DNSE serves quotes per monthly contract only (the continuous symbol is
+bars-only), so the tester resolves the active contract up front: bars are
+subscribed on the continuous symbol and quotes on the active contract.
+Both instruments are loaded into the provider.
+
 Usage: .venv-v2/bin/python apps/trading/entrade_template/data_tester.py
-Credentials come from .env (API_KEY, API_SECRET).
+Credentials come from .env (API_KEY, API_SECRET, ENTRADE_USERNAME,
+ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,6 +34,11 @@ from nautilus_trader.model import ClientId
 from nautilus_trader.model import TraderId
 from nautilus_trader.testkit import DataTesterConfig
 
+from trading.adapters.entrade_template.api.contracts import resolve_active_contract
+from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
+from trading.adapters.entrade_template.api.entrade_api import EntradeClient
+from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade_template.api.entrade_api import investor_id_from_token
 from trading.adapters.entrade_template.config import DnseDataClientConfig
 from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
 from trading.instruments import load_futures_instrument_spec
@@ -36,6 +49,22 @@ DATA_CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 
 
+def resolve_active_contract_symbol(spec) -> str:
+    """Resolve the front-month contract symbol through the Entrade API."""
+    client = EntradeClient(EntradeClientConfig(account=EntradeAccount.DEMO))
+    token = client.authenticate(os.environ["ENTRADE_USERNAME"], os.environ["ENTRADE_PASSWORD"])
+    investor_id = os.getenv("ENTRADE_INVESTOR_ID") or investor_id_from_token(token)
+    if investor_id is None:
+        raise RuntimeError("ENTRADE_INVESTOR_ID is not set and the auth token did not contain it")
+    derivatives = client.list_derivatives()
+    contract = resolve_active_contract(
+        derivatives,
+        logical_symbol=spec.symbol,
+        at=datetime.now(UTC),
+    )
+    return contract.symbol
+
+
 def main() -> None:
     """Run the DNSE data tester against the production DNSE OpenAPI."""
     parser = argparse.ArgumentParser(description="DNSE data connectivity tester")
@@ -43,11 +72,11 @@ def main() -> None:
     args = parser.parse_args()
     load_dotenv(args.env, override=True)
 
-    import os
-
     spec = load_futures_instrument_spec(SPEC_PATH)
-    instrument_id = spec.instrument_id()
-    bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
+    contract_symbol = resolve_active_contract_symbol(spec)
+    contract_instrument_id = spec.with_symbol(contract_symbol).instrument_id()
+    bar_type = BarType.from_str(f"{spec.instrument_id()}-1-MINUTE-LAST-EXTERNAL")
+    print(f"active contract: {contract_symbol} -> {contract_instrument_id}")
 
     node = (
         LiveNode.builder("DNSE-DATA-TESTER-001", TRADER_ID, Environment.LIVE)
@@ -58,6 +87,7 @@ def main() -> None:
                 api_key=os.environ["API_KEY"],
                 api_secret=os.environ["API_SECRET"],
                 instrument_spec=spec,
+                symbols=(spec.symbol, contract_symbol),
                 historical_source="api",
             ),
         )
@@ -67,9 +97,12 @@ def main() -> None:
         "DataTester",
         DataTesterConfig(
             client_id=ClientId.from_str(DATA_CLIENT_NAME),
-            instrument_ids=[instrument_id],
+            instrument_ids=[contract_instrument_id],
             bar_types=[bar_type],
             subscribe_quotes=True,
+            subscribe_trades=True,
+            subscribe_book_depth=True,
+            book_depth=10,
             subscribe_bars=True,
             request_instruments=True,
             request_bars=True,

@@ -30,6 +30,7 @@ from nautilus_trader.config import LiveNodeConfig
 from nautilus_trader.config import LoggerConfig
 from nautilus_trader.live import LiveNode
 from nautilus_trader.model import ClientId
+from nautilus_trader.model import Quantity
 from nautilus_trader.model import StrategyId
 from nautilus_trader.model import TimeInForce
 from nautilus_trader.model import TraderId
@@ -135,14 +136,16 @@ def main() -> None:
             strategy_id=StrategyId.from_str("EXEC_TESTER-001"),
             instrument_id=contract_instrument_id,
             client_id=ClientId.from_str(CLIENT_NAME),
-            order_qty=ORDER_QTY,
+            order_qty=Quantity.from_str(ORDER_QTY),
             subscribe_quotes=True,
+            subscribe_trades=True,
             enable_limit_buys=True,
             enable_limit_sells=True,
             limit_time_in_force=TimeInForce.DAY,
             cancel_orders_on_stop=True,
             close_positions_on_stop=False,
             dry_run=not args.live_orders,
+            log_data=False,
         ),
     )
 

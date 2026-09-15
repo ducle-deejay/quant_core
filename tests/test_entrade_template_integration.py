@@ -215,7 +215,7 @@ def _build_factories(
     class TestDataFactory(DataClientFactory):
         @staticmethod
         def create(*, name: str, config, cache, clock):
-            provider = DnseInstrumentProvider(config)
+            provider = DnseInstrumentProvider(config, clock)
             return DnseLiveDataClient(
                 name=name,
                 config=config,
@@ -234,6 +234,7 @@ def _build_factories(
                 api,
                 config.instrument_spec,
                 config.instrument_provider,
+                clock=clock,
             )
             return EntradeExecutionClient(
                 name=name,
@@ -366,7 +367,6 @@ def test_providers_declare_instrument_loading_hooks() -> None:
 @pytest.mark.parametrize(
     ("client_type", "method"),
     [
-        (DnseLiveDataClient, "_subscribe_trades"),
         (DnseLiveDataClient, "_request_trades"),
         (EntradeExecutionClient, "_query_order"),
     ],
@@ -444,6 +444,7 @@ def test_execution_output_rejects_foreign_report_identity(kind) -> None:
                 api,
                 config.instrument_spec,
                 config.instrument_provider,
+                clock=clock,
             )
             return Client(
                 name=name,

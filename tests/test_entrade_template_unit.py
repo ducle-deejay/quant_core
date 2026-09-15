@@ -11,10 +11,12 @@ from unittest.mock import patch
 import pytest
 from dnse.websocket.models import Ohlc
 from dnse.websocket.models import Quote
+from dnse.websocket.models import Trade
 from nautilus_trader.core import UUID4
 from nautilus_trader.live import BarsResponse, InstrumentResponse, InstrumentsResponse
 from nautilus_trader.model import (
     AccountBalance,
+    AggressorSide,
     AccountId,
     Bar,
     ClientOrderId,
@@ -28,6 +30,7 @@ from nautilus_trader.model import (
     Quantity,
     StrategyId,
     TimeInForce,
+    TradeId,
     TraderId,
     VenueOrderId,
 )
@@ -40,7 +43,9 @@ from trading.adapters.entrade_template.data import (
     bar_type_to_dnse_resolution,
     build_bar_type_for_symbol,
     dnse_ohlc_body_to_nautilus_bars,
+    dnse_quote_to_nautilus_depth10,
     dnse_quote_to_nautilus_quote_tick,
+    dnse_trade_to_nautilus_trade_tick,
     normalize_dnse_resolution,
 )
 from trading.adapters.entrade_template.execution import (
@@ -82,6 +87,7 @@ class FakeDnseTradingClient:
         self.connected = False
         self.subscriptions: list[dict] = []
         self.quote_subscriptions: list[dict] = []
+        self.trade_subscriptions: list[dict] = []
         self.unsubscribes: list[tuple[str, list[str]]] = []
 
     def on(self, event: str, handler: object) -> None:
@@ -98,6 +104,9 @@ class FakeDnseTradingClient:
 
     async def subscribe_quotes(self, **kwargs: object) -> None:
         self.quote_subscriptions.append(kwargs)
+
+    async def subscribe_trades(self, **kwargs: object) -> None:
+        self.trade_subscriptions.append(kwargs)
 
     async def unsubscribe(self, channel: str, symbols: list[str]) -> None:
         self.unsubscribes.append((channel, symbols))
@@ -827,3 +836,86 @@ def test_dnse_subscribe_quotes_routes_sdk_events() -> None:
     assert len(trading.unsubscribes) == 7
     assert trading.unsubscribes[0] == ("top_price.G1.json", ["VN30F1M"])
     assert client._quote_symbols == set()
+
+
+def test_dnse_trade_conversion_synthesizes_session_trade_id() -> None:
+    trade = Trade.from_dict(
+        {
+            "symbol": "41I1G9000",
+            "matchPrice": 1941.0,
+            "matchQtty": 5,
+            "totalVolumeTraded": 12345,
+            "receivedAt": 1735783200.0,
+        },
+    )
+    tick = dnse_trade_to_nautilus_trade_tick(trade, venue="HNX")
+    assert tick.instrument_id == InstrumentId.from_str("41I1G9000.HNX")
+    assert tick.price == Price.from_str("1941.0")
+    assert tick.size == Quantity.from_int(5)
+    assert tick.trade_id == TradeId("41I1G9000-12345")
+    assert tick.aggressor_side == AggressorSide.NO_AGGRESSOR
+
+
+def test_dnse_quote_conversion_builds_depth10_snapshot() -> None:
+    levels = [{"price": 1940.6 + i * 0.1, "qtty": 3 + i} for i in range(3)]
+    quote = Quote.from_dict(
+        {
+            "symbol": "41I1G9000",
+            "bid": levels,
+            "offer": [{"price": 1941.0 + i * 0.1, "qtty": 44 + i} for i in range(3)],
+            "receivedAt": 1735783200.0,
+        },
+    )
+    depth = dnse_quote_to_nautilus_depth10(quote, venue="HNX")
+    assert depth.instrument_id == InstrumentId.from_str("41I1G9000.HNX")
+    assert len(depth.bids) == 10
+    assert len(depth.asks) == 10
+    assert depth.bids[0].price == Price.from_str("1940.6")
+    assert depth.asks[0].price == Price.from_str("1941.0")
+    assert depth.bids[3].size == Quantity.from_int(0)  # padded to ten levels
+    assert depth.bid_counts[:3] == [3, 4, 5]
+    assert depth.bid_counts[3:] == [0] * 7
+
+
+def test_dnse_subscribe_trades_routes_sdk_events() -> None:
+    client, trading, _ = _dnse_client()
+    command = SimpleNamespace(
+        instrument_id=build_bar_type_for_symbol("41I1G9000", "1", "HNX").instrument_id,
+    )
+    asyncio.run(client._subscribe_trades(command))
+    assert len(trading.trade_subscriptions) == 1
+    subscription = trading.trade_subscriptions[0]
+    assert subscription["symbols"] == ["41I1G9000"]
+
+    subscription["on_trade"](
+        Trade.from_dict(
+            {
+                "symbol": "41I1G9000",
+                "matchPrice": 1941.0,
+                "matchQtty": 5,
+                "totalVolumeTraded": 12345,
+                "receivedAt": 1735783200.0,
+            },
+        ),
+    )
+    assert len(client.data) == 1
+    assert client.data[0].trade_id == TradeId("41I1G9000-12345")
+
+    asyncio.run(client._unsubscribe_trades(command))
+    assert trading.unsubscribes[0][0] == "tick.G1.json"
+
+
+def test_dnse_quote_stream_shared_between_quotes_and_depth10() -> None:
+    client, trading, _ = _dnse_client()
+    command = SimpleNamespace(
+        instrument_id=build_bar_type_for_symbol("41I1G9000", "1", "HNX").instrument_id,
+    )
+    asyncio.run(client._subscribe_quotes(command))
+    asyncio.run(client._subscribe_book_depth10(command))
+    assert len(trading.quote_subscriptions) == 1  # one shared SDK stream
+
+    asyncio.run(client._unsubscribe_quotes(command))
+    assert not trading.unsubscribes  # depth10 still uses the stream
+
+    asyncio.run(client._unsubscribe_book_depth10(command))
+    assert trading.unsubscribes[0][0] == "top_price.G1.json"

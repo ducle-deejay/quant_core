@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from nautilus_trader.common import Clock
 from nautilus_trader.live import InstrumentProviderConfig
 from nautilus_trader.live.providers import InstrumentProvider
 from nautilus_trader.model import InstrumentId, Venue
@@ -17,12 +18,13 @@ from .api.entrade_api import EntradeClient
 class DnseInstrumentProvider(InstrumentProvider):
     """Nautilus extension providing configured DNSE instruments."""
 
-    def __init__(self, config: DnseDataClientConfig) -> None:
+    def __init__(self, config: DnseDataClientConfig, clock: Clock | None = None) -> None:
         provider_config = config.instrument_provider or InstrumentProviderConfig(
             load_all=True,
         )
         super().__init__(provider_config)
         self._client_config = config
+        self._clock = clock
 
     async def load_all_async(self, filters: dict | None = None) -> None:
         for symbol in self._client_config.resolved_symbols:
@@ -41,7 +43,12 @@ class DnseInstrumentProvider(InstrumentProvider):
     def _build_instrument(self, symbol: str) -> object:
         return build_continuous_futures_contract(
             spec=self._client_config.instrument_spec.with_symbol(symbol),
+            ts_event_ns=self._load_ts(),
+            record_ts_init_ns=self._load_ts(),
         )
+
+    def _load_ts(self) -> int | None:
+        return self._clock.timestamp_ns() if self._clock is not None else None
 
 
 class EntradeInstrumentProvider(InstrumentProvider):
@@ -52,10 +59,12 @@ class EntradeInstrumentProvider(InstrumentProvider):
         client: EntradeClient | None,
         instrument_spec: FuturesInstrumentSpec,
         config: InstrumentProviderConfig | None = None,
+        clock: Clock | None = None,
     ) -> None:
         super().__init__(config=config or InstrumentProviderConfig(load_all=True))
         self._client = client
         self._instrument_spec = instrument_spec
+        self._clock = clock
         self._derivatives: dict = {}
         self._contracts: dict[str, EntradeMonthlyContract] = {}
 
@@ -83,7 +92,13 @@ class EntradeInstrumentProvider(InstrumentProvider):
             for contract in (EntradeMonthlyContract.from_payload(record),)
         }
         for contract in self._contracts.values():
-            self.add(contract.to_nautilus_instrument(self._instrument_spec))
+            self.add(
+                contract.to_nautilus_instrument(
+                    self._instrument_spec,
+                    ts_event=self._load_ts(),
+                    ts_init=self._load_ts(),
+                ),
+            )
 
     async def load_ids_async(
         self,
@@ -124,3 +139,6 @@ class EntradeInstrumentProvider(InstrumentProvider):
         if instrument_id.venue != self._instrument_spec.instrument_id().venue:
             return None
         return self._contracts.get(instrument_id.symbol.value)
+
+    def _load_ts(self) -> int | None:
+        return self._clock.timestamp_ns() if self._clock is not None else None

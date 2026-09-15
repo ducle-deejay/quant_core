@@ -15,7 +15,10 @@ Template-standard modules:
   unsupported-operation message.
 - `config.py`: `DnseDataClientConfig` and `EntradeExecClientConfig` node extensions.
 - `providers.py`: Instrument loading and storage for both venues.
-- `data.py`: DNSE bar subscriptions, historical requests, and reconnect recovery.
+- `data.py`: DNSE bar and quote subscriptions, historical requests, and
+  reconnect recovery. Quotes are served per monthly contract only — the
+  continuous symbol is bars-only, so resolve the active contract before
+  subscribing quotes. TradeTick subscription is not implemented.
 - `execution.py`: Entrade account state, reconciliation reports, and order execution.
 - `factories.py`: Client and provider construction from node configuration.
 

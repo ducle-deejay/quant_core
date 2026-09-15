@@ -24,7 +24,7 @@ class DnseLiveDataClientFactory(DataClientFactory):
     ) -> DnseLiveDataClient:
         if not isinstance(config, DnseDataClientConfig):
             raise TypeError("Expected DnseDataClientConfig")
-        provider = DnseInstrumentProvider(config=config)
+        provider = DnseInstrumentProvider(config=config, clock=clock)
         return DnseLiveDataClient(
             name=name,
             config=config,
@@ -53,6 +53,7 @@ class EntradeLiveExecClientFactory(ExecutionClientFactory):
             client=None,
             instrument_spec=config.instrument_spec,
             config=config.instrument_provider,
+            clock=clock,
         )
         return EntradeExecutionClient(
             name=name,
