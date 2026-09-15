@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
-from nautilus_trader.model.identifiers import TradeId
-from nautilus_trader.persistence.wranglers import BarDataWrangler
-from nautilus_trader.persistence.wranglers_v2 import OrderBookDepth10DataWranglerV2
+from nautilus_trader.model import AggressorSide
+from nautilus_trader.model import Bar
+from nautilus_trader.model import BarType
+from nautilus_trader.model import BookOrder
+from nautilus_trader.model import OrderBookDepth10
+from nautilus_trader.model import OrderSide
+from nautilus_trader.model import TradeId
+from nautilus_trader.model import TradeTick
 
 from market_data.instruments import build_continuous_futures_contract
 from market_data.instruments import build_futures_contract
@@ -36,7 +39,11 @@ def transform_day(
     """Transform one retained DNSE ingestion into Nautilus domain objects."""
     source = Path(raw_day)
     contracts = _load_contracts(source.parent / "contracts")
-    continuous, monthly = _build_instruments(instrument_config, contracts)
+    continuous, monthly = _build_instruments(
+        instrument_config,
+        contracts,
+        ts_event_ns=_ingestion_day_ts_ns(source),
+    )
     yield [continuous, *monthly.values()]
 
     root = source / "hnx" / "futures"
@@ -69,16 +76,23 @@ def _load_contracts(directory: Path) -> list[dict[str, str]]:
 def _build_instruments(
     instrument_config: str | Path,
     contracts: list[dict[str, str]],
+    ts_event_ns: int,
 ) -> tuple[Any, dict[str, Any]]:
     spec = load_futures_instrument_spec(instrument_config)
     register_futures_instrument_currency(spec)
-    continuous = build_continuous_futures_contract(spec)
+    continuous = build_continuous_futures_contract(
+        spec,
+        ts_event_ns=ts_event_ns,
+        record_ts_init_ns=ts_event_ns,
+    )
     monthly = {}
     for contract in contracts:
         instrument = build_futures_contract(
             spec.with_symbol(contract["symbol"]),
             activation=None,
             expiration=contract["expiration"],
+            ts_event=ts_event_ns,
+            ts_init=ts_event_ns,
             info={
                 "dnse_isin": contract["isin"],
                 "dnse_market_id": "DVX",
@@ -87,6 +101,12 @@ def _build_instruments(
         )
         monthly[instrument.id.value] = instrument
     return continuous, monthly
+
+
+def _ingestion_day_ts_ns(raw_day: Path) -> int:
+    """Stamp instrument definitions at the ingestion day's UTC midnight, so the
+    definition precedes that day's data and replays stay deterministic."""
+    return int(pd.Timestamp(date.fromisoformat(raw_day.name), tz="UTC").value)
 
 
 def _transform_bars(path: Path, instrument: Any) -> list[Any]:
@@ -103,9 +123,31 @@ def _transform_bars(path: Path, instrument: Any) -> list[Any]:
     ).sort_values("timestamp", kind="stable")
     _validate_prices(frame[["open", "high", "low", "close"]].to_numpy(dtype=float), "bar")
     _validate_sizes(frame["volume"].to_numpy(dtype=float), "bar", allow_zero=True)
-    return BarDataWrangler(BarType.from_str(BAR_TYPE), instrument).process(
-        frame.set_index("timestamp")[["open", "high", "low", "close", "volume"]],
-    )
+    bar_type = BarType.from_str(BAR_TYPE)
+    bars: list[Bar] = []
+    for timestamp, open_, high, low, close, volume in zip(
+        frame["timestamp"],
+        frame["open"],
+        frame["high"],
+        frame["low"],
+        frame["close"],
+        frame["volume"],
+        strict=True,
+    ):
+        ts_event = int(pd.Timestamp(timestamp).value)
+        bars.append(
+            Bar(
+                bar_type,
+                instrument.make_price(open_),
+                instrument.make_price(high),
+                instrument.make_price(low),
+                instrument.make_price(close),
+                instrument.make_qty(volume),
+                ts_event,
+                ts_event,
+            ),
+        )
+    return bars
 
 
 def _transform_trades(directory: Path, instrument: Any) -> Iterator[list[TradeTick]]:
@@ -177,8 +219,8 @@ def _normalize_trade_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 
 def _trade_ticks(frame: pd.DataFrame, instrument: Any) -> list[TradeTick]:
     sides = {
-        "BUY": AggressorSide.BUYER,
-        "SELL": AggressorSide.SELLER,
+        "BUY": AggressorSide.BUY,
+        "SELL": AggressorSide.SELL,
         "UNSPECIFIED": AggressorSide.NO_AGGRESSOR,
     }
     result = []
@@ -224,11 +266,45 @@ def _transform_depth(directory: Path, instrument: Any) -> Iterator[list[Any]]:
             is_last=index == len(groups) - 1,
         )
         if not emitted.empty:
-            yield OrderBookDepth10DataWranglerV2(
-                instrument_id=instrument.id.value,
-                price_precision=instrument.price_precision,
-                size_precision=instrument.size_precision,
-            ).from_pandas(emitted[_depth_columns()])
+            yield _depth_objects(emitted, instrument)
+
+
+def _depth_objects(frame: pd.DataFrame, instrument: Any) -> list[OrderBookDepth10]:
+    result: list[OrderBookDepth10] = []
+    for row in frame.itertuples(index=False):
+        ts_event = int(pd.Timestamp(row.ts_event).value)
+        bids = [
+            BookOrder(
+                OrderSide.BUY,
+                instrument.make_price(getattr(row, f"bid_price_{level}")),
+                instrument.make_qty(getattr(row, f"bid_size_{level}")),
+                0,
+            )
+            for level in range(DEPTH_LEVELS)
+        ]
+        asks = [
+            BookOrder(
+                OrderSide.SELL,
+                instrument.make_price(getattr(row, f"ask_price_{level}")),
+                instrument.make_qty(getattr(row, f"ask_size_{level}")),
+                0,
+            )
+            for level in range(DEPTH_LEVELS)
+        ]
+        result.append(
+            OrderBookDepth10(
+                instrument_id=instrument.id,
+                bids=bids,
+                asks=asks,
+                bid_counts=[int(getattr(row, f"bid_count_{level}")) for level in range(DEPTH_LEVELS)],
+                ask_counts=[int(getattr(row, f"ask_count_{level}")) for level in range(DEPTH_LEVELS)],
+                flags=int(row.flags),
+                sequence=int(row.sequence),
+                ts_event=ts_event,
+                ts_init=ts_event,
+            ),
+        )
+    return result
 
 
 def _normalize_depth_row(
