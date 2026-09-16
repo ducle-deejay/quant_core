@@ -24,6 +24,8 @@ DEFAULT_INSTRUMENT_PROVIDER = InstrumentProviderConfig(load_all=True)
 class DnseDataClientConfig(DataClientConfig):
     """Nautilus extension configuration for the DNSE live data client."""
 
+    instrument_spec: FuturesInstrumentSpec
+
     def __new__(
         cls,
         *,
@@ -162,6 +164,8 @@ class EntradeExecClientConfig(ExecutionClientConfig):
     live real money); it is independent of the Nautilus node ``Environment``
     context, which should be ``Environment.LIVE`` for this client.
     """
+
+    instrument_spec: FuturesInstrumentSpec
 
     def __new__(
         cls,

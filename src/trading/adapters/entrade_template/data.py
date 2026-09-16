@@ -617,6 +617,13 @@ class DnseLiveDataClient(MarketDataClient):
         self._bar_types_by_key.pop(key, None)
         self._subscribed_keys.discard(key)
         self._last_bar_ts_by_key.pop(key, None)
+        if self._trading_client is None:
+            raise RuntimeError("DNSE data client is not connected")
+        suffix = "msgpack" if self._config.ws_encoding == "msgpack" else "json"
+        await self._trading_client.unsubscribe(
+            f"ohlc_closed.{resolution}.{suffix}",
+            [symbol],
+        )
 
     async def _request_data(self, request: RequestCustomData) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)

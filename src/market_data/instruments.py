@@ -70,6 +70,58 @@ class FuturesInstrumentSpec:
     def with_symbol(self, symbol: str) -> FuturesInstrumentSpec:
         return replace(self, symbol=symbol)
 
+    def to_dict(self) -> dict:
+        """Return the JSON-native field mapping used by str/from_str."""
+        return {
+            "symbol": self.symbol,
+            "venue": self.venue,
+            "underlying": self.underlying,
+            "currency_code": self.currency_code,
+            "currency_precision": self.currency_precision,
+            "currency_iso4217": self.currency_iso4217,
+            "currency_name": self.currency_name,
+            "price_precision": self.price_precision,
+            "price_increment": self.price_increment,
+            "multiplier": self.multiplier,
+            "lot_size": self.lot_size,
+            "exchange": self.exchange,
+            "asset_class": self.asset_class.name,
+            "currency_type": self.currency_type.name,
+            "size_precision": self.size_precision,
+            "vsd_initial_margin_ratio": self.vsd_initial_margin_ratio,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> FuturesInstrumentSpec:
+        """Restore a spec from the to_dict mapping."""
+        return cls(
+            symbol=data["symbol"],
+            venue=data["venue"],
+            underlying=data["underlying"],
+            currency_code=data["currency_code"],
+            currency_precision=data["currency_precision"],
+            currency_iso4217=data["currency_iso4217"],
+            currency_name=data["currency_name"],
+            price_precision=data["price_precision"],
+            price_increment=data["price_increment"],
+            multiplier=data["multiplier"],
+            lot_size=data["lot_size"],
+            exchange=data.get("exchange"),
+            asset_class=AssetClass[data["asset_class"]],
+            currency_type=CurrencyType[data["currency_type"]],
+            size_precision=data.get("size_precision", 0),
+            vsd_initial_margin_ratio=data.get("vsd_initial_margin_ratio"),
+        )
+
+    def __str__(self) -> str:
+        # Nautilus config serialization encodes values whose type exposes
+        # from_str as str(value); the canonical string is a stable JSON map.
+        return json.dumps(self.to_dict(), sort_keys=True)
+
+    @classmethod
+    def from_str(cls, value: str) -> FuturesInstrumentSpec:
+        return cls.from_dict(json.loads(value))
+
 
 def load_futures_instrument_spec(path: str | Path) -> FuturesInstrumentSpec:
     """Load the futures instrument contract from JSON."""
