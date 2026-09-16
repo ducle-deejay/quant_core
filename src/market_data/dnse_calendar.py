@@ -37,7 +37,8 @@ __all__ = [
 def load_vn_market_working_dates_from_dnse() -> tuple[str, ...]:
     """Return the working dates published by the DNSE OpenAPI.
 
-    Loads the repo-root ``.env``, creates the verified DNSE REST client and
+    Loads the repo-root ``.env``, creates a DNSE REST client with TLS
+certificate verification enforced and
     calls the working-dates endpoint once per process (LRU-cached).
 
     Returns

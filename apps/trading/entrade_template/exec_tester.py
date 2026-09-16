@@ -21,8 +21,8 @@ Two modes:
   CancelAllOrders sweep, QueryAccount — then shuts the node down. One run
   completes in well under a minute during a trading session.
 
-Every Entrade/DNSE API upgrade is accepted by re-running both modes; no
-per-capability tests need rewriting.
+Upgrade workflow: re-run both modes to exercise the full adapter
+surface.
 
 Usage:
     uv run python apps/trading/entrade_template/exec_tester.py                 # dry run: commands are built but not sent

@@ -277,7 +277,7 @@ def parse_dnse_ohlc_body(body: Any) -> dict[str, list[Any]]:
     if isinstance(body, str):
         body = json.loads(body)
     if not isinstance(body, dict):
-        raise ValueError(  # noqa: TRY004 - preserve the adapter's payload error contract.
+        raise ValueError(  # noqa: TRY004
             f"Unexpected DNSE OHLC response type: {type(body)}",
         )
 
@@ -377,8 +377,7 @@ def _load_catalog_bars(
 
     The catalog stores bars under ``data/bar/{bar_type}`` and filters on
     ``ts_init``; catalog bars carry ``ts_event == ts_init`` at the bar open
-    time in UTC, matching the DNSE API conversion path (see
-    ``dnse_ohlc_to_nautilus_bar``).
+    time in UTC (see ``dnse_ohlc_to_nautilus_bar``).
     """
     try:
         bars = catalog.query_bars(
@@ -468,7 +467,7 @@ def _load_legacy_catalog_bars(
 
 @dataclass(frozen=True)
 class SubscriptionKey:
-    """NOX composition key for a DNSE OHLC subscription."""
+    """Composition key for a DNSE OHLC subscription."""
 
     symbol: str
     resolution: str
