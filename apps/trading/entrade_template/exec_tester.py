@@ -10,16 +10,32 @@ A pre-flight step authenticates with the credentials in .env, resolves the
 active VN30F monthly contract, and derives the Nautilus account id
 ("DNSE-<investorAccountId>") required by the exec client config.
 
+Two modes:
+
+- default: the builtin ExecTester with the full flag set — aggressive DAY
+  limit quotes on both sides (LO buy + sell), TOB-offset maintenance that
+  exercises the modify path, an MOK (market FOK) opening position, cancel
+  and MAK close on stop. Runs until Ctrl+C.
+- --sweep: a one-shot sequential strategy covering the commands the builtin
+  never sends — MTL (market-to-limit) entry, MOK entry, MAK flatten,
+  CancelAllOrders sweep, QueryAccount — then shuts the node down. One run
+  completes in well under a minute during a trading session.
+
+Every Entrade/DNSE API upgrade is accepted by re-running both modes; no
+per-capability tests need rewriting.
+
 Usage:
-    .venv-v2/bin/python apps/trading/entrade_template/exec_tester.py                 # dry run: commands are built but not sent
-    .venv-v2/bin/python apps/trading/entrade_template/exec_tester.py --live-orders   # submit real (demo) orders
+    uv run python apps/trading/entrade_template/exec_tester.py                 # dry run: commands are built but not sent
+    uv run python apps/trading/entrade_template/exec_tester.py --live-orders   # submit real (demo) orders
+    uv run python apps/trading/entrade_template/exec_tester.py --live-orders --sweep
 Env: API_KEY, API_SECRET, ENTRADE_USERNAME, ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -29,12 +45,16 @@ from nautilus_trader.common import LogLevel
 from nautilus_trader.config import LiveNodeConfig
 from nautilus_trader.config import LoggerConfig
 from nautilus_trader.live import LiveNode
+from nautilus_trader.model import AccountId
 from nautilus_trader.model import ClientId
+from nautilus_trader.model import InstrumentId
+from nautilus_trader.model import OrderSide
 from nautilus_trader.model import Quantity
 from nautilus_trader.model import StrategyId
 from nautilus_trader.model import TimeInForce
 from nautilus_trader.model import TraderId
 from nautilus_trader.testkit import ExecTesterConfig
+from nautilus_trader.trading import Strategy
 
 from trading.adapters.entrade_template.api.entrade_api import EntradeClient
 from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
@@ -87,6 +107,142 @@ def resolve_demo_context(spec) -> tuple[str, object]:
     return account_id, contract_instrument_id
 
 
+class CapabilitySweepStrategy(Strategy):
+    """One-shot sweep of the commands the builtin ExecTester never sends.
+
+    Sequence: MTL buy -> MOK buy -> MAK flatten -> CancelAllOrders ->
+    QueryAccount -> shutdown. Each step advances on the first resolution
+    event; a resting MTL is canceled by a watchdog timer. on_stop cancels
+    any stray order and flattens any residual position with MAK.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._contract_id: InstrumentId | None = None
+        self._account_id: AccountId | None = None
+        self._dry_run = True
+        self._step = 0  # 0=MTL 1=MOK 2=flatten 3=done
+        self._pending = False
+        self._position = 0
+        self._events: list[str] = []
+        self._mtl_order = None
+
+    def configure(
+        self,
+        contract_id: InstrumentId,
+        account_id: str,
+        *,
+        dry_run: bool,
+    ) -> None:
+        # The PyO3 Strategy.__new__ accepts at most one positional argument,
+        # so subclasses take no constructor arguments.
+        self._contract_id = contract_id
+        self._account_id = AccountId.from_str(account_id)
+        self._dry_run = dry_run
+
+    def on_start(self) -> None:
+        if self._dry_run:
+            print("SWEEP dry run: re-run with --live-orders during a session")
+            self.shutdown_system("sweep skipped in dry run")
+            return
+        # Marketable orders need a cached quote or the risk engine denies
+        # them with MARKET_PRICE_UNAVAILABLE before they reach the broker.
+        self.subscribe_quotes(self._contract_id)
+
+    def on_quote_tick(self, tick) -> None:
+        if self._step != 0:
+            return
+        self._pending = True
+        self._mtl_order = self.order_factory.market_to_limit(
+            self._contract_id, OrderSide.BUY, Quantity.from_str(ORDER_QTY),
+        )
+        self.submit_order(self._mtl_order)
+        self.clock.set_timer(
+            "sweep-mtl-watch",
+            timedelta(seconds=10),
+            callback=self._on_mtl_watch,
+        )
+
+    def _on_mtl_watch(self, event) -> None:
+        if (
+            self._step == 0
+            and self._pending
+            and self._mtl_order is not None
+            and self._mtl_order.is_open
+        ):
+            self.cancel_order(self._mtl_order.client_order_id)
+
+    def _advance(self) -> None:
+        if self._step == 0:
+            self._step = 1
+            print(f"SWEEP mtl resolved position={self._position}")
+            self._pending = True
+            self.submit_order(self.order_factory.market(
+                self._contract_id, OrderSide.BUY, Quantity.from_str(ORDER_QTY),
+                time_in_force=TimeInForce.FOK,
+            ))
+        elif self._step == 1:
+            self._step = 2
+            print(f"SWEEP mok resolved position={self._position}")
+            if self._position != 0:
+                self._pending = True
+                self.submit_order(self.order_factory.market(
+                    self._contract_id,
+                    OrderSide.SELL if self._position > 0 else OrderSide.BUY,
+                    Quantity.from_str(str(abs(self._position))),
+                    time_in_force=TimeInForce.IOC,
+                ))
+            else:
+                self._advance()
+        elif self._step == 2:
+            self._step = 3
+            print(f"SWEEP flatten done position={self._position}")
+            self.cancel_all_orders(self._contract_id)
+            self.query_account(self._account_id, client_id=ClientId(CLIENT_NAME))
+            self.shutdown_system("capability sweep complete")
+
+    def on_order_filled(self, event) -> None:
+        side = 1 if event.order_side == OrderSide.BUY else -1
+        self._position += side * int(event.last_qty.as_decimal())
+        self._events.append(
+            f"FILL qty={event.last_qty} px={event.last_px} commission={event.commission}",
+        )
+        if self._pending:
+            self._pending = False
+            self._advance()
+
+    def on_order_canceled(self, event) -> None:
+        self._events.append(f"CANCELED {event.client_order_id}")
+        if self._pending:
+            self._pending = False
+            self._advance()
+
+    def on_order_rejected(self, event) -> None:
+        self._events.append(f"REJECTED {event.client_order_id} reason={event.reason}")
+        if self._pending:
+            self._pending = False
+            self._advance()
+
+    def on_order_denied(self, event) -> None:
+        self._events.append(f"DENIED {event.client_order_id} reason={event.reason}")
+        if self._pending:
+            self._pending = False
+            self._advance()
+
+    def on_stop(self) -> None:
+        self.cancel_all_orders(self._contract_id)
+        if self._position != 0:
+            self.submit_order(self.order_factory.market(
+                self._contract_id,
+                OrderSide.SELL if self._position > 0 else OrderSide.BUY,
+                Quantity.from_str(str(abs(self._position))),
+                time_in_force=TimeInForce.IOC,
+            ))
+        for line in self._events:
+            print(line)
+        print(f"SWEEP final position={self._position}")
+
+
 def main() -> None:
     """Run the Entrade demo execution tester."""
     parser = argparse.ArgumentParser(description="Entrade demo execution tester")
@@ -95,6 +251,11 @@ def main() -> None:
         "--live-orders",
         action="store_true",
         help="submit real orders on the demo account (default: dry run)",
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="one-shot MTL/MOK/CancelAll/QueryAccount sweep instead of the builtin loop",
     )
     args = parser.parse_args()
     load_dotenv(args.env, override=True)
@@ -130,27 +291,40 @@ def main() -> None:
         )
         .build()
     )
-    node.add_builtin_strategy(
-        "ExecTester",
-        ExecTesterConfig(
-            strategy_id=StrategyId.from_str("EXEC_TESTER-001"),
-            instrument_id=contract_instrument_id,
-            client_id=ClientId.from_str(CLIENT_NAME),
-            order_qty=Quantity.from_str(ORDER_QTY),
-            subscribe_quotes=True,
-            subscribe_trades=True,
-            enable_limit_buys=True,
-            enable_limit_sells=False,
-            tob_offset_ticks=1,
-            limit_time_in_force=TimeInForce.DAY,
-            limit_aggressive=True,
-            cancel_orders_on_stop=True,
-            close_positions_on_stop=True,
-            close_positions_time_in_force=TimeInForce.IOC,
+    if args.sweep:
+        strategy = CapabilitySweepStrategy()
+        strategy.configure(
+            contract_instrument_id,
+            account_id,
             dry_run=not args.live_orders,
-            log_data=False,
-        ),
-    )
+        )
+        node.add_strategy(strategy)
+    else:
+        node.add_builtin_strategy(
+            "ExecTester",
+            ExecTesterConfig(
+                strategy_id=StrategyId.from_str("EXEC_TESTER-001"),
+                instrument_id=contract_instrument_id,
+                client_id=ClientId.from_str(CLIENT_NAME),
+                order_qty=Quantity.from_str(ORDER_QTY),
+                subscribe_quotes=True,
+                subscribe_trades=True,
+                enable_limit_buys=True,
+                enable_limit_sells=True,
+                tob_offset_ticks=1,
+                limit_time_in_force=TimeInForce.DAY,
+                limit_aggressive=True,
+                modify_orders_to_maintain_tob_offset=True,
+                open_position_on_start_qty=Decimal(ORDER_QTY),
+                open_position_on_first_quote=True,
+                open_position_time_in_force=TimeInForce.FOK,
+                cancel_orders_on_stop=True,
+                close_positions_on_stop=True,
+                close_positions_time_in_force=TimeInForce.IOC,
+                dry_run=not args.live_orders,
+                log_data=False,
+            ),
+        )
 
     node.run()
 
