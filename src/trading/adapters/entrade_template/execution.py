@@ -81,11 +81,13 @@ def entrade_order_parameters(order: Any) -> tuple[str, str, int, float]:
         raise ValueError("Entrade derivative order quantity must be a whole number")
     quantity = int(quantity_decimal)
 
-    if order.order_type == OrderType.LIMIT and order.time_in_force in {
-        TimeInForce.DAY,
-        TimeInForce.GTC,
-    }:
+    if order.order_type == OrderType.LIMIT and order.time_in_force == TimeInForce.DAY:
         return side, "LO", quantity, order.price.as_double()
+    if order.order_type == OrderType.LIMIT and order.time_in_force == TimeInForce.GTC:
+        raise ValueError(
+            "Entrade/HNX LO orders are valid through the trading day; "
+            "LIMIT with GTC is unsupported",
+        )
     if order.order_type == OrderType.MARKET_TO_LIMIT:
         return side, "MTL", quantity, 0.0
     if order.order_type == OrderType.MARKET and order.time_in_force == TimeInForce.IOC:

@@ -146,6 +146,7 @@ def main() -> None:
             limit_aggressive=True,
             cancel_orders_on_stop=True,
             close_positions_on_stop=True,
+            close_positions_time_in_force=TimeInForce.IOC,
             dry_run=not args.live_orders,
             log_data=False,
         ),

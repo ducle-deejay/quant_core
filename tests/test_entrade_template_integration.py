@@ -270,6 +270,7 @@ class LifecycleStrategy(Strategy):
                 OrderSide.BUY,
                 Quantity.from_int(1),
                 price=Price.from_str("1905.8"),
+                time_in_force=TimeInForce.DAY,
             )
             self.submit_order(self.order)
 

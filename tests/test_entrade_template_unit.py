@@ -642,6 +642,70 @@ def test_entrade_order_type_and_status_mappings_cover_supported_wire_values() ->
     assert entrade_order_type("MAK")[0].name == "MARKET"
 
 
+@pytest.mark.parametrize(
+    ("order_type", "time_in_force", "side", "order_price", "expected"),
+    [
+        (
+            OrderType.LIMIT,
+            TimeInForce.DAY,
+            OrderSide.SELL,
+            1900.5,
+            ("NS", "LO", 2, 1900.5),
+        ),
+        (
+            OrderType.MARKET_TO_LIMIT,
+            TimeInForce.DAY,
+            OrderSide.SELL,
+            0.0,
+            ("NS", "MTL", 2, 0.0),
+        ),
+        (
+            OrderType.MARKET,
+            TimeInForce.IOC,
+            OrderSide.BUY,
+            0.0,
+            ("NB", "MAK", 2, 0.0),
+        ),
+        (
+            OrderType.MARKET,
+            TimeInForce.FOK,
+            OrderSide.SELL,
+            0.0,
+            ("NS", "MOK", 2, 0.0),
+        ),
+    ],
+)
+def test_entrade_order_parameters_cover_supported_order_combinations(
+    order_type: OrderType,
+    time_in_force: TimeInForce,
+    side: OrderSide,
+    order_price: float,
+    expected: tuple[str, str, int, float],
+) -> None:
+    order = SimpleNamespace(
+        side=side,
+        quantity=Quantity.from_int(2),
+        order_type=order_type,
+        time_in_force=time_in_force,
+        price=Price.from_str(str(order_price)),
+    )
+
+    assert entrade_order_parameters(order) == expected
+
+
+def test_entrade_rejects_limit_gtc_without_downgrading_to_day_order() -> None:
+    order = SimpleNamespace(
+        side=OrderSide.BUY,
+        quantity=Quantity.from_int(1),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Price.from_str("1900.5"),
+    )
+
+    with pytest.raises(ValueError, match="LIMIT with GTC is unsupported"):
+        entrade_order_parameters(order)
+
+
 def test_entrade_rejects_unsupported_orders_and_zero_qmax_without_broker_order() -> (
     None
 ):
