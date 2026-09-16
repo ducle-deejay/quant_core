@@ -19,6 +19,7 @@ Treat notation as a correctness boundary. Within a defined scope, use one stable
    - Names of specific tools, products, and repositories are proper nouns and stand as-is.
    - Domain-specific abbreviations of this project's field must have the full term written once beside their first appearance in a reply.
 3. **Substance over ceremony.** Keep every detail needed for correctness; remove repetition, meta-commentary, and padding. This trims presentation only - never flatten the reasoning itself.
+4. **No filler.** Do not use stock openings or endings such as “Sure”, “Understood”, “In summary”, or “Let me...”. Do not repeat the request, the context, or a point already made. Include only content that answers the question or supports the decision.
 
 ## Commit message format
 
