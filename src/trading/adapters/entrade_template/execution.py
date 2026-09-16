@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import NotImplementedType
 from typing import Any
 
 from nautilus_trader.core import UUID4
@@ -366,6 +367,9 @@ class EntradeExecutionClient(ExecutionClient):
             reports = [
                 report for report in reports if report.order_status not in terminal
             ]
+        start = getattr(command, "start", None)
+        if start is not None:
+            reports = [report for report in reports if report.ts_last >= start]
         return reports
 
     async def _generate_fill_reports(
@@ -393,6 +397,9 @@ class EntradeExecutionClient(ExecutionClient):
                 for report in reports
                 if report.instrument_id == command.instrument_id
             ]
+        start = getattr(command, "start", None)
+        if start is not None:
+            reports = [report for report in reports if report.ts_event >= start]
         return reports
 
     async def _generate_position_status_reports(
@@ -419,53 +426,16 @@ class EntradeExecutionClient(ExecutionClient):
 
     async def _generate_mass_status(
         self, lookback_mins: int | None = None
-    ) -> ExecutionMassStatus | None:
+    ) -> ExecutionMassStatus | NotImplementedType | None:
         self._require_account()
         assert self._client is not None
-        balance, orders_payload, deals_payload = await asyncio.gather(
-            asyncio.to_thread(self._client.get_account_balance, self._investor_id),
-            asyncio.to_thread(
-                self._client.list_orders,
-                investor_account_id=self._investor_account_id,
-                end=255,
-            ),
-            asyncio.to_thread(
-                self._client.list_deals,
-                investor_account_id=self._investor_account_id,
-                end=255,
-            ),
+        balance = await asyncio.to_thread(
+            self._client.get_account_balance, self._investor_id
         )
         self._generate_balance(balance)
-
-        order_payloads = orders_payload.get("data", [])
-        if lookback_mins is not None:
-            cutoff_ns = self.clock.timestamp_ns() - lookback_mins * 60 * 1_000_000_000
-            order_payloads = [
-                payload
-                for payload in order_payloads
-                if _timestamp_ns(payload.get("modifiedDate"), 0) >= cutoff_ns
-            ]
-        order_reports = [
-            self._order_status_report(payload) for payload in order_payloads
-        ]
-        fill_reports = [
-            report
-            for payload in order_payloads
-            for report in self._fill_reports(payload)
-        ]
-        position_reports = self._position_status_reports(deals_payload.get("data", []))
-
-        mass_status = ExecutionMassStatus(
-            client_id=self.client_id,
-            account_id=self.account_id,
-            venue=self.venue,
-            report_id=UUID4(),
-            ts_init=self.clock.timestamp_ns(),
-        )
-        mass_status.add_order_reports(order_reports)
-        mass_status.add_fill_reports(fill_reports)
-        mass_status.add_position_reports(position_reports)
-        return mass_status
+        # The runtime assembles the mass from the report hooks below and
+        # rejects an assembled mass whose identity does not match the client.
+        return NotImplemented
 
     async def _submit_order(self, command: SubmitOrder) -> None:
         await self._submit_order_object(command.order)

@@ -860,6 +860,8 @@ def test_entrade_account_order_fill_position_and_mass_reports_are_exact() -> Non
     status_report = client._order_status_report(payload)
     fill_reports = client._fill_reports(payload)
     position_reports = client._position_status_reports(api.deals)
+    # The rc5 runtime assembles the mass from the report hooks; the adapter
+    # only pushes the account state and yields NotImplemented.
     mass_status = asyncio.run(client._generate_mass_status())
 
     assert isinstance(balance, AccountBalance)
@@ -869,10 +871,7 @@ def test_entrade_account_order_fill_position_and_mass_reports_are_exact() -> Non
     assert fill_reports[0].commission.as_decimal() == 31_500
     assert position_reports[0].position_side == PositionSide.LONG
     assert position_reports[0].avg_px_open == Decimal("1903.333333333333333333")
-    assert mass_status is not None
-    assert len(mass_status.order_reports) == 1
-    assert len(mass_status.fill_reports[VenueOrderId("7001")]) == 1
-    assert len(mass_status.position_reports) == 1
+    assert mass_status is NotImplemented
 
 
 def test_dnse_quote_conversion_preserves_top_of_book() -> None:
