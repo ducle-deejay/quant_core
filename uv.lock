@@ -7,9 +7,6 @@ resolution-markers = [
     "sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
-[options]
-prerelease-mode = "explicit"
-
 [manifest]
 members = [
     "alpha-core",
@@ -247,9 +244,13 @@ wheels = [
 [[package]]
 name = "nautilus-trader"
 version = "2.0.0rc5"
-source = { registry = "/Users/ducle/repos/nautilus_trader/dist" }
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/67/69d7a90c86c55abe46b1097b5353dc590285df2f7a8a64c1fef678398f84/nautilus_trader-2.0.0rc5.tar.gz", hash = "sha256:d566bade9e8dc6ad35de0e2566658fbd1ae75a89ee2c45c8e48de5fcc6929399", size = 10704087, upload-time = "2026-09-15T06:13:57.781Z" }
 wheels = [
-    { path = "/Users/ducle/repos/nautilus_trader/dist/nautilus_trader-2.0.0rc5-cp314-cp314-macosx_11_0_arm64.whl" },
+    { url = "https://files.pythonhosted.org/packages/ef/eb/8f629411b90c0b15e080979aa0309d77a292f8c20332b60dddf7f6f158db/nautilus_trader-2.0.0rc5-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:4c68beff00930f706decf15b5fda650bbcaee45d0f31c72e4e34a97d9c41b157", size = 60046167, upload-time = "2026-09-15T06:08:27.764Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/af/aed1e2d60c846b78add240b7c2ae7857f239225afe60d82a5f538fb32171/nautilus_trader-2.0.0rc5-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:450f158b45d1487252a0a29899e7b1ba32a9935e45b83e35b80562dac08eda71", size = 65829514, upload-time = "2026-09-15T06:08:31.458Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/90/39335b0e9f72690a212df61268393a2a40f655e4163770bd2bd6859168a9/nautilus_trader-2.0.0rc5-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:1cd460c7baa56a37b4e23b56f5d3fdfb46113e4206380a488f709f8efd5c0cdb", size = 70023163, upload-time = "2026-09-15T06:08:35.623Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/53/4cd93c8619742f05abdf26a3177c2372240d984e00ca166fe56d7299eff5/nautilus_trader-2.0.0rc5-cp314-cp314-win_amd64.whl", hash = "sha256:6c9d9564348f8ae26d12a6f7c9a8665aba9c3d04fbac13b396864da384462ba6", size = 64472205, upload-time = "2026-09-15T06:08:39.729Z" },
 ]
 
 [[package]]

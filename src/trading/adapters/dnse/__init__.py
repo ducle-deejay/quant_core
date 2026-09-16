@@ -1,1 +1,0 @@
-"""DNSE Nautilus data adapter."""

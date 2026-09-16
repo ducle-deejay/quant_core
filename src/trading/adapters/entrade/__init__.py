@@ -1,1 +1,0 @@
-"""Entrade Nautilus execution adapter."""

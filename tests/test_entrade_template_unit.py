@@ -827,7 +827,7 @@ def test_entrade_cancel_endpoint_and_poll_stop_on_terminal_status() -> None:
     terminal["id"] = 7004
     api.orders[-1] = terminal
     poll_context = EntradeOrderContext(order, VenueOrderId("7004"), set())
-    with patch("trading.adapters.entrade.execution.asyncio.sleep", new=_no_sleep):
+    with patch("trading.adapters.entrade_template.execution.asyncio.sleep", new=_no_sleep):
         asyncio.run(client._poll_order(poll_context))
     assert api.get_order_calls[-1] == "7004"
 
