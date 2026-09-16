@@ -10,6 +10,7 @@ quantcore = { workspace = true }
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "uvloop>=0.22.0",
 ]
 
 [tool.pytest.ini_options]
