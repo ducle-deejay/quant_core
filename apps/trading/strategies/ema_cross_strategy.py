@@ -23,7 +23,7 @@ class EMACrossStrategyConfig(StrategyConfig):
         self,
         *,
         instrument_id: InstrumentId,
-        trade_size: Decimal,
+        trade_size: Decimal = Decimal("1"),
         signal_name: str = SIGNAL_NAME,
         **_kwargs: object,
     ) -> None:
