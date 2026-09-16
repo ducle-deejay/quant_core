@@ -1,0 +1,29 @@
+{
+  "node_name": "ENTRADE-NODE-001",
+  "trader_id": "TESTER-001",
+  "environment": "live",
+  "data_clients": {
+    "DNSE": {
+      "config": "trading.adapters.entrade_template.config:DnseDataClientConfig",
+      "factory": "trading.adapters.entrade_template.factories:DnseLiveDataClientFactory",
+      "values": {
+        "api_key": "REPLACE_API_KEY",
+        "api_secret": "REPLACE_API_SECRET",
+        "historical_source": "api"
+      }
+    }
+  },
+  "exec_clients": {
+    "DNSE": {
+      "config": "trading.adapters.entrade_template.config:EntradeExecClientConfig",
+      "factory": "trading.adapters.entrade_template.factories:EntradeLiveExecClientFactory",
+      "values": {
+        "username": "REPLACE_USERNAME",
+        "password": "REPLACE_PASSWORD",
+        "investor_id": null,
+        "account_id": "DNSE-REPLACE",
+        "account": "demo"
+      }
+    }
+  }
+}

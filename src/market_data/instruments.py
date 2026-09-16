@@ -107,8 +107,8 @@ class FuturesInstrumentSpec:
             multiplier=data["multiplier"],
             lot_size=data["lot_size"],
             exchange=data.get("exchange"),
-            asset_class=AssetClass[data["asset_class"]],
-            currency_type=CurrencyType[data["currency_type"]],
+            asset_class=AssetClass.from_str(data["asset_class"]),
+            currency_type=CurrencyType.from_str(data["currency_type"]),
             size_precision=data.get("size_precision", 0),
             vsd_initial_margin_ratio=data.get("vsd_initial_margin_ratio"),
         )
