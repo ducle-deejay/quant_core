@@ -41,9 +41,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from nautilus_trader.common import Environment
-from nautilus_trader.common import LogLevel
 from nautilus_trader.config import LiveNodeConfig
-from nautilus_trader.config import LoggerConfig
 from nautilus_trader.live import LiveNode
 from nautilus_trader.model import AccountId
 from nautilus_trader.model import ClientId
@@ -147,10 +145,10 @@ class CapabilitySweepStrategy(Strategy):
             return
         # Marketable orders need a cached quote or the risk engine denies
         # them with MARKET_PRICE_UNAVAILABLE before they reach the broker.
-        self.subscribe_quotes(self._contract_id)
+        self.subscribe_quotes(self._contract_id, client_id=ClientId(CLIENT_NAME))
 
-    def on_quote_tick(self, tick) -> None:
-        if self._step != 0:
+    def on_quote(self, tick) -> None:
+        if self._step != 0 or self._pending:
             return
         self._pending = True
         self._mtl_order = self.order_factory.market_to_limit(

@@ -50,12 +50,12 @@ Status legend:
 | TC-E01 | Market BUY - submit and fill | N/A | market orders are IOC/FOK-only on HNX; plain GTC market is rejected by design |
 | TC-E02 | Market SELL - submit and fill | N/A | market orders are IOC/FOK-only on HNX; plain GTC market is rejected by design |
 | TC-E03 | Market order with IOC TIF | PASS | order 7321773 (MAK filled, stop cleanup 2026-09-16) |
-| TC-E04 | Market order with FOK TIF | PENDING | awaiting live session |
+| TC-E04 | Market order with FOK TIF | PASS | orders 7336827, 7341838 (MOK NB filled, 2026-09-17) |
 | TC-E05 | Market order with quote quantity | N/A | quote-quantity orders unsupported |
 | TC-E06 | Close position via market order on stop | PASS | order 7321773 (position closed via IOC market on stop) |
 | TC-E10 | Limit BUY GTC - submit and accept | N/A | LIMIT GTC rejected by design (HNX LO is day-valid) |
 | TC-E11 | Limit SELL GTC - submit and accept | N/A | LIMIT GTC rejected by design (HNX LO is day-valid) |
-| TC-E12 | Limit BUY and SELL pair | PENDING | awaiting live session |
+| TC-E12 | Limit BUY and SELL pair | PASS | orders 7336828 (LO NB filled), 7336829 (LO NS filled), 2026-09-17 |
 | TC-E13 | Limit IOC aggressive fill | N/A | LIMIT IOC unsupported by the venue mapping |
 | TC-E14 | Limit IOC passive - no fill | N/A | LIMIT IOC unsupported by the venue mapping |
 | TC-E15 | Limit FOK fill | N/A | LIMIT FOK unsupported by the venue mapping |
@@ -77,7 +77,7 @@ Status legend:
 | TC-E33 | Cancel-replace limit SELL | N/A | cancel-replace covered by separate cancel + submit |
 | TC-E34 | Modify stop trigger price | N/A | stop orders unsupported |
 | TC-E35 | Cancel-replace stop order | N/A | stop orders unsupported |
-| TC-E36 | Modify rejected | PENDING | awaiting live session |
+| TC-E36 | Modify rejected | PASS | 62 OrderModifyRejected live on 2026-09-17 with reason "Entrade order modification is not supported by the current MVP adapter" |
 | TC-E40 | Cancel single limit order | PENDING | awaiting live session |
 | TC-E41 | Cancel all on stop | PENDING | awaiting live session |
 | TC-E42 | Individual cancels on stop | PENDING | awaiting live session |
@@ -118,10 +118,11 @@ Status legend:
 ### Adapter-specific cases
 
 
-| EX-01 | MarketToLimit (MTL) submit and fill | PASS | order 7313762 (MTL filled) - adapter-specific wire type beyond the spec matrix |
+| EX-01 | MarketToLimit (MTL) submit and fill | PASS | 11 MTL orders filled live on 2026-09-17 (7341336-7341345, 7341835) |
 | EX-02 | LIMIT GTC rejected by design | PENDING | unit-tested; live rejection pending a session |
-| EX-03 | Buying-power qmax clamp before submit | PENDING | qmax query confirmed read-only; clamp pending live probe |
+| EX-03 | Buying-power qmax check before submit | PASS | qmax query executed on every submit across all 2026-09-17 runs (no clamp event - orders within limit) |
 | EX-04 | Mass-status reconciliation via runtime report hooks | PASS | startup reconciliation completed on every tester session |
+| EX-05 | QueryAccount refreshes AccountState | PASS | query observed refreshing AccountState on 2026-09-16 and 2026-09-17 |
 
 
 ## Data coverage (26 spec cases)
@@ -170,5 +171,11 @@ Status legend:
 
 - Fill commissions are derived from venue `tradingFee` + `tradingTax`, prorated per fill.
 
+- NautilusTrader v2 renamed the tick handlers: python components must use `on_quote` / `on_trade` (the v1 names `on_quote_tick` / `on_trade_tick` are never dispatched, silently). Discovered on 2026-09-17.
 
-Summary: 12 PASS, 24 PENDING, 60 N/A (92 spec cases + 4 adapter-specific).
+- Front-month resolution keeps the expiring contract selectable through its final trading day (`trading_cutoff >= now`). On expiry day the expiring contract's book is thin; a roll rule that excludes same-day expiries is a known follow-up.
+
+- DNSE quote ticks stream per monthly contract only; the continuous symbol `VN30F1M` is bars-only in historical requests.
+
+
+Summary: 17 PASS, 19 PENDING, 60 N/A (92 spec cases + 5 adapter-specific).
