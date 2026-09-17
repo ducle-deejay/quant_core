@@ -78,11 +78,11 @@ Status legend:
 | TC-E34 | Modify stop trigger price | N/A | stop orders unsupported |
 | TC-E35 | Cancel-replace stop order | N/A | stop orders unsupported |
 | TC-E36 | Modify rejected | PASS | 62 OrderModifyRejected live on 2026-09-17 with reason "Entrade order modification is not supported by the current MVP adapter" |
-| TC-E40 | Cancel single limit order | PENDING | awaiting live session |
+| TC-E40 | Cancel single limit order | PASS | resting LO 1970 canceled live 2026-09-17 (OrderCanceled observed) |
 | TC-E41 | Cancel all on stop | PENDING | awaiting live session |
 | TC-E42 | Individual cancels on stop | PENDING | awaiting live session |
 | TC-E43 | Batch cancel on stop | N/A | batch-cancel command has no ExecTester flag; covered by contract tests |
-| TC-E44 | Cancel already-canceled order | PENDING | awaiting live session |
+| TC-E44 | Cancel already-canceled order | PASS | second cancel refused idempotently (state is Canceled) 2026-09-17 |
 | TC-E50 | Bracket BUY | N/A | brackets unsupported |
 | TC-E51 | Bracket SELL | N/A | brackets unsupported |
 | TC-E52 | Bracket entry fill activates TP/SL | N/A | brackets unsupported |
@@ -90,18 +90,18 @@ Status legend:
 | TC-E60 | PostOnly accepted | N/A | post-only unsupported by the venue |
 | TC-E61 | ReduceOnly on close | N/A | reduce-only flag unsupported |
 | TC-E62 | Display quantity (iceberg) | N/A | iceberg display quantity unsupported |
-| TC-E63 | Custom order params | PENDING | awaiting live session |
+| TC-E63 | Custom order params | PASS | LIMIT DAY with params accepted, params propagated 2026-09-17 |
 | TC-E70 | PostOnly rejection | N/A | post-only unsupported by the venue |
 | TC-E71 | ReduceOnly rejection | N/A | reduce-only flag unsupported |
-| TC-E72 | Unsupported order type | PENDING | awaiting live session |
-| TC-E73 | Unsupported TIF | PENDING | awaiting live session |
-| TC-E80 | Open position on start | PENDING | awaiting live session |
+| TC-E72 | Unsupported order type | PASS | STOP_LIMIT rejected live: unsupported order combination 2026-09-17 |
+| TC-E73 | Unsupported TIF | PASS | LIMIT GTD rejected live: unsupported order combination 2026-09-17 |
+| TC-E80 | Open position on start | PASS | MOK 7336827 opened position on node start 2026-09-17 |
 | TC-E81 | Cancel orders on stop | PENDING | awaiting live session |
 | TC-E82 | Close positions on stop | PASS | order 7321773 |
 | TC-E83 | Unsubscribe on stop | N/A | ExecTester issues no unsubscribe on stop |
-| TC-E84 | Reconcile open orders | PENDING | awaiting live session |
-| TC-E85 | Reconcile filled orders | PENDING | awaiting live session |
-| TC-E86 | Reconcile open long position | PENDING | awaiting live session |
+| TC-E84 | Reconcile open orders | PASS | external order 7345582 created [SUBMITTED] at startup reconciliation 2026-09-17 |
+| TC-E85 | Reconcile filled orders | PASS | 23 fills received and inferred fills generated 2026-09-17 |
+| TC-E86 | Reconcile open long position | PASS | long position reconciled (1 position(s) received, PositionClosed after cleanup) 2026-09-17 |
 | TC-E87 | Reconcile open short position | PENDING | awaiting live session |
 | TC-E88 | Reconciliation commission failure | PENDING | awaiting live session |
 | TC-E89 | WebSocket commission failure | PENDING | awaiting live session |
@@ -119,7 +119,7 @@ Status legend:
 
 
 | EX-01 | MarketToLimit (MTL) submit and fill | PASS | 11 MTL orders filled live on 2026-09-17 (7341336-7341345, 7341835) |
-| EX-02 | LIMIT GTC rejected by design | PENDING | unit-tested; live rejection pending a session |
+| EX-02 | LIMIT GTC rejected by design | PASS | live rejection observed 2026-09-17: LIMIT with GTC is unsupported (HNX LO day-valid) |
 | EX-03 | Buying-power qmax check before submit | PASS | qmax query executed on every submit across all 2026-09-17 runs (no clamp event - orders within limit) |
 | EX-04 | Mass-status reconciliation via runtime report hooks | PASS | startup reconciliation completed on every tester session |
 | EX-05 | QueryAccount refreshes AccountState | PASS | query observed refreshing AccountState on 2026-09-16 and 2026-09-17 |
@@ -131,11 +131,11 @@ Status legend:
 | Case | Description | Status | Evidence / reason |
 |---|---|---|---|
 | TC-D01 | Request instruments | PASS | derivatives list loaded on every connect |
-| TC-D02 | Subscribe instrument | PENDING | awaiting live session |
+| TC-D02 | Subscribe instrument | PASS | instruments requested and published on every data_tester run |
 | TC-D03 | Load specific instrument | PASS | active contract resolved and published on every connect |
 | TC-D10 | Subscribe book deltas | N/A | book deltas unsupported |
 | TC-D11 | Subscribe book at interval | N/A | book at interval unsupported |
-| TC-D12 | Subscribe book depth | PENDING | awaiting live session |
+| TC-D12 | Subscribe book depth | PASS | depth10 subscribed, streamed (1227 events) and unsubscribed 2026-09-17 |
 | TC-D13 | Request book snapshot | N/A | book snapshot request unsupported |
 | TC-D14 | Managed book from deltas | N/A | managed book from deltas unsupported |
 | TC-D20 | Subscribe quotes | PASS | quotes streamed in prior tester sessions |
@@ -152,10 +152,10 @@ Status legend:
 | TC-D61 | Subscribe instrument close | N/A | instrument close unsupported |
 | TC-D62 | Subscribe option greeks | N/A | option greeks unsupported |
 | TC-D63 | Subscribe option chain | N/A | option chain unsupported |
-| TC-D70 | Unsubscribe on stop | PENDING | awaiting live session |
+| TC-D70 | Unsubscribe on stop | PASS | UnsubscribeBookDepth10/Quotes/Trades/Bars issued on stop 2026-09-17 |
 | TC-D71 | Custom subscribe params | N/A | custom subscribe params unsupported |
 | TC-D72 | Custom request params | N/A | custom request params unsupported |
-| TC-D73 | Retirement cleanup | PENDING | awaiting live session |
+| TC-D73 | Retirement cleanup | PASS | clean disconnect after unsubscribe, no residual streams 2026-09-17 |
 
 
 ## Adapter-specific behavior notes
@@ -177,5 +177,9 @@ Status legend:
 
 - DNSE quote ticks stream per monthly contract only; the continuous symbol `VN30F1M` is bars-only in historical requests.
 
+- Front-month resolution keeps the expiring contract selectable through its final day; on 2026-09-17 (expiry day) the expiring contract's stream was live but operationally the liquidity had moved to the next month. A roll rule excluding same-day expiries is a known follow-up.
 
-Summary: 17 PASS, 19 PENDING, 60 N/A (92 spec cases + 5 adapter-specific).
+- Startup reconciliation logs a benign warning for open orders reconciled in SUBMITTED status ("Unhandled order status SUBMITTED"); the order is still created as a working external order (observed 2026-09-17, order 7345582).
+
+
+Summary: 31 PASS, 6 PENDING, 60 N/A (92 spec cases + 5 adapter-specific). PENDING: TC-E41/E42 (cancel with open orders on stop), TC-E81 (same path), TC-E87 (short-side reconcile), TC-E88/E89 (commission failure paths).
