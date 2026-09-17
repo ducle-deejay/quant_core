@@ -26,7 +26,7 @@ def load_day(
     (sorted ints) so the daily orchestrator can verify that the Mirae
     backfill resolved every DNSE-missing timestamp.
     """
-    catalog = ParquetDataCatalog(catalog_path)
+    catalog = ParquetDataCatalog(str(catalog_path))
     counts: Counter[str] = Counter()
     existing_timestamps: set[int] = set()
     added_timestamps: list[int] = []

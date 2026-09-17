@@ -19,7 +19,7 @@ def load_day(
     transformed: Iterable[list[Any]],
 ) -> dict[str, int]:
     """Load transformed DNSE batches through the Nautilus catalog public API."""
-    catalog = ParquetDataCatalog(catalog_path)
+    catalog = ParquetDataCatalog(str(catalog_path))
     counts: Counter[str] = Counter()
     for batch in transformed:
         validate_transformed_batch(batch)
