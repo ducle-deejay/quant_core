@@ -54,8 +54,6 @@ def extract_day(
     contract = _front_month_contract(
         client_factory=client_factory,
         continuous_symbol=continuous_symbol,
-        day=day,
-        working_dates=working_dates,
     )
 
     root.mkdir(parents=True, exist_ok=True)
@@ -118,8 +116,6 @@ def _front_month_contract(
     *,
     client_factory: ClientFactory,
     continuous_symbol: str,
-    day: date,
-    working_dates: set[date],
 ) -> dict[str, str]:
     client, observed = client_factory()
     instruments = _decode_response(
@@ -147,7 +143,20 @@ def _front_month_contract(
     record = definition[0]
     if record.get("marketId") != "DVX" or record.get("boardId") != "G1":
         raise ValueError(f"Unexpected DNSE contract identity for {symbol}: {record}")
-    expiration = _front_month_expiration(day, working_dates)
+    final_trade_date = record.get("finalTradeDate")
+    if not final_trade_date:
+        raise ValueError(f"DNSE security definition missing finalTradeDate for {symbol}")
+    try:
+        expiration_date = date.fromisoformat(str(final_trade_date)[:10])
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid DNSE finalTradeDate for {symbol}: {final_trade_date}",
+        ) from error
+    expiration = datetime.combine(
+        expiration_date,
+        datetime_time(14, 45),
+        tzinfo=LOCAL_TIMEZONE,
+    ).astimezone(UTC)
     return {
         "symbol": symbol,
         "isin": str(record["isin"]),
@@ -165,26 +174,6 @@ def _get_working_dates(client_factory: ClientFactory) -> set[date]:
     if not isinstance(values, list):
         raise ValueError("DNSE working-dates response does not contain workingDates")
     return {date.fromisoformat(str(value)) for value in values}
-
-
-def _front_month_expiration(day: date, working_dates: set[date]) -> datetime:
-    year = day.year
-    month = day.month
-    candidate = _third_thursday(year, month)
-    if day >= candidate:
-        month += 1
-        if month == 13:
-            year += 1
-            month = 1
-        candidate = _third_thursday(year, month)
-    while candidate not in working_dates:
-        candidate -= timedelta(days=1)
-    return datetime.combine(candidate, datetime_time(14, 45), tzinfo=LOCAL_TIMEZONE).astimezone(UTC)
-
-
-def _third_thursday(year: int, month: int) -> date:
-    first = date(year, month, 1)
-    return first + timedelta(days=(3 - first.weekday()) % 7 + 14)
 
 
 def _download_bars(
