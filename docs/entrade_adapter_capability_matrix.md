@@ -173,11 +173,11 @@ Status legend:
 
 - NautilusTrader v2 renamed the tick handlers: python components must use `on_quote` / `on_trade` (the v1 names `on_quote_tick` / `on_trade_tick` are never dispatched, silently). Discovered on 2026-09-17.
 
-- Front-month resolution keeps the expiring contract selectable through its final trading day (`trading_cutoff >= now`). On expiry day the expiring contract's book is thin; a roll rule that excludes same-day expiries is a known follow-up.
+- Front-month resolution keeps the expiring contract selectable through the HNX session close on its final trading day (`trading_cutoff >= now`).
 
 - DNSE quote ticks stream per monthly contract only; the continuous symbol `VN30F1M` is bars-only in historical requests.
 
-- Front-month resolution keeps the expiring contract selectable through its final day; on 2026-09-17 (expiry day) the expiring contract's stream was live but operationally the liquidity had moved to the next month. A roll rule excluding same-day expiries is a known follow-up.
+- Contract rollover is resolved after the final HNX trading session; a strategy-level position cutoff is separate from contract selection.
 
 - Startup reconciliation logs a benign warning for open orders reconciled in SUBMITTED status ("Unhandled order status SUBMITTED"); the order is still created as a working external order (observed 2026-09-17, order 7345582).
 

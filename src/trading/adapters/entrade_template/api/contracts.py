@@ -11,7 +11,7 @@ from trading.instruments import FuturesInstrumentSpec, build_futures_contract
 
 VN30_FRONT_MONTH_SYMBOL = "VN30F1M"
 VN_TZINFO = ZoneInfo("Asia/Ho_Chi_Minh")
-VN30_FORCED_CLOSE_LOCAL = time(14, 0)
+# HNX index futures trade through 14:45 local time on the final trading day.
 VN30_MARKET_CLOSE_LOCAL = time(14, 45)
 UNKNOWN_ACTIVATION = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -48,7 +48,7 @@ class EntradeMonthlyContract:
     def trading_cutoff(self) -> datetime:
         return datetime.combine(
             self.expiration_date,
-            VN30_FORCED_CLOSE_LOCAL,
+            VN30_MARKET_CLOSE_LOCAL,
             tzinfo=VN_TZINFO,
         ).astimezone(UTC)
 
