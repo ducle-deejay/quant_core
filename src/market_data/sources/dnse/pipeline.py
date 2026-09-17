@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
+from typing import Any
 
+from market_data.sources import ETLStageError
 from market_data.sources.dnse.extract import ClientFactory
 from market_data.sources.dnse.extract import extract_day
 from market_data.sources.dnse.load import load_day
@@ -24,13 +27,16 @@ def run_daily(
     """Run the daily DNSE Extract, Transform, and Load workflow."""
     raw = Path(raw_root)
     catalog = Path(catalog_path)
-    extract_day(
-        client_factory=client_factory,
-        raw_root=raw,
-        day=day,
-        continuous_symbol=continuous_symbol,
-        request_delay_seconds=request_delay_seconds,
-    )
+    try:
+        extract_day(
+            client_factory=client_factory,
+            raw_root=raw,
+            day=day,
+            continuous_symbol=continuous_symbol,
+            request_delay_seconds=request_delay_seconds,
+        )
+    except Exception as error:
+        raise ETLStageError(source="DNSE", stage="extract", cause=error) from error
 
     if (catalog / "data").exists():
         raw_days = [raw / day.isoformat()] if (raw / day.isoformat()).is_dir() else []
@@ -44,15 +50,32 @@ def run_daily(
     counts: Counter[str] = Counter()
     missing_bar_timestamps: list[int] = []
     for raw_day in raw_days:
-        validation = validate_raw_delivery(raw_day)
-        loaded = load_day(
-            catalog_path=catalog,
-            transformed=transform_day(
-                raw_day=raw_day,
-                instrument_config=instrument_config,
-            ),
-        )
-        _reconcile_counts(validation.counts, loaded)
+        try:
+            validation = validate_raw_delivery(raw_day)
+        except Exception as error:
+            raise ETLStageError(source="DNSE", stage="extract", cause=error) from error
+
+        def transformed(current_raw_day: Path = raw_day) -> Iterator[list[Any]]:
+            try:
+                yield from transform_day(
+                    raw_day=current_raw_day,
+                    instrument_config=instrument_config,
+                )
+            except ETLStageError:
+                raise
+            except Exception as error:
+                raise ETLStageError(source="DNSE", stage="transform", cause=error) from error
+
+        try:
+            loaded = load_day(
+                catalog_path=catalog,
+                transformed=transformed(),
+            )
+            _reconcile_counts(validation.counts, loaded)
+        except ETLStageError:
+            raise
+        except Exception as error:
+            raise ETLStageError(source="DNSE", stage="load", cause=error) from error
         counts.update(loaded)
         missing_bar_timestamps.extend(validation.missing_bar_timestamps)
     return {
