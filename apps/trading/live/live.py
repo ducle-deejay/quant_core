@@ -13,15 +13,15 @@ from nautilus_trader.common import LogLevel
 from nautilus_trader.live import LiveNode
 from nautilus_trader.model import TraderId
 
-from trading.adapters.entrade_template.api.contracts import resolve_active_contract
-from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
-from trading.adapters.entrade_template.api.entrade_api import EntradeClient
-from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
-from trading.adapters.entrade_template.api.entrade_api import investor_id_from_token
-from trading.adapters.entrade_template.config import DnseDataClientConfig
-from trading.adapters.entrade_template.config import EntradeExecClientConfig
-from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
-from trading.adapters.entrade_template.factories import EntradeLiveExecClientFactory
+from trading.adapters.entrade.api.contracts import resolve_active_contract
+from trading.adapters.entrade.api.entrade_api import EntradeAccount
+from trading.adapters.entrade.api.entrade_api import EntradeClient
+from trading.adapters.entrade.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade.api.entrade_api import investor_id_from_token
+from trading.adapters.entrade.config import DnseDataClientConfig
+from trading.adapters.entrade.config import EntradeExecClientConfig
+from trading.adapters.entrade.factories import DnseLiveDataClientFactory
+from trading.adapters.entrade.factories import EntradeLiveExecClientFactory
 from market_data.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]

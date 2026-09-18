@@ -8,4 +8,4 @@ SUPPORTED_DNSE_RESOLUTIONS = frozenset(
     {"1", "3", "5", "15", "30", "60", "1H", "1D", "1W"}
 )
 ALLOWED_HISTORICAL_SOURCES = frozenset({"catalog", "api"})
-NOT_IMPLEMENTED = "This operation is not implemented by the entrade_template adapter"
+NOT_IMPLEMENTED = "This operation is not implemented by the entrade adapter"

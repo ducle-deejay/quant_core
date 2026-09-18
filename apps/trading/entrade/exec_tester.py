@@ -25,9 +25,9 @@ Upgrade workflow: re-run both modes to exercise the full adapter
 surface.
 
 Usage:
-    uv run python apps/trading/entrade_template/exec_tester.py                 # dry run: commands are built but not sent
-    uv run python apps/trading/entrade_template/exec_tester.py --live-orders   # submit real (demo) orders
-    uv run python apps/trading/entrade_template/exec_tester.py --live-orders --sweep
+    uv run python apps/trading/entrade/exec_tester.py                 # dry run: commands are built but not sent
+    uv run python apps/trading/entrade/exec_tester.py --live-orders   # submit real (demo) orders
+    uv run python apps/trading/entrade/exec_tester.py --live-orders --sweep
 Env: API_KEY, API_SECRET, ENTRADE_USERNAME, ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID.
 """
 
@@ -54,15 +54,15 @@ from nautilus_trader.model import TraderId
 from nautilus_trader.testkit import ExecTesterConfig
 from nautilus_trader.trading import Strategy
 
-from trading.adapters.entrade_template.api.entrade_api import EntradeClient
-from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
-from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
-from trading.adapters.entrade_template.api.entrade_api import investor_id_from_token
-from trading.adapters.entrade_template.api.contracts import resolve_active_contract
-from trading.adapters.entrade_template.config import DnseDataClientConfig
-from trading.adapters.entrade_template.config import EntradeExecClientConfig
-from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
-from trading.adapters.entrade_template.factories import EntradeLiveExecClientFactory
+from trading.adapters.entrade.api.entrade_api import EntradeClient
+from trading.adapters.entrade.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade.api.entrade_api import EntradeAccount
+from trading.adapters.entrade.api.entrade_api import investor_id_from_token
+from trading.adapters.entrade.api.contracts import resolve_active_contract
+from trading.adapters.entrade.config import DnseDataClientConfig
+from trading.adapters.entrade.config import EntradeExecClientConfig
+from trading.adapters.entrade.factories import DnseLiveDataClientFactory
+from trading.adapters.entrade.factories import EntradeLiveExecClientFactory
 from market_data.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]

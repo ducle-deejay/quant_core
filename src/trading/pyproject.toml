@@ -24,6 +24,6 @@ package-dir = { trading = "." }
 packages = [
     "trading",
     "trading.adapters",
-    "trading.adapters.entrade_template",
-    "trading.adapters.entrade_template.api",
+    "trading.adapters.entrade",
+    "trading.adapters.entrade.api",
 ]

@@ -1,6 +1,6 @@
 # Entrade Adapter Capability Matrix
 
-Capability matrix and spec-coverage table for the `entrade_template` adapter (DNSE market data + Entrade execution, venue HNX derivatives), mapped against the NautilusTrader developer-guide testing specs (`spec_exec_testing.md`, `spec_data_testing.md`).
+Capability matrix and spec-coverage table for the `entrade` adapter (DNSE market data + Entrade execution, venue HNX derivatives), mapped against the NautilusTrader developer-guide testing specs (`spec_exec_testing.md`, `spec_data_testing.md`).
 
 Status legend:
 

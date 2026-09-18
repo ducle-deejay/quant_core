@@ -35,9 +35,9 @@ from nautilus_trader.model import (
     VenueOrderId,
 )
 
-from trading.adapters.entrade_template.config import DnseDataClientConfig
-from trading.adapters.entrade_template.config import EntradeExecClientConfig
-from trading.adapters.entrade_template.data import (
+from trading.adapters.entrade.config import DnseDataClientConfig
+from trading.adapters.entrade.config import EntradeExecClientConfig
+from trading.adapters.entrade.data import (
     DnseLiveDataClient,
     SubscriptionKey,
     bar_type_to_dnse_resolution,
@@ -48,7 +48,7 @@ from trading.adapters.entrade_template.data import (
     dnse_trade_to_nautilus_trade_tick,
     normalize_dnse_resolution,
 )
-from trading.adapters.entrade_template.execution import (
+from trading.adapters.entrade.execution import (
     EntradeExecutionClient,
     EntradeOrderContext,
     entrade_account_balance,
@@ -56,11 +56,11 @@ from trading.adapters.entrade_template.execution import (
     entrade_order_status,
     entrade_order_type,
 )
-from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
-from trading.adapters.entrade_template.api.entrade_api import EntradeClient
-from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
-from trading.adapters.entrade_template.providers import DnseInstrumentProvider
-from trading.adapters.entrade_template.providers import EntradeInstrumentProvider
+from trading.adapters.entrade.api.entrade_api import EntradeAccount
+from trading.adapters.entrade.api.entrade_api import EntradeClient
+from trading.adapters.entrade.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade.providers import DnseInstrumentProvider
+from trading.adapters.entrade.providers import EntradeInstrumentProvider
 from market_data.instruments import FuturesInstrumentSpec
 
 SPEC = FuturesInstrumentSpec(
@@ -827,7 +827,7 @@ def test_entrade_cancel_endpoint_and_poll_stop_on_terminal_status() -> None:
     terminal["id"] = 7004
     api.orders[-1] = terminal
     poll_context = EntradeOrderContext(order, VenueOrderId("7004"), set())
-    with patch("trading.adapters.entrade_template.execution.asyncio.sleep", new=_no_sleep):
+    with patch("trading.adapters.entrade.execution.asyncio.sleep", new=_no_sleep):
         asyncio.run(client._poll_order(poll_context))
     assert api.get_order_calls[-1] == "7004"
 

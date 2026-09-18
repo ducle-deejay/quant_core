@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Installed-wheel check for the entrade_template adapter.
+"""Installed-wheel check for the entrade adapter.
 
 Follows the NautilusTrader developer-guide checklist
 (docs/developer_guide/python_adapters.md, "Build and verify installed
 wheels") for a pure-Python adapter: run this script with the venv's own
 interpreter in isolated mode, e.g.
 
-    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_template_wheel.py
-    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_template_wheel.py --launch owned
+    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_wheel.py
+    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_wheel.py --launch owned
 
 Checks:
 - import isolation: every adapter module resolves beneath sys.prefix;
@@ -43,20 +43,20 @@ COMMISSION = 31_500  # VND, the fake venue's tradingFee for the probe order
 
 def check_import_isolation() -> None:
     """Every imported adapter module must resolve beneath sys.prefix."""
-    from trading.adapters.entrade_template import api
-    from trading.adapters.entrade_template import config as config_module
-    from trading.adapters.entrade_template import constants
-    from trading.adapters.entrade_template import data as data_module
-    from trading.adapters.entrade_template import execution as execution_module
-    from trading.adapters.entrade_template import factories
-    from trading.adapters.entrade_template import providers
-    from trading.adapters.entrade_template.api import (
+    from trading.adapters.entrade import api
+    from trading.adapters.entrade import config as config_module
+    from trading.adapters.entrade import constants
+    from trading.adapters.entrade import data as data_module
+    from trading.adapters.entrade import execution as execution_module
+    from trading.adapters.entrade import factories
+    from trading.adapters.entrade import providers
+    from trading.adapters.entrade.api import (
         audit,
         contracts,
         dnse_api,
         entrade_api,
     )
-    from trading.adapters.entrade_template.api import audit as audit_module
+    from trading.adapters.entrade.api import audit as audit_module
     import market_data.instruments
     import trading
     import trading.adapters
@@ -236,12 +236,12 @@ def build_node(launch: str) -> tuple[Any, Any]:
     )
     from nautilus_trader.trading import Strategy
 
-    from trading.adapters.entrade_template.config import DnseDataClientConfig
-    from trading.adapters.entrade_template.config import EntradeExecClientConfig
-    from trading.adapters.entrade_template.data import DnseLiveDataClient
-    from trading.adapters.entrade_template.data import build_bar_type_for_symbol
-    from trading.adapters.entrade_template.execution import EntradeExecutionClient
-    from trading.adapters.entrade_template.providers import (
+    from trading.adapters.entrade.config import DnseDataClientConfig
+    from trading.adapters.entrade.config import EntradeExecClientConfig
+    from trading.adapters.entrade.data import DnseLiveDataClient
+    from trading.adapters.entrade.data import build_bar_type_for_symbol
+    from trading.adapters.entrade.execution import EntradeExecutionClient
+    from trading.adapters.entrade.providers import (
         DnseInstrumentProvider,
         EntradeInstrumentProvider,
     )
@@ -414,7 +414,7 @@ def main() -> None:
     else:
         asyncio.run(run_hosted(node))
     verify_run(node, strategy)
-    print(f"OK entrade_template wheel check passed (launch={args.launch})")
+    print(f"OK entrade wheel check passed (launch={args.launch})")
 
 
 if __name__ == "__main__":

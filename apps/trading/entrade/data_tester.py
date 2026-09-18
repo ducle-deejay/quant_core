@@ -10,7 +10,7 @@ bars-only), so the tester resolves the active contract up front: bars are
 subscribed on the continuous symbol and quotes on the active contract.
 Both instruments are loaded into the provider.
 
-Usage: .venv-v2/bin/python apps/trading/entrade_template/data_tester.py
+Usage: .venv-v2/bin/python apps/trading/entrade/data_tester.py
 Credentials come from .env (API_KEY, API_SECRET, ENTRADE_USERNAME,
 ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID).
 """
@@ -34,13 +34,13 @@ from nautilus_trader.model import ClientId
 from nautilus_trader.model import TraderId
 from nautilus_trader.testkit import DataTesterConfig
 
-from trading.adapters.entrade_template.api.contracts import resolve_active_contract
-from trading.adapters.entrade_template.api.entrade_api import EntradeAccount
-from trading.adapters.entrade_template.api.entrade_api import EntradeClient
-from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
-from trading.adapters.entrade_template.api.entrade_api import investor_id_from_token
-from trading.adapters.entrade_template.config import DnseDataClientConfig
-from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
+from trading.adapters.entrade.api.contracts import resolve_active_contract
+from trading.adapters.entrade.api.entrade_api import EntradeAccount
+from trading.adapters.entrade.api.entrade_api import EntradeClient
+from trading.adapters.entrade.api.entrade_api import EntradeClientConfig
+from trading.adapters.entrade.api.entrade_api import investor_id_from_token
+from trading.adapters.entrade.config import DnseDataClientConfig
+from trading.adapters.entrade.factories import DnseLiveDataClientFactory
 from market_data.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]

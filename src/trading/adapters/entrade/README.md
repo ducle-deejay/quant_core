@@ -63,9 +63,9 @@ from nautilus_trader.config import InstrumentProviderConfig, LiveNodeConfig
 from nautilus_trader.live import LiveNode
 from nautilus_trader.model import TraderId
 
-from trading.adapters.entrade_template.config import DnseDataClientConfig, EntradeExecClientConfig
-from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
-from trading.adapters.entrade_template.factories import EntradeLiveExecClientFactory
+from trading.adapters.entrade.config import DnseDataClientConfig, EntradeExecClientConfig
+from trading.adapters.entrade.factories import DnseLiveDataClientFactory
+from trading.adapters.entrade.factories import EntradeLiveExecClientFactory
 from market_data.instruments import load_futures_instrument_spec
 
 spec = load_futures_instrument_spec("data/instruments/vn30f.json")
