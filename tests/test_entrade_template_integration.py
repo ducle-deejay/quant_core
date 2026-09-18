@@ -55,7 +55,7 @@ from trading.adapters.entrade_template.data import build_bar_type_for_symbol
 from trading.adapters.entrade_template.execution import EntradeExecutionClient
 from trading.adapters.entrade_template.providers import DnseInstrumentProvider
 from trading.adapters.entrade_template.providers import EntradeInstrumentProvider
-from trading.instruments import FuturesInstrumentSpec
+from market_data.instruments import FuturesInstrumentSpec
 
 VENUE = "HNX"
 DATA_SYMBOL = "VN30F1M"

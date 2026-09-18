@@ -18,7 +18,7 @@ from nautilus_trader.live import LiveNode
 from nautilus_trader.live.config import construct_config
 from nautilus_trader.model import TraderId
 
-from trading.instruments import load_futures_instrument_spec
+from market_data.instruments import load_futures_instrument_spec
 
 DEFAULT_SPEC_PATH = (
     Path(__file__).resolve().parents[4]

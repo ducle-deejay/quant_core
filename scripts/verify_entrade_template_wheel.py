@@ -57,13 +57,14 @@ def check_import_isolation() -> None:
         entrade_api,
     )
     from trading.adapters.entrade_template.api import audit as audit_module
+    import market_data.instruments
     import trading
     import trading.adapters
 
     modules = [
         trading,
         trading.adapters,
-        trading.instruments,
+        market_data.instruments,
         config_module,
         constants,
         data_module,
@@ -244,7 +245,7 @@ def build_node(launch: str) -> tuple[Any, Any]:
         DnseInstrumentProvider,
         EntradeInstrumentProvider,
     )
-    from trading.instruments import FuturesInstrumentSpec
+    from market_data.instruments import FuturesInstrumentSpec
 
     spec = FuturesInstrumentSpec(
         symbol=DATA_SYMBOL,

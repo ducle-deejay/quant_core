@@ -8,7 +8,7 @@ from nautilus_trader.live import (
     InstrumentProviderConfig,
 )
 
-from trading.instruments import FuturesInstrumentSpec
+from market_data.instruments import FuturesInstrumentSpec
 
 from .constants import ALLOWED_HISTORICAL_SOURCES
 from .constants import DNSE_API_VERSION

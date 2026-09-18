@@ -61,7 +61,7 @@ from trading.adapters.entrade_template.api.entrade_api import EntradeClient
 from trading.adapters.entrade_template.api.entrade_api import EntradeClientConfig
 from trading.adapters.entrade_template.providers import DnseInstrumentProvider
 from trading.adapters.entrade_template.providers import EntradeInstrumentProvider
-from trading.instruments import FuturesInstrumentSpec
+from market_data.instruments import FuturesInstrumentSpec
 
 SPEC = FuturesInstrumentSpec(
     symbol="VN30F1M",

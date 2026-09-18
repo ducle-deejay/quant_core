@@ -63,7 +63,7 @@ from trading.adapters.entrade_template.config import DnseDataClientConfig
 from trading.adapters.entrade_template.config import EntradeExecClientConfig
 from trading.adapters.entrade_template.factories import DnseLiveDataClientFactory
 from trading.adapters.entrade_template.factories import EntradeLiveExecClientFactory
-from trading.instruments import load_futures_instrument_spec
+from market_data.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC_PATH = ROOT / "src" / "market_data" / "instrument_definitions" / "vn30f1m.hnx.json"

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from nautilus_trader.model import FuturesContract
 
-from trading.instruments import FuturesInstrumentSpec, build_futures_contract
+from market_data.instruments import FuturesInstrumentSpec, build_futures_contract
 
 VN30_FRONT_MONTH_SYMBOL = "VN30F1M"
 VN_TZINFO = ZoneInfo("Asia/Ho_Chi_Minh")
