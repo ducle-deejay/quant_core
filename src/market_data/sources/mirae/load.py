@@ -12,7 +12,7 @@ from market_data.sources.mirae.quality import validate_transformed_bars
 from market_data.sources.mirae.transform import BAR_TYPE
 
 
-REQUIRED_CATALOG_TYPES = {"bar", "futures_contract"}
+REQUIRED_CATALOG_TYPES = {"bars", "instruments"}
 
 
 def load_day(

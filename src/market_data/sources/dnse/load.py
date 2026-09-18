@@ -10,7 +10,7 @@ from nautilus_trader.persistence import ParquetDataCatalog
 from market_data.sources.dnse.quality import validate_transformed_batch
 
 
-REQUIRED_CATALOG_TYPES = {"bar", "futures_contract", "order_book_depths", "trade_tick"}
+REQUIRED_CATALOG_TYPES = {"bars", "instruments", "order_book_depths", "trades"}
 
 
 def load_day(

@@ -371,11 +371,10 @@ def _load_catalog_bars(
     bar_type: BarType,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
-    legacy_catalog_path: Path | None = None,
 ) -> list[Bar]:
     """Query bars for a bar type within [start, end] from a ParquetDataCatalog.
 
-    The catalog stores bars under ``data/bar/{bar_type}`` and filters on
+    The catalog stores bars under ``data/bars/{bar_type}`` and filters on
     ``ts_init``; catalog bars carry ``ts_event == ts_init`` at the bar open
     time in UTC (see ``dnse_ohlc_to_nautilus_bar``).
     """
@@ -387,81 +386,6 @@ def _load_catalog_bars(
         )
     except (OSError, RuntimeError):
         bars = []
-    if bars or legacy_catalog_path is None:
-        return bars
-    return _load_legacy_catalog_bars(legacy_catalog_path, bar_type, start, end)
-
-
-def _load_legacy_catalog_bars(
-    catalog_path: Path,
-    bar_type: BarType,
-    start: pd.Timestamp | None,
-    end: pd.Timestamp | None,
-) -> list[Bar]:
-    """Read bars from the v1 catalog schema during the rc5 migration."""
-    from pyarrow import parquet
-
-    directory = catalog_path / "data" / "bar" / str(bar_type)
-    if not directory.is_dir():
-        return []
-
-    bars: list[Bar] = []
-    start_ns = None if start is None else int(start.value)
-    end_ns = None if end is None else int(end.value)
-    for path in sorted(directory.glob("*.parquet")):
-        table = parquet.read_table(path)
-        metadata = table.schema.metadata or {}
-        price_precision = int(metadata.get(b"price_precision", b"0"))
-        size_precision = int(metadata.get(b"size_precision", b"0"))
-        rows = table.to_pydict()
-        for (
-            open_raw,
-            high_raw,
-            low_raw,
-            close_raw,
-            volume_raw,
-            ts_event,
-            ts_init,
-        ) in zip(
-            rows["open"],
-            rows["high"],
-            rows["low"],
-            rows["close"],
-            rows["volume"],
-            rows["ts_event"],
-            rows["ts_init"],
-            strict=True,
-        ):
-            ts_event = int(ts_event)
-            if start_ns is not None and ts_event < start_ns:
-                continue
-            if end_ns is not None and ts_event > end_ns:
-                continue
-            bars.append(
-                Bar(
-                    bar_type,
-                    Price.from_raw(
-                        int.from_bytes(open_raw, "little", signed=True), price_precision
-                    ),
-                    Price.from_raw(
-                        int.from_bytes(high_raw, "little", signed=True), price_precision
-                    ),
-                    Price.from_raw(
-                        int.from_bytes(low_raw, "little", signed=True), price_precision
-                    ),
-                    Price.from_raw(
-                        int.from_bytes(close_raw, "little", signed=True),
-                        price_precision,
-                    ),
-                    Quantity.from_raw(
-                        int.from_bytes(volume_raw, "little", signed=True),
-                        size_precision,
-                    ),
-                    ts_event,
-                    int(ts_init),
-                ),
-            )
-    bars.sort(key=lambda bar: bar.ts_event)
     return bars
 
 
@@ -689,7 +613,6 @@ class DnseLiveDataClient(MarketDataClient):
                         bar_type=request.bar_type,
                         start=start,
                         end=end,
-                        legacy_catalog_path=self._catalog_path,
                     )
                 except Exception as e:  # noqa: BLE001 - a catalog read failure must not break warmup
                     self._log.warning(
