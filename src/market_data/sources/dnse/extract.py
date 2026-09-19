@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from datetime import date
 from datetime import datetime
-from datetime import time as datetime_time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,12 @@ MIN_REMAINING = 500
 LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 ClientFactory = Callable[[], tuple[Any, list[Any]]]
+CONTRACT_DEFINITION_FIELDS = (
+    "symbol",
+    "isin",
+    "listing_date",
+    "final_trade_date",
+)
 
 
 def extract_day(
@@ -98,11 +103,15 @@ def extract_day(
         os.replace(raw_day, destination)
 
 
-def _retain_contract(directory: Path, contract: dict[str, str]) -> None:
+def _retain_contract(directory: Path, contract: dict[str, str | None]) -> None:
     path = directory / f"{contract['symbol']}.json"
     if path.exists():
         retained = json.loads(path.read_text(encoding="utf-8"))
-        if retained != contract:
+        changed = any(
+            retained.get(field) != contract.get(field)
+            for field in CONTRACT_DEFINITION_FIELDS
+        )
+        if changed:
             raise ValueError(f"DNSE contract metadata changed for {contract['symbol']}")
         return
     directory.mkdir(parents=True, exist_ok=True)
@@ -116,7 +125,7 @@ def _front_month_contract(
     *,
     client_factory: ClientFactory,
     continuous_symbol: str,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     client, observed = client_factory()
     instruments = _decode_response(
         *client.get_instruments(market_id="DVX", security_group_id="FU", limit=100),
@@ -137,31 +146,48 @@ def _front_month_contract(
     symbol = str(matches[0]["symbol"])
 
     definition = _decode_response(*client.get_security_definition(symbol, board_id="G1"))[1]
+    received_at = datetime.now(UTC)
     _ensure_quota(observed[-1] if observed else None)
     if not isinstance(definition, list) or len(definition) != 1:
         raise ValueError(f"Unexpected DNSE security definition for {symbol}")
     record = definition[0]
     if record.get("marketId") != "DVX" or record.get("boardId") != "G1":
         raise ValueError(f"Unexpected DNSE contract identity for {symbol}: {record}")
+    listing_date = record.get("listingDate")
+    if not listing_date:
+        raise ValueError(f"DNSE security definition missing listingDate for {symbol}")
     final_trade_date = record.get("finalTradeDate")
     if not final_trade_date:
         raise ValueError(f"DNSE security definition missing finalTradeDate for {symbol}")
     try:
+        activation_date = date.fromisoformat(str(listing_date)[:10])
         expiration_date = date.fromisoformat(str(final_trade_date)[:10])
     except ValueError as error:
         raise ValueError(
-            f"Invalid DNSE finalTradeDate for {symbol}: {final_trade_date}",
+            f"Invalid DNSE contract dates for {symbol}: "
+            f"listingDate={listing_date}, finalTradeDate={final_trade_date}",
         ) from error
-    expiration = datetime.combine(
-        expiration_date,
-        datetime_time(14, 45),
-        tzinfo=LOCAL_TIMEZONE,
-    ).astimezone(UTC)
     return {
         "symbol": symbol,
         "isin": str(record["isin"]),
-        "expiration": expiration.isoformat(),
+        "listing_date": activation_date.isoformat(),
+        "final_trade_date": expiration_date.isoformat(),
+        "source_event_at": _source_event_at(record.get("time")),
+        "received_at": received_at.isoformat(),
     }
+
+
+def _source_event_at(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        seconds = int(value.get("Seconds", value.get("seconds", 0)))
+        nanos = int(value.get("Nanos", value.get("nanos", 0)))
+        return datetime.fromtimestamp(seconds + nanos / 1_000_000_000, UTC).isoformat()
+    timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=LOCAL_TIMEZONE)
+    return timestamp.astimezone(UTC).isoformat()
 
 
 def _get_working_dates(client_factory: ClientFactory) -> set[date]:

@@ -26,13 +26,20 @@ def load_day(
     for batch in transformed:
         validate_transformed_batch(batch)
         if isinstance(batch[0], (FuturesContract, PerpetualContract)):
-            existing = {
-                instrument.id.value
-                for instrument in catalog.instruments(
-                    instrument_ids=[instrument.id.value for instrument in batch],
+            existing_by_id: dict[str, list[Any]] = {}
+            for instrument in catalog.instruments(
+                instrument_ids=[instrument.id.value for instrument in batch],
+            ):
+                existing_by_id.setdefault(instrument.id.value, []).append(instrument)
+            batch = [
+                instrument
+                for instrument in batch
+                if not any(
+                    _instrument_definition(existing)
+                    == _instrument_definition(instrument)
+                    for existing in existing_by_id.get(instrument.id.value, [])
                 )
-            }
-            batch = [instrument for instrument in batch if instrument.id.value not in existing]
+            ]
             if not batch:
                 continue
             catalog.write_instruments(batch)
@@ -52,3 +59,10 @@ def load_day(
     if missing:
         raise ValueError(f"Nautilus catalog is missing required data types: {sorted(missing)}")
     return dict(counts)
+
+
+def _instrument_definition(instrument: Any) -> dict[str, Any]:
+    definition = dict(instrument.to_dict())
+    definition.pop("ts_event", None)
+    definition.pop("ts_init", None)
+    return definition

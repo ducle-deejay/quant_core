@@ -45,7 +45,7 @@ def transform_day(
     continuous, monthly = _build_instruments(
         instrument_config,
         contracts,
-        ts_event_ns=_ingestion_day_ts_ns(source),
+        continuous_ts_event_ns=_ingestion_day_ts_ns(source),
     )
     yield [continuous]
     yield list(monthly.values())
@@ -61,17 +61,28 @@ def transform_day(
         yield from _transform_depth(directory, instrument)
 
 
-def _load_contracts(directory: Path) -> list[dict[str, str]]:
-    contracts: list[dict[str, str]] = []
+def _load_contracts(directory: Path) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
         contract = read_json(path)
         if not isinstance(contract, dict) or set(contract) != {
             "symbol",
             "isin",
-            "expiration",
+            "listing_date",
+            "final_trade_date",
+            "source_event_at",
+            "received_at",
         }:
             raise ValueError(f"Invalid DNSE contract metadata: {path}")
-        contracts.append({key: str(value) for key, value in contract.items()})
+        required = ("symbol", "isin", "listing_date", "final_trade_date", "received_at")
+        if any(not isinstance(contract[field], str) or not contract[field] for field in required):
+            raise ValueError(f"Incomplete DNSE contract metadata: {path}")
+        if contract["source_event_at"] is not None and not isinstance(
+            contract["source_event_at"],
+            str,
+        ):
+            raise ValueError(f"Invalid DNSE source event timestamp: {path}")
+        contracts.append(contract)
     if not contracts:
         raise ValueError(f"No DNSE contract metadata found in {directory}")
     return contracts
@@ -79,37 +90,60 @@ def _load_contracts(directory: Path) -> list[dict[str, str]]:
 
 def _build_instruments(
     instrument_config: str | Path,
-    contracts: list[dict[str, str]],
-    ts_event_ns: int,
+    contracts: list[dict[str, Any]],
+    continuous_ts_event_ns: int,
 ) -> tuple[Any, dict[str, Any]]:
     spec = load_futures_instrument_spec(instrument_config)
     register_futures_instrument_currency(spec)
     continuous = build_continuous_futures_proxy(
         spec,
-        ts_event_ns=ts_event_ns,
-        record_ts_init_ns=ts_event_ns,
+        ts_event_ns=continuous_ts_event_ns,
+        record_ts_init_ns=continuous_ts_event_ns,
     )
     monthly = {}
     for contract in contracts:
+        activation = _contract_session_time(contract["listing_date"], hour=8, minute=45)
+        expiration = _contract_session_time(
+            contract["final_trade_date"],
+            hour=14,
+            minute=45,
+        )
+        source_event_at = contract["source_event_at"]
+        contract_ts_event_ns = (
+            0 if source_event_at is None else int(pd.Timestamp(source_event_at).value)
+        )
+        contract_ts_init_ns = int(pd.Timestamp(contract["received_at"]).value)
+        if contract_ts_event_ns > contract_ts_init_ns:
+            raise ValueError(
+                f"DNSE contract source event follows receipt for {contract['symbol']}",
+            )
         instrument = build_futures_contract(
             spec.with_symbol(contract["symbol"]),
-            activation=None,
-            expiration=contract["expiration"],
-            ts_event=ts_event_ns,
-            ts_init=ts_event_ns,
+            activation=activation.isoformat(),
+            expiration=expiration.isoformat(),
+            ts_event=contract_ts_event_ns,
+            ts_init=contract_ts_init_ns,
             info={
                 "dnse_isin": contract["isin"],
                 "dnse_market_id": "DVX",
                 "dnse_board_id": "G1",
+                "dnse_listing_date": contract["listing_date"],
+                "dnse_final_trade_date": contract["final_trade_date"],
             },
         )
         monthly[instrument.id.value] = instrument
     return continuous, monthly
 
 
+def _contract_session_time(value: str, *, hour: int, minute: int) -> pd.Timestamp:
+    return pd.Timestamp(value, tz=LOCAL_TIMEZONE) + pd.Timedelta(
+        hours=hour,
+        minutes=minute,
+    )
+
+
 def _ingestion_day_ts_ns(raw_day: Path) -> int:
-    """Stamp instrument definitions at the ingestion day's UTC midnight, so the
-    definition precedes that day's data and replays stay deterministic."""
+    """Stamp the continuous proxy before the ingestion day's market data."""
     return int(pd.Timestamp(date.fromisoformat(raw_day.name), tz="UTC").value)
 
 
