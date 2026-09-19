@@ -1,4 +1,4 @@
-"""Integration tests for trading.adapters.entrade.
+"""Integration tests for nautilus_bridge.adapters.entrade.
 
 Skeleton ported from the NautilusTrader template integration suite
 (python/tests/integration/test_python_adapter_template.py); bodies rewritten
@@ -47,14 +47,14 @@ from nautilus_trader.model import (
 )
 from nautilus_trader.trading import Strategy
 
-from trading.adapters.entrade.config import DnseDataClientConfig
-from trading.adapters.entrade.config import EntradeExecClientConfig
-from trading.adapters.entrade.constants import NOT_IMPLEMENTED
-from trading.adapters.entrade.data import DnseLiveDataClient
-from trading.adapters.entrade.data import build_bar_type_for_symbol
-from trading.adapters.entrade.execution import EntradeExecutionClient
-from trading.adapters.entrade.providers import DnseInstrumentProvider
-from trading.adapters.entrade.providers import EntradeInstrumentProvider
+from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
+from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
+from nautilus_bridge.adapters.entrade.constants import NOT_IMPLEMENTED
+from nautilus_bridge.adapters.entrade.data import DnseLiveDataClient
+from nautilus_bridge.adapters.entrade.data import build_bar_type_for_symbol
+from nautilus_bridge.adapters.entrade.execution import EntradeExecutionClient
+from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
+from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
 from market_data.instruments import FuturesInstrumentSpec
 
 VENUE = "HNX"
@@ -1150,7 +1150,7 @@ def test_adapter_cache_queries_follow_core_order_and_position_states(monkeypatch
 )
 def test_execution_factory_rejects_invalid_identity_and_tolerance(kind, message) -> None:
     """Invalid execution identities fail before an adapter can enter the core."""
-    from trading.adapters.entrade.factories import EntradeLiveExecClientFactory
+    from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
 
     clients = []
 

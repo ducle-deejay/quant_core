@@ -12,7 +12,7 @@ members = [
     "alpha-core",
     "market-data",
     "quantcore",
-    "trading",
+    "nautilus-bridge",
 ]
 
 [manifest.dependency-groups]
@@ -475,9 +475,9 @@ wheels = [
 ]
 
 [[package]]
-name = "trading"
+name = "nautilus-bridge"
 version = "0.1.0"
-source = { editable = "src/trading" }
+source = { editable = "src/nautilus_bridge" }
 dependencies = [
     { name = "dnse-sdk-openapi" },
     { name = "market-data" },

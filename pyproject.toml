@@ -4,7 +4,7 @@ exclude = ["src/alpha-core"]
 
 [tool.uv.sources]
 market-data = { workspace = true }
-trading = { workspace = true }
+nautilus-bridge = { workspace = true }
 quantcore = { workspace = true }
 
 [dependency-groups]

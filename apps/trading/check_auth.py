@@ -11,10 +11,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from trading.adapters.entrade.api.entrade_api import EntradeClient
-from trading.adapters.entrade.api.entrade_api import investor_id_from_token
-from trading.adapters.entrade.api.entrade_api import EntradeClientConfig
-from trading.adapters.entrade.api.entrade_api import EntradeAccount
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClient
+from nautilus_bridge.adapters.entrade.api.entrade_api import investor_id_from_token
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
 
 
 ROOT = Path(__file__).resolve().parents[2]

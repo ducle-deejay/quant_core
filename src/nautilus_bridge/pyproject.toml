@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trading"
+name = "nautilus-bridge"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
@@ -20,10 +20,10 @@ dependencies = [
 ]
 
 [tool.setuptools]
-package-dir = { trading = "." }
+package-dir = { nautilus_bridge = "." }
 packages = [
-    "trading",
-    "trading.adapters",
-    "trading.adapters.entrade",
-    "trading.adapters.entrade.api",
+    "nautilus_bridge",
+    "nautilus_bridge.adapters",
+    "nautilus_bridge.adapters.entrade",
+    "nautilus_bridge.adapters.entrade.api",
 ]

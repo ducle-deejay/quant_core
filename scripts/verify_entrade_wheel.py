@@ -43,27 +43,27 @@ COMMISSION = 31_500  # VND, the fake venue's tradingFee for the probe order
 
 def check_import_isolation() -> None:
     """Every imported adapter module must resolve beneath sys.prefix."""
-    from trading.adapters.entrade import api
-    from trading.adapters.entrade import config as config_module
-    from trading.adapters.entrade import constants
-    from trading.adapters.entrade import data as data_module
-    from trading.adapters.entrade import execution as execution_module
-    from trading.adapters.entrade import factories
-    from trading.adapters.entrade import providers
-    from trading.adapters.entrade.api import (
+    from nautilus_bridge.adapters.entrade import api
+    from nautilus_bridge.adapters.entrade import config as config_module
+    from nautilus_bridge.adapters.entrade import constants
+    from nautilus_bridge.adapters.entrade import data as data_module
+    from nautilus_bridge.adapters.entrade import execution as execution_module
+    from nautilus_bridge.adapters.entrade import factories
+    from nautilus_bridge.adapters.entrade import providers
+    from nautilus_bridge.adapters.entrade.api import (
         audit,
         contracts,
         dnse_api,
         entrade_api,
     )
-    from trading.adapters.entrade.api import audit as audit_module
+    from nautilus_bridge.adapters.entrade.api import audit as audit_module
     import market_data.instruments
-    import trading
-    import trading.adapters
+    import nautilus_bridge
+    import nautilus_bridge.adapters
 
     modules = [
-        trading,
-        trading.adapters,
+        nautilus_bridge,
+        nautilus_bridge.adapters,
         market_data.instruments,
         config_module,
         constants,
@@ -236,12 +236,12 @@ def build_node(launch: str) -> tuple[Any, Any]:
     )
     from nautilus_trader.trading import Strategy
 
-    from trading.adapters.entrade.config import DnseDataClientConfig
-    from trading.adapters.entrade.config import EntradeExecClientConfig
-    from trading.adapters.entrade.data import DnseLiveDataClient
-    from trading.adapters.entrade.data import build_bar_type_for_symbol
-    from trading.adapters.entrade.execution import EntradeExecutionClient
-    from trading.adapters.entrade.providers import (
+    from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
+    from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
+    from nautilus_bridge.adapters.entrade.data import DnseLiveDataClient
+    from nautilus_bridge.adapters.entrade.data import build_bar_type_for_symbol
+    from nautilus_bridge.adapters.entrade.execution import EntradeExecutionClient
+    from nautilus_bridge.adapters.entrade.providers import (
         DnseInstrumentProvider,
         EntradeInstrumentProvider,
     )

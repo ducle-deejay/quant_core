@@ -4,8 +4,8 @@
   "environment": "live",
   "data_clients": {
     "DNSE": {
-      "config": "trading.adapters.entrade.config:DnseDataClientConfig",
-      "factory": "trading.adapters.entrade.factories:DnseLiveDataClientFactory",
+      "config": "nautilus_bridge.adapters.entrade.config:DnseDataClientConfig",
+      "factory": "nautilus_bridge.adapters.entrade.factories:DnseLiveDataClientFactory",
       "values": {
         "api_key": "REPLACE_API_KEY",
         "api_secret": "REPLACE_API_SECRET",
@@ -15,8 +15,8 @@
   },
   "exec_clients": {
     "DNSE": {
-      "config": "trading.adapters.entrade.config:EntradeExecClientConfig",
-      "factory": "trading.adapters.entrade.factories:EntradeLiveExecClientFactory",
+      "config": "nautilus_bridge.adapters.entrade.config:EntradeExecClientConfig",
+      "factory": "nautilus_bridge.adapters.entrade.factories:EntradeLiveExecClientFactory",
       "values": {
         "username": "REPLACE_USERNAME",
         "password": "REPLACE_PASSWORD",
