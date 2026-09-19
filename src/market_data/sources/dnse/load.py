@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from nautilus_trader.model import FuturesContract
+from nautilus_trader.model import PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.sources.dnse.quality import validate_transformed_batch
@@ -23,7 +25,7 @@ def load_day(
     counts: Counter[str] = Counter()
     for batch in transformed:
         validate_transformed_batch(batch)
-        if type(batch[0]).__name__ == "FuturesContract":
+        if isinstance(batch[0], (FuturesContract, PerpetualContract)):
             existing = {
                 instrument.id.value
                 for instrument in catalog.instruments(
@@ -34,7 +36,8 @@ def load_day(
             if not batch:
                 continue
             catalog.write_instruments(batch)
-            counts[type(batch[0]).__name__] += len(batch)
+            for instrument in batch:
+                counts[type(instrument).__name__] += 1
             continue
         writer = {
             "Bar": catalog.write_bars,

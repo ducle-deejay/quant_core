@@ -11,6 +11,7 @@ from nautilus_trader.model import (
     CurrencyType,
     FuturesContract,
     InstrumentId,
+    PerpetualContract,
     Price,
     Quantity,
     Symbol,
@@ -191,41 +192,35 @@ def build_futures_contract(
     )
 
 
-def build_continuous_futures_contract(
+def build_continuous_futures_proxy(
     spec: FuturesInstrumentSpec,
-    ts_init: str | None = None,
-    expiration: str | None = None,
     *,
     ts_event_ns: int | None = None,
     record_ts_init_ns: int | None = None,
-) -> FuturesContract:
-    """Compose the continuous signal instrument used by the data pipeline."""
-    if (ts_init is None) != (expiration is None):
-        raise ValueError(
-            "Continuous instrument window requires both ts_init and expiration"
-        )
-
+) -> PerpetualContract:
+    """Compose the non-expiring execution proxy for the continuous price series."""
     register_futures_instrument_currency(spec)
-    ts_init_ns = 0 if ts_init is None else pd.Timestamp(ts_init, tz="UTC").value
-    expiration_ns = (
-        0 if expiration is None else pd.Timestamp(expiration, tz="UTC").value
-    )
+    quote_currency = spec.quote_currency()
+    ts_event = 0 if ts_event_ns is None else ts_event_ns
+    ts_init = 0 if record_ts_init_ns is None else record_ts_init_ns
 
-    return FuturesContract(
+    return PerpetualContract(
         instrument_id=spec.instrument_id(),
         raw_symbol=spec.instrument_id().symbol,
+        underlying=spec.underlying,
         asset_class=spec.asset_class,
-        exchange=spec.exchange,
-        currency=spec.quote_currency(),
+        base_currency=None,
+        quote_currency=quote_currency,
+        settlement_currency=quote_currency,
+        is_inverse=False,
         price_precision=spec.price_precision,
+        size_precision=spec.size_precision,
         price_increment=spec.price_increment_object(),
+        size_increment=Quantity(1, spec.size_precision),
         multiplier=spec.multiplier_object(),
         lot_size=spec.lot_size_object(),
-        underlying=spec.underlying,
-        activation_ns=ts_init_ns,
-        expiration_ns=expiration_ns,
-        ts_event=ts_init_ns if ts_event_ns is None else ts_event_ns,
-        ts_init=ts_init_ns if record_ts_init_ns is None else record_ts_init_ns,
+        ts_event=ts_event,
+        ts_init=ts_init,
     )
 
 

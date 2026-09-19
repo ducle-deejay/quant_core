@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from nautilus_trader.model import FuturesContract
+from nautilus_trader.model import PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.sources.mirae.quality import validate_transformed_bars
@@ -32,7 +33,7 @@ def load_day(
     added_timestamps: list[int] = []
 
     for batch in transformed:
-        if isinstance(batch[0], FuturesContract):
+        if isinstance(batch[0], (FuturesContract, PerpetualContract)):
             existing_instruments = {
                 instrument.id.value
                 for instrument in catalog.instruments(
@@ -46,7 +47,8 @@ def load_day(
             ]
             if new_instruments:
                 catalog.write_instruments(new_instruments)
-                counts["FuturesContract"] += len(new_instruments)
+                for instrument in new_instruments:
+                    counts[type(instrument).__name__] += 1
             continue
 
         validate_transformed_bars(batch)

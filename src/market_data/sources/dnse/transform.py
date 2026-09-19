@@ -16,7 +16,7 @@ from nautilus_trader.model import OrderSide
 from nautilus_trader.model import TradeId
 from nautilus_trader.model import TradeTick
 
-from market_data.instruments import build_continuous_futures_contract
+from market_data.instruments import build_continuous_futures_proxy
 from market_data.instruments import build_futures_contract
 from market_data.instruments import load_futures_instrument_spec
 from market_data.instruments import register_futures_instrument_currency
@@ -47,7 +47,8 @@ def transform_day(
         contracts,
         ts_event_ns=_ingestion_day_ts_ns(source),
     )
-    yield [continuous, *monthly.values()]
+    yield [continuous]
+    yield list(monthly.values())
 
     root = source / "hnx" / "futures"
     for path in sorted((root / "bars").glob("*/*.json")):
@@ -83,7 +84,7 @@ def _build_instruments(
 ) -> tuple[Any, dict[str, Any]]:
     spec = load_futures_instrument_spec(instrument_config)
     register_futures_instrument_currency(spec)
-    continuous = build_continuous_futures_contract(
+    continuous = build_continuous_futures_proxy(
         spec,
         ts_event_ns=ts_event_ns,
         record_ts_init_ns=ts_event_ns,
