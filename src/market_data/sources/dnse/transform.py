@@ -16,10 +16,10 @@ from nautilus_trader.model import OrderSide
 from nautilus_trader.model import TradeId
 from nautilus_trader.model import TradeTick
 
-from market_data.instruments import build_continuous_futures_proxy
-from market_data.instruments import build_futures_contract
-from market_data.instruments import load_futures_instrument_spec
-from market_data.instruments import register_futures_instrument_currency
+from nautilus_bridge.instruments.instruments import build_continuous_futures_proxy
+from nautilus_bridge.instruments.instruments import build_futures_contract
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import register_futures_instrument_currency
 from market_data.sources.dnse.quality import page_number
 from market_data.sources.dnse.quality import read_json
 

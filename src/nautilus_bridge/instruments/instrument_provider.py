@@ -5,12 +5,12 @@ from pathlib import Path
 from nautilus_trader.live.providers import InstrumentProvider
 from nautilus_trader.model import InstrumentId
 
-from market_data.instruments import FuturesInstrumentSpec
-from market_data.instruments import build_continuous_futures_contract
-from market_data.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
+from nautilus_bridge.instruments.instruments import build_continuous_futures_contract
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
 
 
-INSTRUMENT_DEFINITIONS_DIR = Path(__file__).with_name("instrument_definitions")
+INSTRUMENT_DEFINITIONS_DIR = Path(__file__).resolve().with_name("instrument_definitions")
 
 
 class InstrumentDefinitionProvider(InstrumentProvider):

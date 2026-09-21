@@ -9,9 +9,9 @@ from nautilus_trader.model import Bar
 from nautilus_trader.model import BarType
 
 from market_data.sources.mirae.quality import read_json
-from market_data.instruments import build_continuous_futures_proxy
-from market_data.instruments import load_futures_instrument_spec
-from market_data.instruments import register_futures_instrument_currency
+from nautilus_bridge.instruments.instruments import build_continuous_futures_proxy
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import register_futures_instrument_currency
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"

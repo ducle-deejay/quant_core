@@ -61,7 +61,7 @@ from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClient
 from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
-from market_data.instruments import FuturesInstrumentSpec
+from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
 
 SPEC = FuturesInstrumentSpec(
     symbol="VN30F1M",

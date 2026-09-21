@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from market_data.instrument_provider import instrument_definition_path
+from nautilus_bridge.instruments.instrument_provider import instrument_definition_path
 from market_data.sources.dnse.client import create_dnse_rest_client
 from market_data.sources.dnse.pipeline import run_daily
 

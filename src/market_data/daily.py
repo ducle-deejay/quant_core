@@ -18,7 +18,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from market_data.instrument_provider import instrument_definition_path
+from nautilus_bridge.instruments.instrument_provider import instrument_definition_path
 from market_data.notify import TelegramNotifier
 from market_data.notify import esc
 from market_data.notify import notify_or_log

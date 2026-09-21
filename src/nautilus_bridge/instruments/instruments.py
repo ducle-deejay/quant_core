@@ -224,6 +224,9 @@ def build_continuous_futures_proxy(
     )
 
 
+build_continuous_futures_contract = build_continuous_futures_proxy
+
+
 def _precision_from_increment(value: float) -> int:
     text = format(value, "f").rstrip("0").rstrip(".")
     return len(text.split(".", 1)[1]) if "." in text else 0

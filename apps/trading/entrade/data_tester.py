@@ -41,10 +41,17 @@ from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import investor_id_from_token
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
-from market_data.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]
-SPEC_PATH = ROOT / "src" / "market_data" / "instrument_definitions" / "vn30f1m.hnx.json"
+SPEC_PATH = (
+    ROOT
+    / "src"
+    / "nautilus_bridge"
+    / "instruments"
+    / "instrument_definitions"
+    / "vn30f1m.hnx.json"
+)
 DATA_CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 

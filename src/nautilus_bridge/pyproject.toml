@@ -7,7 +7,6 @@ name = "nautilus-bridge"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "market-data",
     "nautilus-trader==2.0.0rc5",
     "dnse-sdk-openapi>=2.0.0",
     "paho-mqtt>=2.1.0",
@@ -23,7 +22,11 @@ dependencies = [
 package-dir = { nautilus_bridge = "." }
 packages = [
     "nautilus_bridge",
+    "nautilus_bridge.instruments",
     "nautilus_bridge.adapters",
     "nautilus_bridge.adapters.entrade",
     "nautilus_bridge.adapters.entrade.api",
 ]
+
+[tool.setuptools.package-data]
+nautilus_bridge = ["instruments/instrument_definitions/*.json"]

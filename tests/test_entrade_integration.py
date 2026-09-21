@@ -55,7 +55,7 @@ from nautilus_bridge.adapters.entrade.data import build_bar_type_for_symbol
 from nautilus_bridge.adapters.entrade.execution import EntradeExecutionClient
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
-from market_data.instruments import FuturesInstrumentSpec
+from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
 
 VENUE = "HNX"
 DATA_SYMBOL = "VN30F1M"

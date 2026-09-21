@@ -8,7 +8,7 @@ from nautilus_trader.live import InstrumentProviderConfig
 from nautilus_trader.live.providers import InstrumentProvider
 from nautilus_trader.model import InstrumentId, Venue
 
-from market_data.instruments import FuturesInstrumentSpec, build_continuous_futures_contract
+from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec, build_continuous_futures_contract
 
 from .config import DnseDataClientConfig
 from .api.contracts import EntradeMonthlyContract, resolve_active_contract

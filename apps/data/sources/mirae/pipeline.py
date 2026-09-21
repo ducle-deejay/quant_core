@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from market_data.sources.dnse.pipeline import retained_contract_symbol
 from market_data.sources.mirae.extract import request_mirae_history
 from market_data.sources.mirae.pipeline import run_daily
-from market_data.instrument_provider import instrument_definition_path
+from nautilus_bridge.instruments.instrument_provider import instrument_definition_path
 
 
 HERE = Path(__file__).resolve().parent

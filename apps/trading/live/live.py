@@ -22,7 +22,7 @@ from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
-from market_data.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "apps" / "trading"))
@@ -37,7 +37,14 @@ load_dotenv(ROOT / ".env", override=True)
 NAME = "QUANTCORE-LIVE-001"
 TRADER_ID = TraderId.from_str("QUANTCORE-001")
 ENTRADE_ACCOUNT = EntradeAccount.DEMO
-SPEC_PATH = ROOT / "src" / "market_data" / "instrument_definitions" / "vn30f1m.hnx.json"
+SPEC_PATH = (
+    ROOT
+    / "src"
+    / "nautilus_bridge"
+    / "instruments"
+    / "instrument_definitions"
+    / "vn30f1m.hnx.json"
+)
 
 spec = load_futures_instrument_spec(SPEC_PATH)
 

@@ -18,11 +18,15 @@ from nautilus_trader.live import LiveNode
 from nautilus_trader.live.config import construct_config
 from nautilus_trader.model import TraderId
 
-from market_data.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
 
 DEFAULT_SPEC_PATH = (
     Path(__file__).resolve().parents[4]
-    / "src" / "market_data" / "instrument_definitions" / "vn30f1m.hnx.json"
+    / "src"
+    / "nautilus_bridge"
+    / "instruments"
+    / "instrument_definitions"
+    / "vn30f1m.hnx.json"
 )
 
 

@@ -11,7 +11,6 @@ resolution-markers = [
 members = [
     "alpha-core",
     "market-data",
-    "quantcore",
     "nautilus-bridge",
 ]
 
@@ -171,6 +170,7 @@ version = "0.1.0"
 source = { editable = "src/market_data" }
 dependencies = [
     { name = "dnse-sdk-openapi" },
+    { name = "nautilus-bridge" },
     { name = "nautilus-trader" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -183,6 +183,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dnse-sdk-openapi", specifier = ">=2.0.0" },
+    { name = "nautilus-bridge", editable = "src/nautilus_bridge" },
     { name = "nautilus-trader", specifier = "==2.0.0rc5" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pyarrow" },
@@ -242,6 +243,35 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/4e/13783aa7c17414d7186c72c49bc718366f75e49f0ea58d4f81cb63ac3187/msgpack-1.2.2-cp315-cp315t-win32.whl", hash = "sha256:8c6321a414f8b4a8dc43976b2fa8349156434ca9adedd9a187b796f7e1d3d3fc", size = 71790, upload-time = "2026-08-27T10:03:43.715Z" },
     { url = "https://files.pythonhosted.org/packages/5e/9d/1d02994c7ae2603c98100984428ff0f67443572133bc18eca6058f732c1b/msgpack-1.2.2-cp315-cp315t-win_amd64.whl", hash = "sha256:6f53285f20d592ed309ee19e509cc4c77a3bda1db02ad67e8a0949bb227a5a6d", size = 78766, upload-time = "2026-08-27T10:03:45.036Z" },
     { url = "https://files.pythonhosted.org/packages/60/54/89ed16e6f966a050dc78b0e94a545025211b07ce9f4bdfe07dff70c03fc2/msgpack-1.2.2-cp315-cp315t-win_arm64.whl", hash = "sha256:a378e12ccc06d76efde115caf4073b7e5ff3cc18291d1341f9e65fb882e3f754", size = 71819, upload-time = "2026-08-27T10:03:46.375Z" },
+]
+
+[[package]]
+name = "nautilus-bridge"
+version = "0.1.0"
+source = { editable = "src/nautilus_bridge" }
+dependencies = [
+    { name = "dnse-sdk-openapi" },
+    { name = "msgpack" },
+    { name = "nautilus-trader" },
+    { name = "paho-mqtt" },
+    { name = "pandas" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "truststore" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dnse-sdk-openapi", specifier = ">=2.0.0" },
+    { name = "msgpack", specifier = ">=1.2.1" },
+    { name = "nautilus-trader", specifier = "==2.0.0rc5" },
+    { name = "paho-mqtt", specifier = ">=2.1.0" },
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "requests", specifier = ">=2.34.2" },
+    { name = "truststore", specifier = ">=0.10.4" },
+    { name = "websockets", specifier = ">=16.0" },
 ]
 
 [[package]]
@@ -432,25 +462,6 @@ wheels = [
 ]
 
 [[package]]
-name = "quantcore"
-version = "0.1.0"
-source = { editable = "src/quantcore" }
-dependencies = [
-    { name = "nautilus-trader" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "nautilus-trader", specifier = "==2.0.0rc5" },
-    { name = "numpy" },
-    { name = "pandas", specifier = ">=2.3.3" },
-    { name = "pyarrow" },
-]
-
-[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -472,37 +483,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "nautilus-bridge"
-version = "0.1.0"
-source = { editable = "src/nautilus_bridge" }
-dependencies = [
-    { name = "dnse-sdk-openapi" },
-    { name = "market-data" },
-    { name = "msgpack" },
-    { name = "nautilus-trader" },
-    { name = "paho-mqtt" },
-    { name = "pandas" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-    { name = "truststore" },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "dnse-sdk-openapi", specifier = ">=2.0.0" },
-    { name = "market-data", editable = "src/market_data" },
-    { name = "msgpack", specifier = ">=1.2.1" },
-    { name = "nautilus-trader", specifier = "==2.0.0rc5" },
-    { name = "paho-mqtt", specifier = ">=2.1.0" },
-    { name = "pandas", specifier = ">=2.3.3" },
-    { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "requests", specifier = ">=2.34.2" },
-    { name = "truststore", specifier = ">=0.10.4" },
-    { name = "websockets", specifier = ">=16.0" },
 ]
 
 [[package]]

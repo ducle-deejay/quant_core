@@ -57,14 +57,14 @@ def check_import_isolation() -> None:
         entrade_api,
     )
     from nautilus_bridge.adapters.entrade.api import audit as audit_module
-    import market_data.instruments
+    import nautilus_bridge.instruments.instruments
     import nautilus_bridge
     import nautilus_bridge.adapters
 
     modules = [
         nautilus_bridge,
         nautilus_bridge.adapters,
-        market_data.instruments,
+        nautilus_bridge.instruments.instruments,
         config_module,
         constants,
         data_module,
@@ -245,7 +245,7 @@ def build_node(launch: str) -> tuple[Any, Any]:
         DnseInstrumentProvider,
         EntradeInstrumentProvider,
     )
-    from market_data.instruments import FuturesInstrumentSpec
+    from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
 
     spec = FuturesInstrumentSpec(
         symbol=DATA_SYMBOL,

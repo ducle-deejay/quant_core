@@ -55,7 +55,7 @@ from nautilus_trader.model import (
 )
 from nautilus_trader.persistence import ParquetDataCatalog
 
-from market_data.instruments import FuturesInstrumentSpec
+from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
 
 from .config import DnseDataClientConfig
 from .constants import NOT_IMPLEMENTED
