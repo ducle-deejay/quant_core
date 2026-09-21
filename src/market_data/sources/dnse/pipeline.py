@@ -19,7 +19,6 @@ def run_daily(
     client_factory: ClientFactory,
     raw_root: str | Path,
     catalog_path: str | Path,
-    instrument_config: str | Path,
     continuous_symbol: str,
     day: date,
     request_delay_seconds: float = 0.02,
@@ -59,7 +58,6 @@ def run_daily(
             try:
                 yield from transform_day(
                     raw_day=current_raw_day,
-                    instrument_config=instrument_config,
                 )
             except ETLStageError:
                 raise

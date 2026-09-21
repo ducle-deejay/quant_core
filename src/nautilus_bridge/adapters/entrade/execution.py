@@ -60,6 +60,9 @@ from .api.entrade_api import EntradeClient
 from .api.entrade_api import EntradeClientConfig
 from .api.entrade_api import investor_id_from_token
 from .providers import EntradeInstrumentProvider
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_ID
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
 ORDER_POLL_INTERVAL_SECONDS = 1.0
 
@@ -168,11 +171,11 @@ class EntradeExecutionClient(ExecutionClient):
             cache=cache,
             clock=clock,
             trader_id=trader_id,
-            venue=Venue(config.instrument_spec.venue),
+            venue=VENUE,
             account_id=AccountId(config.account_id),
             oms_type=OmsType.NETTING,
             account_type=AccountType.MARGIN,
-            base_currency=config.instrument_spec.quote_currency(),
+            base_currency=VND,
             instrument_provider=instrument_provider,
         )
         self._client = client
@@ -304,7 +307,7 @@ class EntradeExecutionClient(ExecutionClient):
 
     def _generate_balance(self, payload: dict[str, Any]) -> None:
         balance = entrade_account_balance(
-            payload, self._config.instrument_spec.quote_currency()
+            payload, VND
         )
         self.generate_account_state(
             balances=[balance],
@@ -416,7 +419,7 @@ class EntradeExecutionClient(ExecutionClient):
         reports = self._position_status_reports(payload.get("data", []))
         if command.instrument_id is None:
             return reports
-        if command.instrument_id == self._config.instrument_spec.instrument_id():
+        if command.instrument_id == CONTINUOUS_ID:
             return reports
         return [
             report
@@ -638,7 +641,7 @@ class EntradeExecutionClient(ExecutionClient):
                 fill.trade_id,
                 fill.last_qty,
                 fill.last_px,
-                self._config.instrument_spec.quote_currency(),
+                VND,
                 fill.commission,
                 fill.liquidity_side,
                 fill.ts_event,
@@ -675,7 +678,7 @@ class EntradeExecutionClient(ExecutionClient):
         instrument = self._provider.find(instrument_id)
         if instrument is None:
             instrument = self._provider.find(
-                self._config.instrument_spec.instrument_id()
+                CONTINUOUS_ID
             )
         if instrument is None:
             raise ValueError(f"No instrument loaded for Entrade order {payload['id']}")
@@ -728,7 +731,7 @@ class EntradeExecutionClient(ExecutionClient):
         instrument = self._provider.find(instrument_id)
         if instrument is None:
             instrument = self._provider.find(
-                self._config.instrument_spec.instrument_id()
+                CONTINUOUS_ID
             )
         if instrument is None:
             raise ValueError(f"No instrument loaded for Entrade fill {payload['id']}")
@@ -770,7 +773,7 @@ class EntradeExecutionClient(ExecutionClient):
                     ),
                     commission=Money.from_decimal(
                         commission,
-                        self._config.instrument_spec.quote_currency(),
+                        VND,
                     ),
                     liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
                     avg_px=_decimal(payload.get("averagePrice"))

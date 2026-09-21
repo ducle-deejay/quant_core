@@ -66,9 +66,6 @@ from nautilus_trader.model import TraderId
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig, EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
-from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
-
-spec = load_futures_instrument_spec("data/instruments/vn30f.json")
 
 config = LiveNodeConfig(
     environment=Environment.LIVE,
@@ -77,13 +74,11 @@ config = LiveNodeConfig(
         "DNSE": DnseDataClientConfig(
             api_key="...",
             api_secret="...",
-            instrument_spec=spec,
             historical_source="api",
         ),
     },
     exec_clients={
         "DNSE": EntradeExecClientConfig(
-            instrument_spec=spec,
             username="...",
             password="...",
             account_id="DNSE-123456",

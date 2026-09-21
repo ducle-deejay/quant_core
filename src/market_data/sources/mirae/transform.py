@@ -9,9 +9,9 @@ from nautilus_trader.model import Bar
 from nautilus_trader.model import BarType
 
 from market_data.sources.mirae.quality import read_json
-from nautilus_bridge.instruments.instruments import build_continuous_futures_proxy
-from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
-from nautilus_bridge.instruments.instruments import register_futures_instrument_currency
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
+    build_continuous_futures_contract,
+)
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
@@ -24,15 +24,12 @@ BOUNDARY_PREDECESSORS = {(11, 30): (11, 29), (14, 30): (14, 29)}
 def transform_day(
     *,
     raw_day: str | Path,
-    instrument_config: str | Path,
 ) -> Iterator[list[Any]]:
     """Transform one retained Mirae candlestick ingestion into Nautilus objects."""
-    spec = load_futures_instrument_spec(instrument_config)
-    register_futures_instrument_currency(spec)
-    continuous = build_continuous_futures_proxy(
-        spec,
-        ts_event_ns=_ingestion_day_ts_ns(Path(raw_day)),
-        record_ts_init_ns=_ingestion_day_ts_ns(Path(raw_day)),
+    ingestion_ts_ns = _ingestion_day_ts_ns(Path(raw_day))
+    continuous = build_continuous_futures_contract(
+        ts_event=ingestion_ts_ns,
+        ts_init=ingestion_ts_ns,
     )
     yield [continuous]
 

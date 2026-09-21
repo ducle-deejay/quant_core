@@ -63,23 +63,16 @@ from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
-from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
 ROOT = Path(__file__).resolve().parents[3]
-SPEC_PATH = (
-    ROOT
-    / "src"
-    / "nautilus_bridge"
-    / "instruments"
-    / "instrument_definitions"
-    / "vn30f1m.hnx.json"
-)
 CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 ORDER_QTY = "1"
 
 
-def resolve_demo_context(spec) -> tuple[str, object]:
+def resolve_demo_context() -> tuple[str, object]:
     """Authenticate and resolve the account id and active contract instrument."""
     import os
 
@@ -103,10 +96,10 @@ def resolve_demo_context(spec) -> tuple[str, object]:
     derivatives = client.list_derivatives()
     contract = resolve_active_contract(
         derivatives,
-        logical_symbol=spec.symbol,
+        logical_symbol=CONTINUOUS_SYMBOL.value,
         at=datetime.now(UTC),
     )
-    contract_instrument_id = spec.with_symbol(contract.symbol).instrument_id()
+    contract_instrument_id = InstrumentId.from_str(f"{contract.symbol}.{VENUE.value}")
     print(f"active contract: {contract.symbol} -> {contract_instrument_id}")
     print(f"nautilus account id: {account_id}")
     return account_id, contract_instrument_id
@@ -267,8 +260,7 @@ def main() -> None:
 
     import os
 
-    spec = load_futures_instrument_spec(SPEC_PATH)
-    account_id, contract_instrument_id = resolve_demo_context(spec)
+    account_id, contract_instrument_id = resolve_demo_context()
 
     node = (
         LiveNode.builder("ENTRADE-EXEC-TESTER-001", TRADER_ID, Environment.LIVE)
@@ -278,7 +270,6 @@ def main() -> None:
             DnseDataClientConfig(
                 api_key=os.environ["API_KEY"],
                 api_secret=os.environ["API_SECRET"],
-                instrument_spec=spec,
                 historical_source="api",
             ),
         )
@@ -286,7 +277,6 @@ def main() -> None:
             CLIENT_NAME,
             EntradeLiveExecClientFactory(),
             EntradeExecClientConfig(
-                instrument_spec=spec,
                 username=os.environ["ENTRADE_USERNAME"],
                 password=os.environ["ENTRADE_PASSWORD"],
                 investor_id=os.getenv("ENTRADE_INVESTOR_ID"),

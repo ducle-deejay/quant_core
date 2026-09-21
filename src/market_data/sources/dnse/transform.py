@@ -16,10 +16,12 @@ from nautilus_trader.model import OrderSide
 from nautilus_trader.model import TradeId
 from nautilus_trader.model import TradeTick
 
-from nautilus_bridge.instruments.instruments import build_continuous_futures_proxy
-from nautilus_bridge.instruments.instruments import build_futures_contract
-from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
-from nautilus_bridge.instruments.instruments import register_futures_instrument_currency
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
+    build_continuous_futures_contract,
+)
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
+    build_monthly_futures_contract,
+)
 from market_data.sources.dnse.quality import page_number
 from market_data.sources.dnse.quality import read_json
 
@@ -37,13 +39,11 @@ DEPTH_LEVELS = 10
 def transform_day(
     *,
     raw_day: str | Path,
-    instrument_config: str | Path,
 ) -> Iterator[list[Any]]:
     """Transform one retained DNSE ingestion into Nautilus domain objects."""
     source = Path(raw_day)
     contracts = _load_contracts(source.parent / "contracts")
     continuous, monthly = _build_instruments(
-        instrument_config,
         contracts,
         continuous_ts_event_ns=_ingestion_day_ts_ns(source),
     )
@@ -89,16 +89,12 @@ def _load_contracts(directory: Path) -> list[dict[str, Any]]:
 
 
 def _build_instruments(
-    instrument_config: str | Path,
     contracts: list[dict[str, Any]],
     continuous_ts_event_ns: int,
 ) -> tuple[Any, dict[str, Any]]:
-    spec = load_futures_instrument_spec(instrument_config)
-    register_futures_instrument_currency(spec)
-    continuous = build_continuous_futures_proxy(
-        spec,
-        ts_event_ns=continuous_ts_event_ns,
-        record_ts_init_ns=continuous_ts_event_ns,
+    continuous = build_continuous_futures_contract(
+        ts_event=continuous_ts_event_ns,
+        ts_init=continuous_ts_event_ns,
     )
     monthly = {}
     for contract in contracts:
@@ -117,8 +113,8 @@ def _build_instruments(
             raise ValueError(
                 f"DNSE contract source event follows receipt for {contract['symbol']}",
             )
-        instrument = build_futures_contract(
-            spec.with_symbol(contract["symbol"]),
+        instrument = build_monthly_futures_contract(
+            contract["symbol"],
             activation=activation.isoformat(),
             expiration=expiration.isoformat(),
             ts_event=contract_ts_event_ns,

@@ -61,21 +61,7 @@ from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClient
 from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
-from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
-
-SPEC = FuturesInstrumentSpec(
-    symbol="VN30F1M",
-    venue="HNX",
-    underlying="VN30",
-    currency_code="VND",
-    currency_precision=0,
-    currency_iso4217=704,
-    currency_name="Vietnamese dong",
-    price_precision=1,
-    price_increment=0.1,
-    multiplier=100_000,
-    lot_size=1,
-)
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
 
 
 class FakeClock:
@@ -160,7 +146,6 @@ def _dnse_client(
     config = DnseDataClientConfig(
         api_key="key",
         api_secret="secret",
-        instrument_spec=SPEC,
         symbols=("VN30F1M",),
         historical_source=historical_source,
         market_working_dates=("2025-01-02",),
@@ -526,13 +511,12 @@ def _entrade_client(
 ) -> tuple[RecordingEntradeClient, FakeEntradeClient, EntradeInstrumentProvider]:
     api = FakeEntradeClient()
     config = EntradeExecClientConfig(
-        instrument_spec=SPEC,
         username="user",
         password="password",
         account_id=account_id,
         account=EntradeAccount.DEMO,
     )
-    provider = EntradeInstrumentProvider(api, SPEC)
+    provider = EntradeInstrumentProvider(api)
     client = RecordingEntradeClient(
         name="ENTRADE",
         config=config,
@@ -854,8 +838,7 @@ def test_entrade_account_order_fill_position_and_mass_reports_are_exact() -> Non
     ]
 
     balance = entrade_account_balance(
-        {"nav": "100000000.00", "availableCash": "90000000.00"},
-        SPEC.quote_currency(),
+        {"nav": "100000000.00", "availableCash": "90000000.00"}, VND,
     )
     status_report = client._order_status_report(payload)
     fill_reports = client._fill_reports(payload)

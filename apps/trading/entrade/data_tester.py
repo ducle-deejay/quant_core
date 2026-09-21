@@ -31,6 +31,7 @@ from nautilus_trader.config import LoggerConfig
 from nautilus_trader.live import LiveNode
 from nautilus_trader.model import BarType
 from nautilus_trader.model import ClientId
+from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import TraderId
 from nautilus_trader.testkit import DataTesterConfig
 
@@ -41,22 +42,16 @@ from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import investor_id_from_token
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
-from nautilus_bridge.instruments.instruments import load_futures_instrument_spec
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_ID
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
 ROOT = Path(__file__).resolve().parents[3]
-SPEC_PATH = (
-    ROOT
-    / "src"
-    / "nautilus_bridge"
-    / "instruments"
-    / "instrument_definitions"
-    / "vn30f1m.hnx.json"
-)
 DATA_CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 
 
-def resolve_active_contract_symbol(spec) -> str:
+def resolve_active_contract_symbol() -> str:
     """Resolve the front-month contract symbol through the Entrade API."""
     client = EntradeClient(EntradeClientConfig(account=EntradeAccount.DEMO))
     token = client.authenticate(os.environ["ENTRADE_USERNAME"], os.environ["ENTRADE_PASSWORD"])
@@ -66,7 +61,7 @@ def resolve_active_contract_symbol(spec) -> str:
     derivatives = client.list_derivatives()
     contract = resolve_active_contract(
         derivatives,
-        logical_symbol=spec.symbol,
+        logical_symbol=CONTINUOUS_SYMBOL.value,
         at=datetime.now(UTC),
     )
     return contract.symbol
@@ -79,10 +74,9 @@ def main() -> None:
     args = parser.parse_args()
     load_dotenv(args.env, override=True)
 
-    spec = load_futures_instrument_spec(SPEC_PATH)
-    contract_symbol = resolve_active_contract_symbol(spec)
-    contract_instrument_id = spec.with_symbol(contract_symbol).instrument_id()
-    bar_type = BarType.from_str(f"{spec.instrument_id()}-1-MINUTE-LAST-EXTERNAL")
+    contract_symbol = resolve_active_contract_symbol()
+    contract_instrument_id = InstrumentId.from_str(f"{contract_symbol}.{VENUE.value}")
+    bar_type = BarType.from_str(f"{CONTINUOUS_ID}-1-MINUTE-LAST-EXTERNAL")
     print(f"active contract: {contract_symbol} -> {contract_instrument_id}")
 
     node = (
@@ -93,8 +87,7 @@ def main() -> None:
             DnseDataClientConfig(
                 api_key=os.environ["API_KEY"],
                 api_secret=os.environ["API_SECRET"],
-                instrument_spec=spec,
-                symbols=(spec.symbol, contract_symbol),
+                symbols=(CONTINUOUS_SYMBOL.value, contract_symbol),
                 historical_source="api",
             ),
         )

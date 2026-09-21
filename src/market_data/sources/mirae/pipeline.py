@@ -19,7 +19,6 @@ def run_daily(
     active_contract: str | None,
     raw_root: str | Path,
     catalog_path: str | Path,
-    instrument_config: str | Path,
     continuous_symbol: str,
     day: date,
 ) -> dict[str, object]:
@@ -50,7 +49,7 @@ def run_daily(
 
     def transformed() -> Iterator[list[Any]]:
         try:
-            yield from transform_day(raw_day=raw_day, instrument_config=instrument_config)
+            yield from transform_day(raw_day=raw_day)
         except ETLStageError:
             raise
         except Exception as error:

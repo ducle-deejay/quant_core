@@ -1,28 +1,12 @@
 #!/usr/bin/env python3
-"""Installed-wheel check for the entrade adapter.
+"""Check an installed Entrade adapter wheel with a deterministic lifecycle probe.
 
-Follows the NautilusTrader developer-guide checklist
-(docs/developer_guide/python_adapters.md, "Build and verify installed
-wheels") for a pure-Python adapter: run this script with the venv's own
-interpreter in isolated mode, e.g.
-
-    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_wheel.py
-    /tmp/qc-wheel-check/bin/python -I scripts/verify_entrade_wheel.py --launch owned
-
-Checks:
-- import isolation: every adapter module resolves beneath sys.prefix;
-  editable installs point back at the source tree and fail here
-- launch modes: the node runs to a coordinated shutdown both owned
-  (node.run()) and hosted (run_async())
-- data delivery: a bar reaches the strategy
-- reconciliation: startup reconciliation completes over the injected
-  fake venue (the adapter yields mass assembly to the runtime hooks)
-- execution: the submitted order fills with the expected quantity,
-  price, commission, and cached order state
-- shutdown: the run returns and the cache holds the final state
-
-The venue is deterministic: both network clients are fakes defined in
-this file, so no network access happens.
+The script verifies that imported adapter modules resolve beneath ``sys.prefix``,
+builds a live node with the fake clients defined below, runs the selected
+``--launch`` mode, and checks bar delivery, account reconciliation, order fill
+values, cached order status, and clean return. The fake clients return fixed
+responses and do not access a network. An import or lifecycle check raises an
+error when it fails.
 """
 
 from __future__ import annotations
@@ -57,14 +41,14 @@ def check_import_isolation() -> None:
         entrade_api,
     )
     from nautilus_bridge.adapters.entrade.api import audit as audit_module
-    import nautilus_bridge.instruments.instruments
+    from nautilus_bridge.instruments.derivatives.futures import vn30f1m
     import nautilus_bridge
     import nautilus_bridge.adapters
 
     modules = [
         nautilus_bridge,
         nautilus_bridge.adapters,
-        nautilus_bridge.instruments.instruments,
+        vn30f1m,
         config_module,
         constants,
         data_module,
@@ -245,21 +229,6 @@ def build_node(launch: str) -> tuple[Any, Any]:
         DnseInstrumentProvider,
         EntradeInstrumentProvider,
     )
-    from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
-
-    spec = FuturesInstrumentSpec(
-        symbol=DATA_SYMBOL,
-        venue="HNX",
-        underlying="VN30",
-        currency_code="VND",
-        currency_precision=0,
-        currency_iso4217=704,
-        currency_name="Vietnamese dong",
-        price_precision=1,
-        price_increment=0.1,
-        multiplier=100_000,
-        lot_size=1,
-    )
     contract_id = InstrumentId.from_str(CONTRACT_ID_STR)
     trading_client = FakeDnseTradingClient()
     rest_client = FakeDnseRestClient()
@@ -285,7 +254,6 @@ def build_node(launch: str) -> tuple[Any, Any]:
         def create(*, name: str, config, cache, clock, trader_id):
             provider = EntradeInstrumentProvider(
                 api,
-                config.instrument_spec,
                 config.instrument_provider,
                 clock=clock,
             )
@@ -342,13 +310,11 @@ def build_node(launch: str) -> tuple[Any, Any]:
                 "DNSE": DnseDataClientConfig(
                     api_key="key",
                     api_secret="secret",
-                    instrument_spec=spec,
                     historical_source="api",
                 ),
             },
             exec_clients={
                 "DNSE": EntradeExecClientConfig(
-                    instrument_spec=spec,
                     username="user",
                     password="password",
                     investor_id=123,

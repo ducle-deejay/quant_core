@@ -51,7 +51,6 @@ class EntradeLiveExecClientFactory(ExecutionClientFactory):
             raise TypeError("Expected EntradeExecClientConfig")
         provider = EntradeInstrumentProvider(
             client=None,
-            instrument_spec=config.instrument_spec,
             config=config.instrument_provider,
             clock=clock,
         )

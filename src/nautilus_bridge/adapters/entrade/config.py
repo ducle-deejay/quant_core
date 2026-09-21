@@ -8,7 +8,9 @@ from nautilus_trader.live import (
     InstrumentProviderConfig,
 )
 
-from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import PRICE_PRECISION
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
 from .constants import ALLOWED_HISTORICAL_SOURCES
 from .constants import DNSE_API_VERSION
@@ -24,14 +26,11 @@ DEFAULT_INSTRUMENT_PROVIDER = InstrumentProviderConfig(load_all=True)
 class DnseDataClientConfig(DataClientConfig):
     """Nautilus extension configuration for the DNSE live data client."""
 
-    instrument_spec: FuturesInstrumentSpec
-
     def __new__(
         cls,
         *,
         api_key: str,
         api_secret: str,
-        instrument_spec: FuturesInstrumentSpec,
         rest_base_url: str = "https://openapi.dnse.com.vn",
         api_version: str = DNSE_API_VERSION,
         ws_base_url: str = "wss://ws-openapi.dnse.com.vn",
@@ -58,7 +57,6 @@ class DnseDataClientConfig(DataClientConfig):
         del (
             api_key,
             api_secret,
-            instrument_spec,
             rest_base_url,
             api_version,
             ws_base_url,
@@ -91,7 +89,6 @@ class DnseDataClientConfig(DataClientConfig):
         *,
         api_key: str,
         api_secret: str,
-        instrument_spec: FuturesInstrumentSpec,
         rest_base_url: str = "https://openapi.dnse.com.vn",
         api_version: str = DNSE_API_VERSION,
         ws_base_url: str = "wss://ws-openapi.dnse.com.vn",
@@ -118,7 +115,6 @@ class DnseDataClientConfig(DataClientConfig):
         del handle_revised_bars, instrument_provider, routing, kwargs
         self.api_key = api_key
         self.api_secret = api_secret
-        self.instrument_spec = instrument_spec
         self.rest_base_url = rest_base_url
         self.api_version = api_version
         self.ws_base_url = ws_base_url
@@ -145,15 +141,15 @@ class DnseDataClientConfig(DataClientConfig):
 
     @property
     def venue(self) -> str:
-        return self.instrument_spec.venue
+        return VENUE.value
 
     @property
     def price_precision(self) -> int:
-        return self.instrument_spec.price_precision
+        return PRICE_PRECISION
 
     @property
     def resolved_symbols(self) -> tuple[str, ...]:
-        return self.symbols or (self.instrument_spec.symbol,)
+        return self.symbols or (CONTINUOUS_SYMBOL.value,)
 
 
 class EntradeExecClientConfig(ExecutionClientConfig):
@@ -165,12 +161,9 @@ class EntradeExecClientConfig(ExecutionClientConfig):
     context, which should be ``Environment.LIVE`` for this client.
     """
 
-    instrument_spec: FuturesInstrumentSpec
-
     def __new__(
         cls,
         *,
-        instrument_spec: FuturesInstrumentSpec,
         username: str | None = None,
         password: str | None = None,
         investor_id: int | str | None = None,
@@ -183,7 +176,6 @@ class EntradeExecClientConfig(ExecutionClientConfig):
         **kwargs: Any,
     ) -> Self:
         del (
-            instrument_spec,
             username,
             password,
             investor_id,
@@ -202,7 +194,6 @@ class EntradeExecClientConfig(ExecutionClientConfig):
     def __init__(
         self,
         *,
-        instrument_spec: FuturesInstrumentSpec,
         username: str | None = None,
         password: str | None = None,
         investor_id: int | str | None = None,
@@ -215,7 +206,6 @@ class EntradeExecClientConfig(ExecutionClientConfig):
         **kwargs: Any,
     ) -> None:
         del instrument_provider, routing, kwargs
-        self.instrument_spec = instrument_spec
         self.username = username
         self.password = password
         self.investor_id = investor_id

@@ -55,25 +55,10 @@ from nautilus_bridge.adapters.entrade.data import build_bar_type_for_symbol
 from nautilus_bridge.adapters.entrade.execution import EntradeExecutionClient
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
-from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec
 
 VENUE = "HNX"
 DATA_SYMBOL = "VN30F1M"
 CONTRACT_ID = InstrumentId.from_str("41I1G8000.HNX")
-
-SPEC = FuturesInstrumentSpec(
-    symbol=DATA_SYMBOL,
-    venue=VENUE,
-    underlying="VN30",
-    currency_code="VND",
-    currency_precision=0,
-    currency_iso4217=704,
-    currency_name="Vietnamese dong",
-    price_precision=1,
-    price_increment=0.1,
-    multiplier=100_000,
-    lot_size=1,
-)
 
 # 2025-01-02 02:00 UTC, a Thursday so the weekday gate lets the bar through.
 BAR_TIME_SECONDS = 1_735_783_200
@@ -234,7 +219,6 @@ def _build_factories(
         def create(*, name: str, config, cache, clock, trader_id):
             provider = EntradeInstrumentProvider(
                 api,
-                config.instrument_spec,
                 config.instrument_provider,
                 clock=clock,
             )
@@ -308,13 +292,11 @@ def build_node(
                 "DNSE": DnseDataClientConfig(
                     api_key="key",
                     api_secret="secret",
-                    instrument_spec=SPEC,
                     historical_source="api",
                 ),
             },
             exec_clients={
                 "DNSE": EntradeExecClientConfig(
-                    instrument_spec=SPEC,
                     username="user",
                     password="password",
                     investor_id=123,
@@ -344,7 +326,6 @@ def make_exec_factory(
         def create(*, name: str, config, cache, clock, trader_id):
             provider = EntradeInstrumentProvider(
                 api,
-                config.instrument_spec,
                 config.instrument_provider,
                 clock=clock,
             )
@@ -483,7 +464,6 @@ def test_execution_output_rejects_foreign_report_identity(kind) -> None:
         def create(*, name: str, config, cache, clock, trader_id):
             provider = EntradeInstrumentProvider(
                 api,
-                config.instrument_spec,
                 config.instrument_provider,
                 clock=clock,
             )
@@ -512,13 +492,11 @@ def test_execution_output_rejects_foreign_report_identity(kind) -> None:
                 "DNSE": DnseDataClientConfig(
                     api_key="key",
                     api_secret="secret",
-                    instrument_spec=SPEC,
                     historical_source="api",
                 ),
             },
             exec_clients={
                 "DNSE": EntradeExecClientConfig(
-                    instrument_spec=SPEC,
                     username="user",
                     password="password",
                     investor_id=123,

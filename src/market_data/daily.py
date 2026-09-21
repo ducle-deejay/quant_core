@@ -18,7 +18,6 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from nautilus_bridge.instruments.instrument_provider import instrument_definition_path
 from market_data.notify import TelegramNotifier
 from market_data.notify import esc
 from market_data.notify import notify_or_log
@@ -154,7 +153,6 @@ def dnse_runner(config: dict[str, Any]) -> SourceRunner:
             client_factory=client_factory,
             raw_root=_resolve_path(config["raw_root"]),
             catalog_path=_resolve_path(config["catalog_path"]),
-            instrument_config=instrument_definition_path(str(config["instrument"])),
             continuous_symbol=str(config["instrument"]),
             day=day,
             request_delay_seconds=float(config["request_delay_seconds"]),
@@ -175,7 +173,6 @@ def mirae_runner(mirae_config: dict[str, Any], dnse_config: dict[str, Any]) -> S
             ),
             raw_root=_resolve_path(mirae_config["raw_root"]),
             catalog_path=_resolve_path(mirae_config["catalog_path"]),
-            instrument_config=instrument_definition_path(str(mirae_config["instrument"])),
             continuous_symbol=str(mirae_config["instrument"]),
             day=day,
         )

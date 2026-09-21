@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from nautilus_bridge.instruments.instrument_provider import instrument_definition_path
 from market_data.sources.dnse.client import create_dnse_rest_client
 from market_data.sources.dnse.pipeline import run_daily
 
@@ -47,7 +46,6 @@ def main() -> None:
         client_factory=client_factory,
         raw_root=_resolve_path(config["raw_root"]),
         catalog_path=_resolve_path(config["catalog_path"]),
-        instrument_config=instrument_definition_path(str(config["instrument"])),
         continuous_symbol=str(config["instrument"]),
         day=args.date or datetime.now(LOCAL_TIMEZONE).date(),
         request_delay_seconds=float(config["request_delay_seconds"]),

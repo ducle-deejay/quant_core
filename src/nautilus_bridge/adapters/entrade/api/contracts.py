@@ -7,9 +7,12 @@ from zoneinfo import ZoneInfo
 
 from nautilus_trader.model import FuturesContract
 
-from nautilus_bridge.instruments.instruments import FuturesInstrumentSpec, build_futures_contract
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
+    CONTINUOUS_SYMBOL,
+    build_monthly_futures_contract,
+)
 
-VN30_FRONT_MONTH_SYMBOL = "VN30F1M"
+VN30_FRONT_MONTH_SYMBOL = CONTINUOUS_SYMBOL.value
 VN_TZINFO = ZoneInfo("Asia/Ho_Chi_Minh")
 # HNX index futures trade through 14:45 local time on the final trading day.
 VN30_MARKET_CLOSE_LOCAL = time(14, 45)
@@ -62,13 +65,12 @@ class EntradeMonthlyContract:
 
     def to_nautilus_instrument(
         self,
-        spec: FuturesInstrumentSpec,
         ts_event: int | None = None,
         ts_init: int | None = None,
     ) -> FuturesContract:
         activation = self.activation or UNKNOWN_ACTIVATION
-        return build_futures_contract(
-            spec=spec.with_symbol(self.symbol),
+        return build_monthly_futures_contract(
+            self.symbol,
             activation=activation.isoformat(),
             expiration=self.expiration.isoformat(),
             ts_event=ts_event,

@@ -23,10 +23,9 @@ package-dir = { nautilus_bridge = "." }
 packages = [
     "nautilus_bridge",
     "nautilus_bridge.instruments",
+    "nautilus_bridge.instruments.derivatives",
+    "nautilus_bridge.instruments.derivatives.futures",
     "nautilus_bridge.adapters",
     "nautilus_bridge.adapters.entrade",
     "nautilus_bridge.adapters.entrade.api",
 ]
-
-[tool.setuptools.package-data]
-nautilus_bridge = ["instruments/instrument_definitions/*.json"]
