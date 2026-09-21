@@ -1,11 +1,7 @@
-"""Daily fallback semantics tests (governing note DEC-009).
+"""Test DNSE-first fallback, coverage, and alert behavior for daily ETL runs.
 
-The critical regression: a run where Mirae RESOLVED every DNSE-missing
-timestamp must SUCCEED - the replaced nox implementation failed the whole
-run in that case.
-
-Alert-format and alert-coverage tests (governing note DEC-012): unified
-HTML template, bootstrap failure alert, and fail-loud alert sending.
+Covers Mirae backfills of DNSE gaps, source failures, final coverage checks,
+alert formatting and delivery, and bootstrap configuration failures.
 """
 
 from __future__ import annotations

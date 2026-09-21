@@ -1,5 +1,8 @@
-"""Telegram notifier tests (governing note DEC-009/DEC-012): env parsing,
-failure safety, and the HTML parse-mode transport."""
+"""Test Telegram notifier environment parsing, HTML transport, and failures.
+
+Covers optional configuration, HTML escaping, no-op behavior, logged errors,
+and opt-in error propagation.
+"""
 
 from __future__ import annotations
 

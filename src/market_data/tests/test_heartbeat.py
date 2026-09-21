@@ -1,5 +1,7 @@
-"""Heartbeat status tests (governing note DEC-012): status file lifecycle
-and missed-run detection used by the io.quant-core.daily-etl-watch watcher.
+"""Test writing the daily ETL status file and classifying run states.
+
+Covers successful, failed, running, missing, stale-running, and mismatched
+day records.
 """
 
 from __future__ import annotations

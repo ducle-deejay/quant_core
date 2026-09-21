@@ -1,17 +1,10 @@
-"""Telegram notification transport shared by the data and trading packages.
+"""Send Telegram alerts for data ingestion and live trading.
 
-Two env-var pairs drive the two alert channels (DEC-011):
-
-    DATA_TELEGRAM_BOT_TOKEN / DATA_TELEGRAM_CHAT_ID      (data ingest)
-    TRADING_TELEGRAM_BOT_TOKEN / TRADING_TELEGRAM_CHAT_ID (live trading)
-
-Messages use Telegram ``parse_mode=HTML`` (DEC-012): formatters build the
-markup, dynamic values must be escaped with :func:`esc`.
-
-Failure-safe by contract: alerting must never break the pipeline or the
-trading loop, so every public helper swallows transport errors (logged to
-stderr) unless ``raise_on_error=True`` is passed explicitly. The daily ETL
-entrypoint opts out (DEC-012): an undeliverable alert fails the run loudly.
+The default, data, and trading notifier factories read their respective
+bot-token and chat-ID pairs from the environment. Messages use HTML parse
+mode and dynamic values are escaped. ``TelegramNotifier.send_message`` raises
+transport errors; ``notify_or_log`` logs and suppresses them by default, or
+propagates them when ``raise_on_error=True``.
 """
 
 from __future__ import annotations

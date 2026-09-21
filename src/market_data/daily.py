@@ -1,19 +1,12 @@
-"""Daily ETL orchestrator: DNSE primary, Mirae candlestick fallback, Telegram alerting.
+"""Daily extract, transform, and load (ETL) orchestration for market data.
 
-Semantics (fixed vs the nox implementation this replaces):
-- DNSE runs first; Mirae runs second and fills ONLY catalog-absent timestamps
-  (never averages or overwrites existing bars).
-- Coverage is judged AFTER both sources, not after DNSE alone: if Mirae
-  resolved every missing DNSE timestamp, the run SUCCEEDS (the nox version
-  failed the whole run in that case).
-- If both sources failed, or timestamps remain missing after both, the run
-  fails loudly and Telegram receives the failure report.
-- Alerts: success (with per-source counts), failure, and partial coverage;
-  the notifier is failure-safe (market_data.notify).
+Runs DNSE first, then uses Mirae candlesticks to fill only catalog-absent
+timestamps. Final coverage is judged after both sources, and the aggregated
+result or failure is sent through the Telegram notifier.
 
-Config: single JSON file (apps/data/daily/config/pipeline.json) pointing at
-the two source configs; credentials via environment (API_KEY/API_SECRET for
-DNSE; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID for alerts).
+Source settings are loaded from a JSON object. The DNSE runner reads
+``API_KEY`` and ``API_SECRET`` from the environment, while the notifier is
+supplied by the caller.
 """
 
 from __future__ import annotations

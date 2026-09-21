@@ -1,9 +1,8 @@
-"""Daily ETL heartbeat: status file writer + missed-run detection (DEC-012).
+"""Write and classify the daily extract, transform, and load (ETL) heartbeat.
 
-The 16:00 LaunchAgent run writes a status file; a separate watcher
-(LaunchAgent at 16:10+) checks it and alerts ``RUN MISSING`` when the
-scheduled run never happened. Absence of the expected alert IS the alert:
-a pipeline that never starts cannot alert by itself.
+The status file records a day, result, and write time. ``write_status`` stores
+``running``, ``ok``, or ``failed: ...`` outcomes; ``check_status`` identifies
+successful, failed, running, missing, and stale-running records.
 """
 
 from __future__ import annotations

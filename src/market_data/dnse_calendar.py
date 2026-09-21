@@ -1,10 +1,9 @@
-"""VN market working dates from the DNSE OpenAPI.
+"""Load and validate Vietnam market working dates from the DNSE OpenAPI.
 
-Ported from the nox_system DNSE adapter and adapted to the existing REST
-client in ``market_data.sources.dnse`` (same endpoint and payload
-contract). Credentials come from the repo-root ``.env`` (``API_KEY`` /
-``API_SECRET``); TLS certificate verification is enforced by the client
-factory.
+The module loads ``API_KEY`` and ``API_SECRET`` from the repository ``.env``
+file, creates a TLS-verified DNSE REST client, and caches one working-date
+request per process. It also parses response payloads and validates timestamps
+against supplied working dates or a weekday fallback.
 """
 
 from __future__ import annotations
