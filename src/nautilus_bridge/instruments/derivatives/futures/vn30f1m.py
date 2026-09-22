@@ -29,8 +29,10 @@ PRICE_PRECISION = 1
 SIZE_INCREMENT = Quantity.from_int(1)
 MULTIPLIER = Quantity.from_int(100_000)
 LOT_SIZE = Quantity.from_int(1)
-# VSD_INITIAL_MARGIN_RATIO = Decimal("0.17")  # Reserved for future VSD margin handling.
-MARGIN_INIT = Decimal("0.2")  # Set the broker-required initial margin rate.
+# EnTrade rates are 0.05 initial margin, 0.03 maintenance margin, and a 0.02
+# force-sell threshold. Use 4x margin rates as a conservative risk buffer.
+MARGIN_INIT = Decimal("0.2")
+MARGIN_MAINT = Decimal("0.12")
 
 
 def build_monthly_futures_contract(
@@ -61,6 +63,7 @@ def build_monthly_futures_contract(
         activation_ns=activation_ns,
         expiration_ns=expiration_ns,
         margin_init=MARGIN_INIT,
+        margin_maint=MARGIN_MAINT,
         ts_event=activation_ns if ts_event is None else ts_event,
         ts_init=activation_ns if ts_init is None else ts_init,
         info=info,
@@ -92,6 +95,7 @@ def build_continuous_futures_contract(
         multiplier=MULTIPLIER,
         lot_size=LOT_SIZE,
         margin_init=MARGIN_INIT,
+        margin_maint=MARGIN_MAINT,
         ts_event=0 if ts_event is None else ts_event,
         ts_init=0 if ts_init is None else ts_init,
     )
