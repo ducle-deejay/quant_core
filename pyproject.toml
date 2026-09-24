@@ -9,7 +9,9 @@ quantcore = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "nbformat>=5.11.1",
     "pytest>=9.1.1",
+    "tabulate>=0.10.0",
     "uvloop>=0.22.0",
 ]
 
