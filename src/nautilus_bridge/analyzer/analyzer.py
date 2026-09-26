@@ -62,7 +62,7 @@ def analyze(
     results: list[BacktestResult],
     node: BacktestNode,
     run_configs: BacktestRunConfig,
-    pos_dir: str,
+    pos_dir: str = None,
 ) -> None:
 
     tearsheet_config = TearsheetConfig(
@@ -81,4 +81,5 @@ def analyze(
     render_tearsheet(tearsheet)
 
     report = node.generate_positions_report(run_configs.id)
-    report.to_csv(Path(pos_dir) / "positions.csv", index=True)
+    if pos_dir is not None:
+        report.to_csv(Path(pos_dir) / "positions.csv", index=True)
