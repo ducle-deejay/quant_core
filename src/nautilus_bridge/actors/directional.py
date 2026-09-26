@@ -5,15 +5,16 @@ from nautilus_trader.common import DataActorConfig
 from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model import Bar
 from nautilus_trader.model import BarType
+from nautilus_trader.model import CustomData
 from nautilus_trader.model import InstrumentId
 
+from nautilus_bridge.data.custom_data import PositionData
 
 class DirectionalActorConfig(DataActorConfig):
     def __init__(
         self,
         *,
         instrument_id: InstrumentId,
-        resolution: str = "1",
         bar_type: BarType,
         **_kwargs: object,
     ) -> None:
@@ -36,11 +37,21 @@ class DirectionalActor(DataActor):
         self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
         self.subscribe_bars(self.config.bar_type)
 
-    def on_bar(self, _bar: Bar) -> None:
+    def on_bar(self, bar: Bar) -> None:
         if not self.indicators_initialized():
             return
 
-        if self.fast_ema.value >= self.slow_ema.value:
-            self.publish_signal("directional", "long")
-        else:
-            self.publish_signal("directional", "short")
+        if self.fast_ema.value >= self.slow_ema.value: 
+            target_position = 1
+        else: 
+            target_position = -1
+
+        target_position = PositionData(
+            target_position=target_position,
+            ts_event=bar.ts_event,
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        data_type = target_position.TYPE
+        data = CustomData(target_position.TYPE, target_position)
+        self.publish_data(data_type, data)

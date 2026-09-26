@@ -3,9 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model import CustomData
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import OrderSide
 from nautilus_trader.trading import Strategy
+
+from nautilus_bridge.data.custom_data import PositionData
 
 
 class DirectionalStrategyConfig(StrategyConfig):
@@ -29,18 +32,23 @@ class DirectionalStrategy(Strategy):
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
-        self.subscribe_signal("directional")
+        self.subscribe_data(PositionData.TYPE)
 
-    def on_signal(self, signal) -> None:
+    def on_data(self, position_data: CustomData) -> None:
+        position_data = position_data.data
+        target_position = position_data.target_position
+
         if self.instrument is None:
             return
-        if signal.value == "long":
+        
+        if target_position > 0:
             if self.portfolio.is_net_flat(self.config.instrument_id):
                 self.buy()
             elif self.portfolio.is_net_short(self.config.instrument_id):
                 self.close_all_positions(self.config.instrument_id)
                 self.buy()
-        elif signal.value == "short":
+        
+        elif target_position < 0:
             if self.portfolio.is_net_flat(self.config.instrument_id):
                 self.sell()
             elif self.portfolio.is_net_long(self.config.instrument_id):
