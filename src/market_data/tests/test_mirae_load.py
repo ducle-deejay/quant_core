@@ -144,3 +144,35 @@ def test_absent_day_inside_a_multi_day_file_is_backfilled(tmp_path):
     assert {stored[t.value] for t in day1 + day3} == {100.0}
     assert report["added_bar_timestamps"] == [t.value for t in day2]
 
+
+def test_pipeline_count_check_accepts_merged_session_boundary_records(tmp_path, monkeypatch):
+    import json
+    from datetime import date
+
+    from market_data.sources.mirae import pipeline
+
+    day = "2026-09-29"
+    # Full-history payloads carry 11:30 and 14:30 records that Transform merges into 11:29 / 14:29
+    boundary = [pd.Timestamp(f"{day} {hm}").tz_localize(LOCAL_TIMEZONE).tz_convert("UTC") for hm in ("11:30", "14:30")]
+    times = sorted(session_open_times(day) + boundary)
+    bars_dir = tmp_path / "raw" / day / "hnx" / "futures" / "bars" / "VN30F1M"
+    bars_dir.mkdir(parents=True)
+    n = len(times)
+    payload = {"t": [int(t.timestamp()) for t in times], "o": [100.0] * n, "h": [100.0] * n,
+               "l": [100.0] * n, "c": [100.0] * n, "v": [1] * n}
+    (bars_dir / "1m_20260929_20260929.json").write_text(json.dumps(payload))
+    monkeypatch.setattr(pipeline, "extract_day", lambda **_: None)
+    (tmp_path / "catalog").mkdir()
+
+    report = pipeline.run_daily(
+        request_history=None,
+        active_contract=None,
+        raw_root=tmp_path / "raw",
+        catalog_path=tmp_path / "catalog",
+        continuous_symbol="VN30F1M",
+        day=date.fromisoformat(day),
+    )
+
+    assert n == 243
+    assert report["records"]["Bar"] == 241
+    assert len(catalog_bars(tmp_path / "catalog")) == 241

@@ -5,6 +5,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from nautilus_trader.model import Bar
+
 from market_data.sources import ETLStageError
 from market_data.sources.mirae.extract import HistoryRequest
 from market_data.sources.mirae.extract import extract_day
@@ -43,13 +45,21 @@ def run_daily(
         )
 
     try:
-        source_bars = validate_raw_day(raw_day)
+        validate_raw_day(raw_day)
     except Exception as error:
         raise ETLStageError(source="Mirae", stage="extract", cause=error) from error
 
+    # Count what Transform emits: it merges 11:30/14:30 records into 11:29/14:29, so the
+    # raw record count is not the number of bars Load receives
+    transformed_bars = 0
+
     def transformed() -> Iterator[list[Any]]:
+        nonlocal transformed_bars
         try:
-            yield from transform_day(raw_day=raw_day)
+            for batch in transform_day(raw_day=raw_day):
+                if isinstance(batch[0], Bar):
+                    transformed_bars += len(batch)
+                yield batch
         except ETLStageError:
             raise
         except Exception as error:
@@ -64,11 +74,11 @@ def run_daily(
         raise
     except Exception as error:
         raise ETLStageError(source="Mirae", stage="load", cause=error) from error
-    if loaded.get("Bar", 0) + loaded.get("SkippedBar", 0) != source_bars:
+    if loaded.get("Bar", 0) + loaded.get("SkippedBar", 0) != transformed_bars:
         raise ETLStageError(
             source="Mirae",
             stage="load",
-            cause=ValueError("Mirae raw and candidate-bar counts differ"),
+            cause=ValueError("Mirae transformed and loaded bar counts differ"),
         )
     return {
         "catalog": str(catalog_path),
