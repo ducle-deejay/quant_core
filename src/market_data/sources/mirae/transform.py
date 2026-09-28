@@ -19,6 +19,11 @@ LOCAL_TIMEZONE = "Asia/Ho_Chi_Minh"
 # External payloads can include two session-boundary records at 11:30 and
 # 14:30 local time; the canonical session grid has 241 bars.
 BOUNDARY_PREDECESSORS = {(11, 30): (11, 29), (14, 30): (14, 29)}
+# Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
+# the interval close, so ts_init = ts_event + 1 minute. The 14:45 ATC bar is a single
+# closing-auction print known at 14:45, so its ts_init stays at ts_event.
+ATC_LOCAL_MINUTE = (14, 45)
+ONE_MINUTE_NS = 60_000_000_000
 
 
 def transform_day(
@@ -73,10 +78,17 @@ def _transform_bars(path: Path, instrument: Any) -> list[Any]:
                 instrument.make_price(close),
                 instrument.make_qty(volume),
                 ts_event,
-                ts_event,
+                _bar_ts_init(timestamp, ts_event),
             ),
         )
     return bars
+
+
+def _bar_ts_init(timestamp: pd.Timestamp, ts_event: int) -> int:
+    local = pd.Timestamp(timestamp).tz_convert(LOCAL_TIMEZONE)
+    if (local.hour, local.minute) == ATC_LOCAL_MINUTE:
+        return ts_event
+    return ts_event + ONE_MINUTE_NS
 
 
 def _normalize_boundary_bars(
