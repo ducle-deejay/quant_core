@@ -23,6 +23,7 @@ from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestEngineConfig
 from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.config import BacktestVenueConfig
+from nautilus_trader.config import DataEngineConfig
 from nautilus_trader.config import FileWriterConfig
 from nautilus_trader.config import LoggerConfig
 
@@ -41,7 +42,7 @@ CATALOG_PATH = "/Users/ducle/repos/quant_core/data/catalog"
 
 INSTRUMENT_ID = InstrumentId.from_str("VN30F1M.HNX")
 
-TIME_FRAME = 15
+TIME_FRAME = 1
 TARGET_BAR_TYPE = BarType.from_str(
     f"{INSTRUMENT_ID}-{TIME_FRAME}-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
 )
@@ -90,7 +91,9 @@ logging = LoggerConfig(
 )
 
 engine_configs = BacktestEngineConfig(
-    logging=logging
+    logging=logging,
+    # Build INTERNAL time bars only from real updates, so no bars appear outside trading hours
+    data_engine=DataEngineConfig(time_bars_build_with_no_updates=False),
 )
 
 run_configs = BacktestRunConfig(
