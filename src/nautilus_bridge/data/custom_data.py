@@ -4,10 +4,10 @@ from nautilus_trader.model import DataType
 
 
 @dataclass(frozen=True)
-class PositionData:
-    TYPE = DataType("PositionData")
+class ExposureData:
+    TYPE = DataType("ExposureData")
 
-    target_position: float
+    target_exposure: float
     ts_event: int
     ts_init: int
 

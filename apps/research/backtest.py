@@ -17,7 +17,7 @@ from nautilus_trader.model import BarAggregation
 from nautilus_trader.model import BarSpecification
 from nautilus_trader.model import BarType
 from nautilus_trader.model import PriceType
-
+from nautilus_trader.model import StrategyId
 
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestEngineConfig
@@ -106,7 +106,10 @@ actor_configs = DirectionalActorConfig(
 )
 
 strategy_configs = DirectionalStrategyConfig(
+    strategy_id=StrategyId('VN30F1M-V1'),
     instrument_id=INSTRUMENT_ID,
+    bar_type=TARGET_BAR_TYPE,
+    manage_gtd_expiry=True,
 )
 
 actor = DirectionalActor(
@@ -114,7 +117,7 @@ actor = DirectionalActor(
 )
 
 strategy = DirectionalStrategy(
-    config=strategy_configs
+    config=strategy_configs,
 )
 
 node = BacktestNode(configs=[run_configs])

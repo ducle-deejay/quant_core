@@ -8,7 +8,7 @@ from nautilus_trader.model import BarType
 from nautilus_trader.model import CustomData
 from nautilus_trader.model import InstrumentId
 
-from nautilus_bridge.data.custom_data import PositionData
+from nautilus_bridge.data.custom_data import ExposureData
 
 class DirectionalActorConfig(DataActorConfig):
     def __init__(
@@ -42,16 +42,16 @@ class DirectionalActor(DataActor):
             return
 
         if self.fast_ema.value >= self.slow_ema.value: 
-            target_position = 1
+            target_exposure = 1
         else: 
-            target_position = -1
+            target_exposure = -1
 
-        target_position = PositionData(
-            target_position=target_position,
+        target_exposure = ExposureData(
+            target_exposure=target_exposure,
             ts_event=bar.ts_event,
             ts_init=self.clock.timestamp_ns(),
         )
 
-        data_type = target_position.TYPE
-        data = CustomData(target_position.TYPE, target_position)
+        data_type = target_exposure.TYPE
+        data = CustomData(target_exposure.TYPE, target_exposure)
         self.publish_data(data_type, data)
