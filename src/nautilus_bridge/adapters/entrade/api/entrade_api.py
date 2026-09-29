@@ -443,3 +443,32 @@ def _collect_pages(fetch: Any, **params: Any) -> list[dict[str, Any]]:
         method="GET",
         url=getattr(fetch, "__name__", "list"),
     )
+
+
+def resolve_entrade_account_ids(
+    username: str,
+    password: str,
+    *,
+    account: EntradeAccount,
+    client_name: str,
+    investor_id: int | str | None = None,
+) -> tuple[str, str]:
+    """Sign in and return (investor ID, Nautilus account ID ``<client_name>-<investorAccountId>``).
+
+    A Nautilus execution client needs its account ID when it is constructed, before it
+    connects, so a node builder calls this first.
+    """
+    client = EntradeClient(EntradeClientConfig(account=account))
+    try:
+        token = client.authenticate(username, password)
+        investor_id = investor_id or investor_id_from_token(token)
+        if investor_id is None:
+            raise EntradeApiError(
+                "Entrade investor ID was not given and the token does not contain it",
+                method="POST",
+                url=client.url_for("/entrade-api/v2/auth"),
+            )
+        balance = client.get_account_balance(investor_id)
+    finally:
+        client.close()
+    return str(investor_id), f"{client_name}-{balance['investorAccountId']}"
