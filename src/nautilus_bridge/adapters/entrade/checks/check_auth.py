@@ -1,5 +1,5 @@
 """Quick entrade demo credential check (never prints secrets).
-Usage: .venv/bin/python3 apps/trading/check_auth.py [--env .env]
+Usage: uv run python -m nautilus_bridge.adapters.entrade.checks.check_auth [--env .env]
 On success prints the investorId needed for ENTRADE_INVESTOR_ID.
 """
 
@@ -17,7 +17,7 @@ from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[5]
 
 
 def main() -> None:

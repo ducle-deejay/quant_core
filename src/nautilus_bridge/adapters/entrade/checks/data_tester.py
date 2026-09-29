@@ -10,7 +10,7 @@ bars-only), so the tester resolves the active contract up front: bars are
 subscribed on the continuous symbol and quotes on the active contract.
 Both instruments are loaded into the provider.
 
-Usage: .venv-v2/bin/python apps/trading/entrade/data_tester.py
+Usage: uv run python -m nautilus_bridge.adapters.entrade.checks.data_tester
 Credentials come from .env (API_KEY, API_SECRET, ENTRADE_USERNAME,
 ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID).
 """
@@ -46,7 +46,7 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_I
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[5]
 DATA_CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 

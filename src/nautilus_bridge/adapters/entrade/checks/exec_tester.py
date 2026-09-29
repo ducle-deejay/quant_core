@@ -25,9 +25,9 @@ Upgrade workflow: re-run both modes to exercise the full adapter
 surface.
 
 Usage:
-    uv run python apps/trading/entrade/exec_tester.py                 # dry run: commands are built but not sent
-    uv run python apps/trading/entrade/exec_tester.py --live-orders   # submit real (demo) orders
-    uv run python apps/trading/entrade/exec_tester.py --live-orders --sweep
+    uv run python -m nautilus_bridge.adapters.entrade.checks.exec_tester                 # dry run: commands are built but not sent
+    uv run python -m nautilus_bridge.adapters.entrade.checks.exec_tester --live-orders   # submit real (demo) orders
+    uv run python -m nautilus_bridge.adapters.entrade.checks.exec_tester --live-orders --sweep
 Env: API_KEY, API_SECRET, ENTRADE_USERNAME, ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID.
 """
 
@@ -66,7 +66,7 @@ from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFact
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[5]
 CLIENT_NAME = "DNSE"
 TRADER_ID = TraderId.from_str("TESTER-001")
 ORDER_QTY = "1"
@@ -86,7 +86,7 @@ def resolve_demo_context() -> tuple[str, object]:
     if investor_id is None:
         raise RuntimeError(
             "ENTRADE_INVESTOR_ID is not set and the auth token did not contain it; "
-            "run apps/trading/check_auth.py to obtain it",
+            "run python -m nautilus_bridge.adapters.entrade.checks.check_auth to obtain it",
         )
 
     balance = client.get_account_balance(investor_id)
