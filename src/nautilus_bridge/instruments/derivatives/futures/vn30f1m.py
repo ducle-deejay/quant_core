@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from collections.abc import Iterable
+from datetime import date
+from datetime import timedelta
 from decimal import Decimal
 
 import pandas as pd
@@ -114,6 +118,64 @@ class VN30F1MInstrumentProvider(InstrumentProvider):
     ) -> None:
         if CONTINUOUS_ID in set(instrument_ids):
             self.add(build_continuous_futures_contract())
+
+
+def vn30f_expiry_date(
+    year: int,
+    month: int,
+    is_trading_day: Callable[[date], bool] | None = None,
+) -> date:
+    """Return the last trading day of the VN30 futures contract expiring in ``year``-``month``.
+
+    HNX rule: the third Thursday of the month, moved back to the previous trading day
+    when that Thursday is not a trading day. ``is_trading_day`` defaults to weekdays
+    only, so exchange holidays must be supplied by the caller to be honoured.
+    """
+    is_trading_day = is_trading_day or (lambda day: day.weekday() < 5)
+    first = date(year, month, 1)
+    first_thursday = first + timedelta(days=(3 - first.weekday()) % 7)
+    expiry = first_thursday + timedelta(weeks=2)
+    while not is_trading_day(expiry):
+        expiry -= timedelta(days=1)
+    return expiry
+
+
+class VN30F1MResolver:
+    """Map VN30F1M.HNX to the front-month contract and back.
+
+    The front-month contract is the loaded contract with the earliest ``expiration_ns``
+    not before the given time; contracts loaded from Entrade carry 14:45 local time of
+    the expiry day. Any other instrument maps to itself.
+    """
+
+    def __init__(self, contracts: Callable[[], Iterable[FuturesContract]]) -> None:
+        self._contracts = contracts
+
+    def front_contract(self, ts_ns: int) -> FuturesContract | None:
+        live = [
+            contract
+            for contract in self._contracts()
+            if isinstance(contract, FuturesContract)
+            and contract.id.venue == VENUE
+            and contract.expiration_ns >= ts_ns
+        ]
+        return min(live, key=lambda contract: contract.expiration_ns, default=None)
+
+    def to_venue(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId:
+        """Instrument an order is sent to at the venue."""
+        if instrument_id != CONTINUOUS_ID:
+            return instrument_id
+        contract = self.front_contract(ts_ns)
+        if contract is None:
+            raise ValueError(f"No unexpired monthly contract is loaded for {CONTINUOUS_ID}")
+        return contract.id
+
+    def to_nautilus(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId:
+        """Instrument a venue order, fill or position is reported under."""
+        contract = self.front_contract(ts_ns)
+        if contract is not None and instrument_id == contract.id:
+            return CONTINUOUS_ID
+        return instrument_id
 
 
 def _register_currency() -> None:
