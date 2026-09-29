@@ -8,6 +8,10 @@ from typing import Any
 
 import requests
 
+TOKEN_REJECTED_STATUS_CODES = frozenset({401, 403})
+LIST_PAGE_SIZE = 100
+LIST_MAX_PAGES = 200
+
 
 class EntradeAccount(StrEnum):
     """
@@ -166,6 +170,7 @@ class EntradeClient(EntradeTransport):
     ) -> None:
         super().__init__(config, session=session)
         self._authentication: dict[str, Any] | None = None
+        self._credentials: tuple[str, str] | None = None
 
     @property
     def authentication(self) -> dict[str, Any] | None:
@@ -187,9 +192,32 @@ class EntradeClient(EntradeTransport):
                 payload=response,
             )
         self._authentication = response
+        self._credentials = (username, password)
         authenticated_token = str(token)
         self.set_token(authenticated_token)
         return authenticated_token
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        authenticated: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            return super()._request(method, path, authenticated=authenticated, **kwargs)
+        except EntradeApiError as e:
+            # Sign in again and repeat the request once on 401/403. This assumes Entrade
+            # rejects an expired token without processing the request; not yet confirmed.
+            if (
+                not authenticated
+                or e.status_code not in TOKEN_REJECTED_STATUS_CODES
+                or self._credentials is None
+            ):
+                raise
+        self.authenticate(*self._credentials)
+        return super()._request(method, path, authenticated=authenticated, **kwargs)
 
     def get_master_account(self, investor_id: int | str) -> dict[str, Any]:
         return self._request(
@@ -286,6 +314,10 @@ class EntradeClient(EntradeTransport):
             params=params,
         )
 
+    def list_all_orders(self, *, investor_account_id: int | str) -> list[dict[str, Any]]:
+        """Return every order of the account, reading page by page instead of one capped page."""
+        return _collect_pages(self.list_orders, investor_account_id=investor_account_id)
+
     def get_order(self, order_id: int | str) -> dict[str, Any]:
         return self._request(
             "GET",
@@ -299,7 +331,7 @@ class EntradeClient(EntradeTransport):
         )
 
     def cancel_all_orders(self, *, investor_account_id: int | str) -> list[dict[str, Any]]:
-        orders = self.list_orders(investor_account_id=investor_account_id).get("data", [])
+        orders = self.list_all_orders(investor_account_id=investor_account_id)
         terminal_states = {"Canceled", "Filled", "Rejected", "Expired", "DoneForDay"}
         return [
             self.cancel_order(order["id"])
@@ -370,6 +402,10 @@ class EntradeClient(EntradeTransport):
             params=params,
         )
 
+    def list_all_deals(self, *, investor_account_id: int | str) -> list[dict[str, Any]]:
+        """Return every deal of the account, reading page by page instead of one capped page."""
+        return _collect_pages(self.list_deals, investor_account_id=investor_account_id)
+
     def close_deal(
         self,
         deal_id: int | str,
@@ -383,5 +419,27 @@ class EntradeClient(EntradeTransport):
         )
 
     def close_all_deals(self, *, investor_account_id: int | str) -> list[dict[str, Any]]:
-        deals = self.list_deals(investor_account_id=investor_account_id, end=255).get("data", [])
+        deals = self.list_all_deals(investor_account_id=investor_account_id)
         return [self.close_deal(deal["id"]) for deal in deals if deal.get("status") == "ACTIVE"]
+
+
+def _collect_pages(fetch: Any, **params: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen_ids: set[Any] = set()
+    for page in range(LIST_MAX_PAGES):
+        start = page * LIST_PAGE_SIZE
+        payload = fetch(start=start, end=start + LIST_PAGE_SIZE, **params)
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        new_rows = [row for row in rows if row.get("id") not in seen_ids]
+        # Stop when a page adds no new IDs, e.g. if the server ignores _start.
+        if not new_rows:
+            return records
+        seen_ids.update(row.get("id") for row in new_rows)
+        records.extend(new_rows)
+        if len(rows) < LIST_PAGE_SIZE:
+            return records
+    raise EntradeApiError(
+        f"Entrade list exceeded {LIST_MAX_PAGES * LIST_PAGE_SIZE} records; refusing a partial result",
+        method="GET",
+        url=getattr(fetch, "__name__", "list"),
+    )

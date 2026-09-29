@@ -9,6 +9,7 @@ from .config import DnseDataClientConfig, EntradeExecClientConfig
 from .data import DnseLiveDataClient
 from .execution import EntradeExecutionClient
 from .providers import DnseInstrumentProvider, EntradeInstrumentProvider
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResolver
 
 
 class DnseLiveDataClientFactory(DataClientFactory):
@@ -61,4 +62,6 @@ class EntradeLiveExecClientFactory(ExecutionClientFactory):
             clock=clock,
             trader_id=trader_id,
             instrument_provider=provider,
+            # Orders on VN30F1M.HNX go to the front-month contract; others are unchanged.
+            symbol_resolver=VN30F1MResolver(provider.list_all),
         )

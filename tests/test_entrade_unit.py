@@ -1,3 +1,11 @@
+"""Behaviour tests for the Entrade/DNSE adapter.
+
+Each test pins one behaviour a trader relies on (an order type reaching the broker as the
+right HNX order, a fill surviving a network error, a bar arriving after a reconnect, ...).
+Broker and market-data services are replaced by small fakes that reproduce the relevant
+wire behaviour; nothing here talks to DNSE or Entrade.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,10 +13,13 @@ import base64
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
+import requests
 from dnse.websocket.models import Ohlc
 from dnse.websocket.models import Quote
 from dnse.websocket.models import Trade
@@ -16,85 +27,109 @@ from nautilus_trader.core import UUID4
 from nautilus_trader.live import BarsResponse, InstrumentResponse, InstrumentsResponse
 from nautilus_trader.model import (
     AccountBalance,
-    AggressorSide,
     AccountId,
     Bar,
     ClientOrderId,
     InstrumentId,
     MarketOrder,
+    OrderBookDepth10,
     OrderSide,
     OrderStatus,
     OrderType,
     PositionSide,
     Price,
     Quantity,
+    QuoteTick,
     StrategyId,
     TimeInForce,
     TradeId,
+    TradeTick,
     TraderId,
     VenueOrderId,
 )
 
+from market_data.sources.dnse.transform import _bar_ts_init as catalog_bar_ts_init
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeApiError
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClient
+from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.data import (
     DnseLiveDataClient,
     SubscriptionKey,
-    bar_type_to_dnse_resolution,
     build_bar_type_for_symbol,
     dnse_ohlc_body_to_nautilus_bars,
     dnse_quote_to_nautilus_depth10,
     dnse_quote_to_nautilus_quote_tick,
     dnse_trade_to_nautilus_trade_tick,
-    normalize_dnse_resolution,
 )
 from nautilus_bridge.adapters.entrade.execution import (
     EntradeExecutionClient,
-    EntradeOrderContext,
     entrade_account_balance,
     entrade_order_parameters,
-    entrade_order_status,
-    entrade_order_type,
 )
-from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
-from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClient
-from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeClientConfig
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResolver
+
+NOW_NS = 1_800_000_000_000_000_000
+CONTRACT_SYMBOL = "41I1G8000"
+# 2025-01-02 09:00 Asia/Ho_Chi_Minh, a working day.
+BAR_OPEN_S = 1_735_783_200
 
 
 class FakeClock:
+    def __init__(self, now_ns: int = NOW_NS) -> None:
+        self.now_ns = now_ns
+
     def timestamp_ns(self) -> int:
-        return 1_800_000_000_000_000_000
+        return self.now_ns
+
+
+def _iso(ns: int) -> str:
+    return pd.Timestamp(ns, tz="UTC").isoformat().replace("+00:00", "Z")
+
+
+# --- DNSE market data --------------------------------------------------------------
 
 
 class FakeDnseTradingClient:
+    """Mimics the DNSE SDK: every subscribe call that passes a callback adds a handler."""
+
     def __init__(self) -> None:
-        self.handlers: dict[str, object] = {}
-        self.connected = False
-        self.subscriptions: list[dict] = []
-        self.quote_subscriptions: list[dict] = []
-        self.trade_subscriptions: list[dict] = []
+        self.handlers: dict[str, list] = {}
+        self.subscriptions: list[tuple[str, dict]] = []
         self.unsubscribes: list[tuple[str, list[str]]] = []
 
     def on(self, event: str, handler: object) -> None:
-        self.handlers[event] = handler
+        self.handlers.setdefault(event, []).append(handler)
+
+    def emit(self, event: str, data: object) -> None:
+        for handler in self.handlers.get(event, []):
+            handler(data)
 
     async def connect(self) -> None:
-        self.connected = True
+        return None
 
     async def disconnect(self) -> None:
-        self.connected = False
+        return None
 
-    async def subscribe_ohlc_closed(self, **kwargs: object) -> None:
-        self.subscriptions.append(kwargs)
+    async def subscribe_ohlc_closed(self, on_ohlc=None, **kwargs: object) -> None:
+        self.subscriptions.append(("ohlc_closed", kwargs))
+        if on_ohlc:
+            self.on("ohlc_closed", on_ohlc)
 
-    async def subscribe_quotes(self, **kwargs: object) -> None:
-        self.quote_subscriptions.append(kwargs)
+    async def subscribe_quotes(self, on_quote=None, **kwargs: object) -> None:
+        self.subscriptions.append(("quote", kwargs))
+        if on_quote:
+            self.on("quote", on_quote)
 
-    async def subscribe_trades(self, **kwargs: object) -> None:
-        self.trade_subscriptions.append(kwargs)
+    async def subscribe_trades(self, on_trade=None, **kwargs: object) -> None:
+        self.subscriptions.append(("trade", kwargs))
+        if on_trade:
+            self.on("trade", on_trade)
 
     async def unsubscribe(self, channel: str, symbols: list[str]) -> None:
         self.unsubscribes.append((channel, symbols))
@@ -109,7 +144,7 @@ class FakeDnseRestClient:
     def get_ohlc(self, **kwargs: object) -> tuple[int, dict]:
         self.ohlc_calls.append(kwargs)
         return self.status, self.body or {
-            "t": [1735783200, 1735869600],
+            "t": [BAR_OPEN_S, BAR_OPEN_S + 86_400],
             "o": [1000.0, 990.0],
             "h": [1001.0, 991.0],
             "l": [999.0, 989.0],
@@ -127,6 +162,7 @@ class RecordingDnseClient(DnseLiveDataClient):
         self.responses: list[object] = []
         self.instruments: list[object] = []
         self.data: list[object] = []
+        self.tasks: list[object] = []
 
     def _handle_response(self, response: object) -> None:
         self.responses.append(response)
@@ -137,11 +173,15 @@ class RecordingDnseClient(DnseLiveDataClient):
     def _handle_data(self, data: object) -> None:
         self.data.append(data)
 
+    def create_task(self, coroutine, name: str = "background"):
+        self.tasks.append(coroutine)
+
 
 def _dnse_client(
     *,
     historical_source: str = "api",
     rest: FakeDnseRestClient | None = None,
+    clock: FakeClock | None = None,
 ) -> tuple[RecordingDnseClient, FakeDnseTradingClient, FakeDnseRestClient]:
     config = DnseDataClientConfig(
         api_key="key",
@@ -156,7 +196,7 @@ def _dnse_client(
         name="DNSE",
         config=config,
         cache=None,
-        clock=FakeClock(),
+        clock=clock or FakeClock(),
         venue="HNX",
         instrument_provider=DnseInstrumentProvider(config),
         trading_client=trading,
@@ -165,31 +205,49 @@ def _dnse_client(
     return client, trading, rest
 
 
-def test_dnse_connect_binds_resources_and_publishes_instrument() -> None:
-    client, trading, _ = _dnse_client()
-    assert client.loop is None
-
-    asyncio.run(client._connect())
-
-    assert trading.connected
-    assert set(trading.handlers) == {"ohlc_closed", "reconnected"}
-    assert len(client.instruments) == 1
-
-
-def test_dnse_resolution_and_ohlc_conversion_preserve_domain_values() -> None:
-    assert normalize_dnse_resolution("60") == "1H"
-    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
-    assert bar_type_to_dnse_resolution(bar_type) == "1"
-
-    bars = dnse_ohlc_body_to_nautilus_bars(
+def _ohlc(open_s: int, close: float, resolution: str = "1") -> Ohlc:
+    return Ohlc.from_dict(
         {
-            "t": [1735783200],
-            "o": [1000.0],
-            "h": [1001.0],
-            "l": [999.0],
-            "c": [1000.5],
-            "v": [10],
+            "symbol": "VN30F1M",
+            "resolution": resolution,
+            "open": close - 1,
+            "high": close + 1,
+            "low": close - 2,
+            "close": close,
+            "volume": 10,
+            "time": open_s,
+            "lastUpdated": open_s,
+            "type": "ohlc",
         },
+    )
+
+
+def _quote(symbol: str, bid: float, board: str = "G1") -> Quote:
+    return Quote.from_dict(
+        {
+            "symbol": symbol,
+            "boardId": board,
+            "bid": [{"price": bid, "qtty": 5}],
+            "offer": [{"price": bid + 0.1, "qtty": 7}],
+        },
+    )
+
+
+def _trade(symbol: str, board: str = "G1") -> Trade:
+    return Trade.from_dict(
+        {
+            "symbol": symbol,
+            "boardId": board,
+            "matchPrice": 1941.0,
+            "matchQtty": 5,
+            "totalVolumeTraded": 12345,
+        },
+    )
+
+
+def test_dnse_ohlc_conversion_preserves_prices_and_volume() -> None:
+    bars = dnse_ohlc_body_to_nautilus_bars(
+        {"t": [BAR_OPEN_S], "o": [1000.0], "h": [1001.0], "l": [999.0], "c": [1000.5], "v": [10]},
         symbol="VN30F1M",
         resolution="1",
         venue="HNX",
@@ -197,116 +255,194 @@ def test_dnse_resolution_and_ohlc_conversion_preserve_domain_values() -> None:
     )
 
     assert len(bars) == 1
-    assert bars[0].bar_type == bar_type
-    assert bars[0].open.as_decimal() == 1000
-    assert bars[0].close.as_decimal() == 1000.5
+    assert bars[0].bar_type == build_bar_type_for_symbol("VN30F1M", "1", "HNX")
+    assert bars[0].open == Price.from_str("1000.0")
+    assert bars[0].close == Price.from_str("1000.5")
+    assert bars[0].volume == Quantity.from_int(10)
 
 
-def test_dnse_closed_bars_filter_working_days_and_duplicates() -> None:
-    client, _, _ = _dnse_client()
+@pytest.mark.parametrize(
+    ("local_open", "resolution"),
+    [("09:00", "1"), ("11:29", "1"), ("14:29", "1"), ("14:45", "1"), ("09:00", "5")],
+)
+def test_live_bar_is_released_at_the_same_time_as_the_catalog_bar(
+    local_open: str,
+    resolution: str,
+) -> None:
+    """Live bars get the same ts_init as the catalog bars built by market_data."""
+    open_utc = pd.Timestamp(f"2025-01-02 {local_open}", tz="Asia/Ho_Chi_Minh").tz_convert("UTC")
+    [bar] = dnse_ohlc_body_to_nautilus_bars(
+        {
+            "t": [int(open_utc.timestamp())],
+            "o": [1000.0],
+            "h": [1001.0],
+            "l": [999.0],
+            "c": [1000.5],
+            "v": [10],
+        },
+        symbol="VN30F1M",
+        resolution=resolution,
+        venue="HNX",
+        working_dates=("2025-01-02",),
+    )
+
+    assert bar.ts_event == open_utc.value
+    if resolution == "1":
+        assert bar.ts_init == catalog_bar_ts_init(open_utc, open_utc.value)
+    else:
+        assert bar.ts_init == open_utc.value + 5 * 60 * 1_000_000_000
+
+
+def test_dnse_closed_bars_skip_non_working_days_and_repeated_bars() -> None:
+    client, trading, _ = _dnse_client()
+    asyncio.run(client._connect())
     bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
-    client._bar_types_by_key[SubscriptionKey("VN30F1M", "1")] = bar_type
+    asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
 
-    for timestamp, close in (
-        (1735869600, 990.5),  # filtered working-day exclusion
-        (1735783200, 1000.5),
-        (1735783200, 1001.5),  # duplicate timestamp
-        (1735783260, 1002.5),
+    for open_s, close in (
+        (BAR_OPEN_S + 86_400, 990.5),  # 2025-01-03 is not in the working dates
+        (BAR_OPEN_S, 1000.5),
+        (BAR_OPEN_S, 1001.5),  # same bar again
+        (BAR_OPEN_S + 60, 1002.5),
     ):
-        client._on_ohlc_event(
-            Ohlc.from_dict(
-                {
-                    "symbol": "VN30F1M",
-                    "resolution": "1",
-                    "open": close - 1,
-                    "high": close + 1,
-                    "low": close - 2,
-                    "close": close,
-                    "volume": 10,
-                    "time": timestamp,
-                    "lastUpdated": timestamp,
-                    "type": "ohlc",
-                },
-            ),
-        )
+        trading.emit("ohlc_closed", _ohlc(open_s, close))
 
     published = [data for data in client.data if isinstance(data, Bar)]
-    assert [bar.close.as_decimal() for bar in published] == [1000.5, 1002.5]
+    assert [bar.close.as_decimal() for bar in published] == [
+        Decimal("1000.5"),
+        Decimal("1002.5"),
+    ]
 
 
-def test_dnse_instrument_requests_and_api_failure_use_typed_path() -> None:
-    client, _, _ = _dnse_client()
-    instrument_id = build_bar_type_for_symbol("VN30F1M", "1", "HNX").instrument_id
-    asyncio.run(
-        client._request_instrument(
-            SimpleNamespace(
-                request_id=UUID4(),
-                instrument_id=instrument_id,
-                start=None,
-                end=None,
-                start_ns=None,
-                end_ns=None,
-                params={},
-            ),
-        ),
+def test_bars_missed_during_a_disconnect_are_recovered_without_a_strategy_request() -> None:
+    """After a reconnect the missed bars arrive first, then the live stream resumes."""
+    minute = 60
+    rest = FakeDnseRestClient(
+        body={
+            "t": [BAR_OPEN_S + minute * i for i in range(4)],
+            "o": [1000.0, 1001.0, 1002.0, 1003.0],
+            "h": [1004.0] * 4,
+            "l": [999.0] * 4,
+            "c": [1000.0, 1001.0, 1002.0, 1003.0],
+            "v": [10] * 4,
+        },
     )
-    assert isinstance(client.responses[-1], InstrumentResponse)
-    assert client.responses[-1].instrument_id == instrument_id
+    # The node clock sits inside minute 3, so that bar is still forming and must not be served.
+    clock = FakeClock((BAR_OPEN_S + 3 * minute + 30) * 1_000_000_000)
+    client, trading, _ = _dnse_client(rest=rest, clock=clock)
+    asyncio.run(client._connect())
+    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
+    asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
 
-    asyncio.run(
-        client._request_instruments(
-            SimpleNamespace(
-                request_id=UUID4(),
-                venue=instrument_id.venue,
-                start=None,
-                end=None,
-                start_ns=None,
-                end_ns=None,
-                params={},
-            ),
-        ),
+    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S, 1000.0))
+    trading.emit("reconnected", {"session_id": "next"})
+    # A live bar arriving while the gap is being fetched waits its turn.
+    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 3 * minute, 1003.0))
+    assert len(client.data) == 1
+
+    for task in client.tasks:
+        asyncio.run(task)
+
+    closes = [bar.close.as_decimal() for bar in client.data]
+    assert closes == [Decimal("1000.0"), Decimal("1001.0"), Decimal("1002.0"), Decimal("1003.0")]
+    assert rest.ohlc_calls[0]["query"]["from"] == BAR_OPEN_S
+
+
+def test_failed_bar_recovery_still_resumes_the_live_stream() -> None:
+    client, trading, _ = _dnse_client(rest=FakeDnseRestClient(status=503, body={"error": "down"}))
+    asyncio.run(client._connect())
+    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
+    asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
+    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S, 1000.0))
+
+    trading.emit("reconnected", {})
+    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 120, 1002.0))
+    for task in client.tasks:
+        asyncio.run(task)
+    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 180, 1003.0))
+
+    assert [bar.close.as_decimal() for bar in client.data] == [
+        Decimal("1000.0"),
+        Decimal("1002.0"),
+        Decimal("1003.0"),
+    ]
+
+
+def test_each_quote_and_trade_is_published_once_and_only_from_the_main_board() -> None:
+    client, trading, _ = _dnse_client()
+    asyncio.run(client._connect())
+    front = SimpleNamespace(instrument_id=InstrumentId.from_str("41I1G8000.HNX"))
+    back = SimpleNamespace(instrument_id=InstrumentId.from_str("41I1G9000.HNX"))
+    for command in (front, back):
+        asyncio.run(client._subscribe_quotes(command))
+        asyncio.run(client._subscribe_trades(command))
+    asyncio.run(client._subscribe_book_depth(front))
+
+    trading.emit("quote", _quote("41I1G8000", 1940.0))
+    trading.emit("quote", _quote("41I1G8000", 1939.0, board="T1"))  # a board other than G1
+    trading.emit("trade", _trade("41I1G9000"))
+    trading.emit("trade", _trade("41I1G9000", board="T3"))
+
+    assert [type(data) for data in client.data] == [QuoteTick, OrderBookDepth10, TradeTick]
+    # The installed SDK resubscribes only the last symbol list sent per channel.
+    quote_subscriptions = [kwargs for kind, kwargs in trading.subscriptions if kind == "quote"]
+    assert quote_subscriptions[-1]["symbols"] == ["41I1G8000", "41I1G9000"]
+    assert {kwargs["board_id"] for kind, kwargs in trading.subscriptions if kind != "ohlc_closed"} == {"G1"}
+
+
+def test_unsubscribing_stops_exactly_the_channels_that_were_subscribed() -> None:
+    client, trading, _ = _dnse_client()
+    asyncio.run(client._connect())
+    command = SimpleNamespace(instrument_id=InstrumentId.from_str("41I1G8000.HNX"))
+    asyncio.run(client._subscribe_quotes(command))
+    asyncio.run(client._subscribe_book_depth(command))
+    asyncio.run(client._subscribe_trades(command))
+
+    asyncio.run(client._unsubscribe_quotes(command))
+    assert trading.unsubscribes == []  # the order book still needs the quote stream
+    asyncio.run(client._unsubscribe_book_depth(command))
+    asyncio.run(client._unsubscribe_trades(command))
+
+    assert trading.unsubscribes == [
+        ("top_price.G1.json", ["41I1G8000"]),
+        ("tick.G1.json", ["41I1G8000"]),
+    ]
+    trading.emit("quote", _quote("41I1G8000", 1940.0))
+    trading.emit("trade", _trade("41I1G8000"))
+    assert client.data == []
+
+
+def test_quote_and_depth_conversion_keep_the_book_levels() -> None:
+    quote = Quote.from_dict(
+        {
+            "symbol": "41I1G9000",
+            "bid": [{"price": 1940.6 - i * 0.1, "qtty": 3 + i} for i in range(3)],
+            "offer": [{"price": 1941.0 + i * 0.1, "qtty": 44 + i} for i in range(3)],
+        },
     )
-    assert isinstance(client.responses[-1], InstrumentsResponse)
+    tick = dnse_quote_to_nautilus_quote_tick(quote, venue="HNX")
+    depth = dnse_quote_to_nautilus_depth10(quote, venue="HNX")
 
-    failing_rest = FakeDnseRestClient(status=503, body={"error": "unavailable"})
-    failing, _, _ = _dnse_client(rest=failing_rest)
-    failing_request = SimpleNamespace(
-        request_id=UUID4(),
-        bar_type=build_bar_type_for_symbol("VN30F1M", "1", "HNX"),
-        start=datetime(2025, 1, 2, 2, tzinfo=UTC),
-        end=datetime(2025, 1, 3, 2, tzinfo=UTC),
-        start_ns=1735783200000000000,
-        end_ns=1735869600000000000,
-        params={},
-    )
-    try:
-        asyncio.run(failing._request_bars(failing_request))
-    except ValueError as error:
-        assert "DNSE get_ohlc failed" in str(error)
-    else:
-        raise AssertionError("DNSE API failure did not propagate")
+    assert (tick.bid_price, tick.ask_price) == (Price.from_str("1940.6"), Price.from_str("1941.0"))
+    assert (tick.bid_size, tick.ask_size) == (Quantity.from_int(3), Quantity.from_int(44))
+    assert [level.price for level in depth.bids[:3]] == [
+        Price.from_str("1940.6"),
+        Price.from_str("1940.5"),
+        Price.from_str("1940.4"),
+    ]
+    assert depth.bids[3].size == Quantity.from_int(0)  # padded to ten levels
 
 
-def test_dnse_catalog_source_falls_back_to_api_when_catalog_has_no_rows() -> None:
-    client, _, rest = _dnse_client(historical_source="catalog")
-    request = SimpleNamespace(
-        request_id=UUID4(),
-        bar_type=build_bar_type_for_symbol("VN30F1M", "1", "HNX"),
-        start=datetime(2025, 1, 2, 2, tzinfo=UTC),
-        end=datetime(2025, 1, 3, 2, tzinfo=UTC),
-        start_ns=1735783200000000000,
-        end_ns=1735869600000000000,
-        params={},
-    )
+def test_trade_conversion_uses_the_session_volume_as_trade_id() -> None:
+    tick = dnse_trade_to_nautilus_trade_tick(_trade("41I1G9000"), venue="HNX")
 
-    asyncio.run(client._request_bars(request))
-
-    assert len(rest.ohlc_calls) == 1
-    assert isinstance(client.responses[-1], BarsResponse)
+    assert tick.price == Price.from_str("1941.0")
+    assert tick.size == Quantity.from_int(5)
+    assert tick.trade_id == TradeId("41I1G9000-12345")
 
 
-def test_dnse_historical_request_emits_typed_rc5_response() -> None:
-    client, _, _ = _dnse_client()
+def test_historical_bar_request_answers_through_the_typed_response() -> None:
+    client, _, rest = _dnse_client()
     bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
     request = SimpleNamespace(
         request_id=UUID4(),
@@ -320,151 +456,167 @@ def test_dnse_historical_request_emits_typed_rc5_response() -> None:
 
     asyncio.run(client._request_bars(request))
 
-    assert len(client.responses) == 1
-    response = client.responses[0]
+    assert len(rest.ohlc_calls) == 1
+    [response] = client.responses
     assert isinstance(response, BarsResponse)
     assert response.correlation_id == request.request_id
-    assert len(response.data) == 1
-    assert response.data[0].bar_type == bar_type
+    assert [bar.bar_type for bar in response.data] == [bar_type]
 
 
-def test_dnse_reconnect_buffers_live_bar_until_history_request_completes() -> None:
-    client, trading, _ = _dnse_client()
-    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
-    asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
-    client._on_reconnected({"session_id": "next"})
-
-    client._on_ohlc_event(
-        Ohlc.from_dict(
-            {
-                "symbol": "VN30F1M",
-                "resolution": "1",
-                "open": 1000.0,
-                "high": 1001.0,
-                "low": 999.0,
-                "close": 1000.5,
-                "volume": 10,
-                "time": 1735783260,
-                "lastUpdated": 1735783260,
-                "type": "ohlc",
-            },
+def test_instrument_requests_answer_and_api_failure_propagates() -> None:
+    client, _, _ = _dnse_client()
+    instrument_id = InstrumentId.from_str("VN30F1M.HNX")
+    window = {"start": None, "end": None, "start_ns": None, "end_ns": None, "params": {}}
+    asyncio.run(
+        client._request_instrument(
+            SimpleNamespace(request_id=UUID4(), instrument_id=instrument_id, **window),
         ),
     )
+    asyncio.run(
+        client._request_instruments(
+            SimpleNamespace(request_id=UUID4(), venue=instrument_id.venue, **window),
+        ),
+    )
+    assert [type(response) for response in client.responses] == [
+        InstrumentResponse,
+        InstrumentsResponse,
+    ]
 
-    assert len(trading.subscriptions) == 1
-    assert client.data == []  # rc5 output accepts only typed market-data objects
-    assert len(next(iter(client._buffered_ohlc_by_key.values()))) == 1
-
+    failing, _, _ = _dnse_client(rest=FakeDnseRestClient(status=503, body={"error": "down"}))
     request = SimpleNamespace(
         request_id=UUID4(),
-        bar_type=bar_type,
+        bar_type=build_bar_type_for_symbol("VN30F1M", "1", "HNX"),
         start=datetime(2025, 1, 2, 2, tzinfo=UTC),
         end=datetime(2025, 1, 3, 2, tzinfo=UTC),
         start_ns=1735783200000000000,
         end_ns=1735869600000000000,
         params={},
     )
-    asyncio.run(client._request_bars(request))
+    with pytest.raises(ValueError, match="DNSE get_ohlc failed"):
+        asyncio.run(failing._request_bars(request))
 
-    assert not client._recovering_keys
-    assert len(client.data) == 1
+
+# --- Entrade execution --------------------------------------------------------------
+
+
+def _broker_order(
+    order_id: int,
+    *,
+    status: str,
+    order_type: str = "MTL",
+    quantity: int = 1,
+    filled: int = 0,
+    side: str = "NB",
+    price: float = 0.0,
+    created_ns: int = NOW_NS,
+) -> dict:
+    reports = [
+        {
+            "version": 1,
+            "execType": "F",
+            "lastQuantity": filled,
+            "lastPrice": 1905.8,
+            "modifiedDate": "2026-07-20T04:21:48.100Z",
+        },
+    ] if filled else []
+    return {
+        "id": order_id,
+        "symbol": CONTRACT_SYMBOL,
+        "side": side,
+        "price": price,
+        "quantity": quantity,
+        "orderType": order_type,
+        "orderStatus": status,
+        "fillQuantity": filled,
+        "averagePrice": 1905.8 if filled else 0,
+        "tradingFee": 15_750 * filled,
+        "tradingTax": 0,
+        "createdDate": _iso(created_ns),
+        "modifiedDate": _iso(created_ns),
+        "reports": reports,
+    }
 
 
 class FakeEntradeClient:
     def __init__(self) -> None:
+        self.qmax = 10
+        self.buying_power_calls = 0
         self.order_requests: list[dict] = []
-        self.closed = False
-        self.qmax = 2
-        self.orders: list[dict] = []
+        self.orders: dict[int, dict] = {}
         self.deals: list[dict] = []
-        self.cancel_calls: list[int | str] = []
-        self.get_order_calls: list[int | str] = []
+        self.cancel_calls: list[str] = []
+        self.place_response: dict | Exception | None = None
+        self.get_order_errors: list[Exception] = []
+        self.cancel_errors: dict[str, Exception] = {}
+        self.next_id = 7001
+        self.derivatives = [
+            {
+                "symbol": CONTRACT_SYMBOL,
+                "type": "VN30F2M",
+                "expirationDate": "2027-08-20T00:00:00.000Z",
+                "marketPrice": 1535.2,
+            },
+        ]
+        self.get_order_calls = 0
 
     def authenticate(self, username: str, password: str) -> str:
-        claims = base64.urlsafe_b64encode(
-            json.dumps({"investorId": 123}).encode()
-        ).decode()
+        claims = base64.urlsafe_b64encode(json.dumps({"investorId": 123}).encode()).decode()
         return f"header.{claims.rstrip('=')}.signature"
 
     def get_account_balance(self, investor_id: int | str) -> dict:
-        return {
-            "investorAccountId": 456,
-            "nav": 100_000_000,
-            "availableCash": 90_000_000,
-        }
+        return {"investorAccountId": 456, "nav": 100_000_000, "availableCash": 90_000_000}
 
     def list_margin_portfolios(self, investor_id: int | str) -> dict:
         return {"data": [{"id": 32}]}
 
     def list_derivatives(self) -> dict:
-        return {
-            "data": [
-                {
-                    "symbol": "41I1G8000",
-                    "type": "VN30F2M",
-                    "expirationDate": "2027-08-20T00:00:00.000Z",
-                    "marketPrice": 1535.2,
-                },
-            ],
-        }
+        return {"data": self.derivatives}
 
     def get_buying_power(self, **kwargs: object) -> dict:
+        self.buying_power_calls += 1
         return {"qmax": self.qmax}
 
     def place_order(self, **kwargs: object) -> dict:
         self.order_requests.append(kwargs)
-        quantity = kwargs["quantity"]
-        payload = {
-            "id": 7001,
-            "symbol": "41I1G8000",
-            "side": "NB",
-            "price": 0.0,
-            "quantity": quantity,
-            "orderType": "MAK",
-            "orderStatus": "Filled",
-            "fillQuantity": quantity,
-            "averagePrice": 1905.8,
-            "tradingFee": 31_500.0,
-            "tradingTax": 0.0,
-            "reports": [
-                {
-                    "version": 1,
-                    "execType": "F",
-                    "lastQuantity": quantity,
-                    "lastPrice": 1905.8,
-                    "modifiedDate": "2026-07-20T04:21:48.100Z",
-                },
-            ],
-        }
-        self.orders.append(payload)
+        if isinstance(self.place_response, Exception):
+            raise self.place_response
+        if self.place_response is not None:
+            payload = self.place_response
+        else:
+            payload = _broker_order(
+                self.next_id,
+                status="Filled",
+                order_type=str(kwargs["order_type"]),
+                quantity=int(kwargs["quantity"]),
+                filled=int(kwargs["quantity"]),
+                side=str(kwargs["side"]),
+            )
+            self.next_id += 1
+        self.orders[payload["id"]] = payload
         return payload
 
     def get_order(self, order_id: int | str) -> dict:
-        self.get_order_calls.append(order_id)
-        return self.orders[-1] if self.orders else self.place_order(quantity=2)
+        self.get_order_calls += 1
+        if self.get_order_errors:
+            raise self.get_order_errors.pop(0)
+        return self.orders[int(order_id)]
 
     def cancel_order(self, order_id: int | str) -> dict:
-        self.cancel_calls.append(order_id)
-        return {
-            "id": order_id,
-            "symbol": "41I1G8000",
-            "side": "NB",
-            "quantity": 2,
-            "orderType": "MAK",
-            "orderStatus": "Canceled",
-            "fillQuantity": 0,
-            "averagePrice": 0,
-            "reports": [],
-        }
+        self.cancel_calls.append(str(order_id))
+        if str(order_id) in self.cancel_errors:
+            raise self.cancel_errors[str(order_id)]
+        order = {**self.orders[int(order_id)], "orderStatus": "Canceled"}
+        self.orders[int(order_id)] = order
+        return order
 
-    def list_orders(self, **kwargs: object) -> dict:
-        return {"data": self.orders}
+    def list_all_orders(self, **kwargs: object) -> list[dict]:
+        return list(self.orders.values())
 
-    def list_deals(self, **kwargs: object) -> dict:
-        return {"data": self.deals}
+    def list_all_deals(self, **kwargs: object) -> list[dict]:
+        return self.deals
 
     def close(self) -> None:
-        self.closed = True
+        return None
 
 
 class RecordingEntradeClient(EntradeExecutionClient):
@@ -472,61 +624,511 @@ class RecordingEntradeClient(EntradeExecutionClient):
         super().__init__(*args, **kwargs)
         self.events: list[tuple[str, tuple]] = []
 
+    def create_task(self, coroutine, name: str = "background"):
+        coroutine.close()
+
     def _generate_balance(self, payload: dict) -> None:
-        return None
+        self.events.append(("account_state", ()))
 
     def _handle_instrument(self, instrument: object) -> None:
         return None
 
-    def generate_order_submitted(self, *args: object) -> None:
-        self.events.append(("submitted", args))
+    def _record(name: str):  # noqa: N805 - builds recording methods below
+        def record(self, *args: object) -> None:
+            self.events.append((name, args))
 
-    def generate_order_accepted(self, *args: object) -> None:
-        self.events.append(("accepted", args))
+        return record
 
-    def generate_order_updated(self, *args: object) -> None:
-        self.events.append(("updated", args))
+    generate_order_denied = _record("denied")
+    generate_order_submitted = _record("submitted")
+    generate_order_accepted = _record("accepted")
+    generate_order_updated = _record("updated")
+    generate_order_filled = _record("filled")
+    generate_order_rejected = _record("rejected")
+    generate_order_canceled = _record("canceled")
+    generate_order_expired = _record("expired")
+    generate_order_modify_rejected = _record("modify_rejected")
+    generate_order_cancel_rejected = _record("cancel_rejected")
 
-    def generate_order_filled(self, *args: object) -> None:
-        self.events.append(("filled", args))
-
-    def generate_order_rejected(self, *args: object) -> None:
-        self.events.append(("rejected", args))
-
-    def generate_order_canceled(self, *args: object) -> None:
-        self.events.append(("canceled", args))
-
-    def generate_order_expired(self, *args: object) -> None:
-        self.events.append(("expired", args))
-
-    def generate_order_modify_rejected(self, *args: object) -> None:
-        self.events.append(("modify_rejected", args))
-
-    def generate_order_cancel_rejected(self, *args: object) -> None:
-        self.events.append(("cancel_rejected", args))
+    def names(self) -> list[str]:
+        return [name for name, _ in self.events if name != "account_state"]
 
 
 def _entrade_client(
+    tmp_path: Path,
+    *,
+    api: FakeEntradeClient | None = None,
+    clock: FakeClock | None = None,
     account_id: str = "ENTRADE-456",
-) -> tuple[RecordingEntradeClient, FakeEntradeClient, EntradeInstrumentProvider]:
-    api = FakeEntradeClient()
+    cache: object = None,
+    continuous: bool = False,
+) -> tuple[RecordingEntradeClient, FakeEntradeClient]:
+    api = api or FakeEntradeClient()
+    provider = EntradeInstrumentProvider(api)
     config = EntradeExecClientConfig(
         username="user",
         password="password",
         account_id=account_id,
         account=EntradeAccount.DEMO,
     )
-    provider = EntradeInstrumentProvider(api)
     client = RecordingEntradeClient(
         name="ENTRADE",
         config=config,
-        cache=None,
-        clock=FakeClock(),
+        cache=cache,
+        clock=clock or FakeClock(),
         trader_id=TraderId("TRADER-001"),
         instrument_provider=provider,
         client=api,
+        symbol_resolver=VN30F1MResolver(provider.list_all) if continuous else None,
     )
-    return client, api, provider
+    asyncio.run(client._connect())
+    return client, api
+
+
+def _market_order(
+    coid: str,
+    *,
+    instrument_id: str = f"{CONTRACT_SYMBOL}.HNX",
+    quantity: int = 1,
+    time_in_force: TimeInForce = TimeInForce.GTC,
+    reduce_only: bool = False,
+    side: OrderSide = OrderSide.BUY,
+) -> MarketOrder:
+    return MarketOrder(
+        TraderId("TRADER-001"),
+        StrategyId("S-001"),
+        InstrumentId.from_str(instrument_id),
+        ClientOrderId(coid),
+        side,
+        Quantity.from_int(quantity),
+        UUID4(),
+        1,
+        time_in_force,
+        reduce_only,
+        False,
+    )
+
+
+def _submit(client: RecordingEntradeClient, order: MarketOrder) -> None:
+    asyncio.run(client._submit_order(SimpleNamespace(order=order)))
+
+
+@pytest.mark.parametrize(
+    ("order_type", "time_in_force", "expected"),
+    [
+        # MARKET with GTC/DAY (GTC is the Nautilus default) is sent as MTL.
+        (OrderType.MARKET, TimeInForce.GTC, "MTL"),
+        (OrderType.MARKET, TimeInForce.DAY, "MTL"),
+        (OrderType.MARKET, TimeInForce.IOC, "MAK"),
+        (OrderType.MARKET, TimeInForce.FOK, "MOK"),
+        (OrderType.MARKET_TO_LIMIT, TimeInForce.GTC, "MTL"),
+        # LIMIT with DAY, GTC or GTD is sent as LO.
+        (OrderType.LIMIT, TimeInForce.DAY, "LO"),
+        (OrderType.LIMIT, TimeInForce.GTC, "LO"),
+        (OrderType.LIMIT, TimeInForce.GTD, "LO"),
+        (OrderType.LIMIT, TimeInForce.IOC, None),
+        (OrderType.LIMIT, TimeInForce.FOK, None),
+        (OrderType.STOP_MARKET, TimeInForce.GTC, None),
+    ],
+)
+def test_nautilus_order_becomes_the_matching_hnx_order(
+    order_type: OrderType,
+    time_in_force: TimeInForce,
+    expected: str | None,
+) -> None:
+    order = SimpleNamespace(
+        side=OrderSide.SELL,
+        quantity=Quantity.from_int(2),
+        order_type=order_type,
+        time_in_force=time_in_force,
+        price=Price.from_str("1900.5"),
+    )
+    if expected is None:
+        with pytest.raises(ValueError, match="no HNX equivalent"):
+            entrade_order_parameters(order)
+        return
+
+    side, wire_type, quantity, price = entrade_order_parameters(order)
+    assert (side, wire_type, quantity) == ("NS", expected, 2)
+    assert price == (1900.5 if expected == "LO" else 0.0)
+
+
+def test_default_market_order_is_sent_as_mtl_and_fills(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+
+    _submit(client, _market_order("O-1"))
+
+    assert api.order_requests[0]["order_type"] == "MTL"
+    assert client.names() == ["submitted", "accepted", "filled"]
+
+
+def _two_contract_client(tmp_path: Path, local_now: str):
+    api = FakeEntradeClient()
+    api.derivatives = [
+        {"symbol": "41I1FA000", "type": "VN30F1M", "expirationDate": "2026-10-15T00:00:00.000Z", "marketPrice": 1900.0},
+        {"symbol": "41I1FB000", "type": "VN30F2M", "expirationDate": "2026-11-19T00:00:00.000Z", "marketPrice": 1905.0},
+    ]
+    now = pd.Timestamp(local_now, tz="Asia/Ho_Chi_Minh").value
+    return _entrade_client(tmp_path, api=api, clock=FakeClock(now), continuous=True)
+
+
+@pytest.mark.parametrize(
+    ("local_now", "expected_contract"),
+    [
+        ("2026-10-15 14:00", "41I1FA000"),  # expiry day, before 14:45
+        ("2026-10-15 15:00", "41I1FB000"),  # expiry day, after 14:45
+        ("2026-10-16 09:00", "41I1FB000"),
+    ],
+)
+def test_vn30f1m_order_goes_to_the_front_month_and_reports_back_as_vn30f1m(
+    tmp_path: Path,
+    local_now: str,
+    expected_contract: str,
+) -> None:
+    client, api = _two_contract_client(tmp_path, local_now)
+    api.deals = [
+        {"id": 1, "symbol": expected_contract, "side": "NB", "openQuantity": 2,
+         "positionCostPrice": "1900.0", "status": "ACTIVE", "modifiedDate": "2026-10-15T02:00:00.000Z"},
+    ]
+
+    _submit(client, _market_order("O-1", instrument_id="VN30F1M.HNX"))
+    [position] = asyncio.run(
+        client._generate_position_status_reports(
+            SimpleNamespace(instrument_id=InstrumentId.from_str("VN30F1M.HNX")),
+        ),
+    )
+
+    assert api.order_requests[0]["symbol"] == expected_contract
+    assert client.names() == ["submitted", "accepted", "filled"]
+    assert position.quantity == Quantity.from_int(2)
+
+
+def test_unsupported_order_is_denied_without_reaching_the_broker(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+
+    _submit(client, _market_order("O-1", time_in_force=TimeInForce.AT_THE_CLOSE))
+
+    assert api.order_requests == []
+    assert client.names() == ["denied"]
+
+
+def test_order_above_buying_power_is_denied_whole_instead_of_shrunk(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.qmax = 2
+
+    _submit(client, _market_order("O-1", quantity=5))
+
+    assert api.order_requests == []
+    assert client.names() == ["denied"]
+    assert "at most 2" in client.events[-1][1][1]
+
+
+def test_closing_order_is_not_blocked_by_buying_power(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.qmax = 0
+
+    _submit(client, _market_order("O-1", quantity=3, reduce_only=True, side=OrderSide.SELL))
+
+    assert api.buying_power_calls == 0
+    assert api.order_requests[0]["quantity"] == 3
+
+
+def test_broker_refusal_is_reported_as_rejected(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.place_response = EntradeApiError(
+        "Entrade returned HTTP 400",
+        method="POST",
+        url="orders",
+        status_code=400,
+        payload={"message": "Price out of band"},
+    )
+
+    _submit(client, _market_order("O-1"))
+
+    assert client.names() == ["submitted", "rejected"]
+
+
+def test_lost_submission_response_finds_the_order_at_the_broker(tmp_path: Path) -> None:
+    """A timeout is not a rejection: the order may exist, so it is looked up instead."""
+    clock = FakeClock()
+    client, api = _entrade_client(tmp_path, clock=clock)
+    api.place_response = EntradeApiError("timed out", method="POST", url="orders")
+
+    _submit(client, _market_order("O-1"))
+    assert client.names() == ["submitted"]
+
+    # The order did reach Entrade and filled.
+    api.orders[9001] = _broker_order(9001, status="Filled", filled=1, created_ns=clock.now_ns + 200_000_000)
+    clock.now_ns += 2_000_000_000
+    asyncio.run(client._resolve_unresolved_submissions())
+
+    assert client.names() == ["submitted", "accepted", "filled"]
+    assert client.events[-2][1][1] == VenueOrderId("9001")
+
+
+def test_lost_submission_is_rejected_once_the_broker_never_shows_it(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client, api = _entrade_client(tmp_path, clock=clock)
+    api.place_response = EntradeApiError("timed out", method="POST", url="orders")
+    # An older identical order must not be mistaken for the lost one.
+    api.orders[8000] = _broker_order(8000, status="Filled", filled=1, created_ns=clock.now_ns - 60_000_000_000)
+
+    _submit(client, _market_order("O-1"))
+    clock.now_ns += 10_000_000_000
+    asyncio.run(client._resolve_unresolved_submissions())
+    assert client.names() == ["submitted"]
+
+    clock.now_ns += 30_000_000_000
+    asyncio.run(client._resolve_unresolved_submissions())
+    assert client.names() == ["submitted", "rejected"]
+
+
+def test_order_waiting_for_the_exchange_is_accepted_only_when_the_broker_says_new(
+    tmp_path: Path,
+) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.place_response = _broker_order(7100, status="PendingNew")
+
+    _submit(client, _market_order("O-1"))
+    assert client.names() == ["submitted"]
+
+    api.orders[7100] = _broker_order(7100, status="New")
+    asyncio.run(client._poll_one(client._orders[ClientOrderId("O-1")]))
+    assert client.names() == ["submitted", "accepted"]
+
+
+def test_network_error_while_polling_does_not_lose_the_fill(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.place_response = _broker_order(7100, status="New")
+    _submit(client, _market_order("O-1"))
+    context = client._orders[ClientOrderId("O-1")]
+
+    api.orders[7100] = _broker_order(7100, status="Filled", filled=1)
+    api.get_order_errors.append(EntradeApiError("connection reset", method="GET", url="order"))
+    asyncio.run(client._poll_one(context))
+    asyncio.run(client._poll_one(context))
+
+    assert client.names() == ["submitted", "accepted", "filled"]
+    assert client._balance_stale is True  # the next poll cycle refreshes the account balance
+
+
+def test_done_for_day_order_expires_and_stops_being_polled(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.place_response = _broker_order(7100, status="New", order_type="LO", price=1900.0)
+    _submit(client, _market_order("O-1"))
+
+    api.orders[7100] = _broker_order(7100, status="DoneForDay", order_type="LO", price=1900.0)
+    asyncio.run(client._poll_one(client._orders[ClientOrderId("O-1")]))
+
+    assert client.names() == ["submitted", "accepted", "expired"]
+    lookups = api.get_order_calls
+    with patch("nautilus_bridge.adapters.entrade.execution.asyncio.sleep", new=_stop_polling_on_second_sleep(client)):
+        asyncio.run(client._poll_orders())
+    assert api.get_order_calls == lookups
+
+
+def _stop_polling_on_second_sleep(client: RecordingEntradeClient):
+    calls = []
+
+    async def sleep(seconds: float) -> None:
+        calls.append(seconds)
+        if len(calls) >= 2:
+            client._polling = False
+
+    return sleep
+
+
+def test_fill_seen_twice_is_reported_once(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.place_response = _broker_order(7100, status="New", quantity=2)
+    _submit(client, _market_order("O-1", quantity=2))
+    context = client._orders[ClientOrderId("O-1")]
+
+    partial = _broker_order(7100, status="PartiallyFilled", quantity=2, filled=1)
+    client._synchronize_order(partial, context)
+    client._synchronize_order(partial, context)
+    client._synchronize_order({**partial, "orderStatus": "Canceled"}, context)
+
+    assert client.names() == ["submitted", "accepted", "filled", "canceled"]
+
+
+def test_order_rebuilt_by_reconciliation_keeps_receiving_fills_and_can_be_canceled(
+    tmp_path: Path,
+) -> None:
+    """After a restart Nautilus rebuilds a still-working order and registers it here."""
+    rebuilt = SimpleNamespace(
+        instrument_id=InstrumentId.from_str(f"{CONTRACT_SYMBOL}.HNX"),
+        client_order_id=ClientOrderId("O-EXTERNAL-1"),
+        venue_order_id=VenueOrderId("7100"),
+        status=OrderStatus.ACCEPTED,
+        is_open=True,
+    )
+    cache = SimpleNamespace(order=lambda client_order_id: rebuilt)
+    client, api = _entrade_client(tmp_path, cache=cache)
+    api.orders[7100] = _broker_order(7100, status="New", order_type="LO", quantity=2, price=1900.0)
+
+    asyncio.run(
+        client._register_external_order(
+            rebuilt.client_order_id,
+            rebuilt.venue_order_id,
+            rebuilt.instrument_id,
+            StrategyId("EXTERNAL"),
+            0,
+        ),
+    )
+    # One contract fills while the node is running again.
+    api.orders[7100] = _broker_order(7100, status="PartiallyFilled", order_type="LO", quantity=2, filled=1, price=1900.0)
+    asyncio.run(client._poll_one(client._orders[rebuilt.client_order_id]))
+    asyncio.run(client._cancel_one(rebuilt, None))
+
+    assert client.names() == ["filled", "canceled"]
+    assert api.cancel_calls == ["7100"]
+
+
+def test_cancel_all_keeps_going_after_one_cancel_fails(tmp_path: Path) -> None:
+    open_orders: list = []
+    cache = SimpleNamespace(orders_open=lambda **kwargs: open_orders)
+    client, api = _entrade_client(tmp_path, cache=cache)
+    for coid, broker_id in (("O-1", 7100), ("O-2", 7101)):
+        api.place_response = _broker_order(broker_id, status="New", order_type="LO", price=1900.0)
+        _submit(client, _market_order(coid))
+    api.cancel_errors["7100"] = EntradeApiError("HTTP 500", method="DELETE", url="order", status_code=500)
+    open_orders.extend(client._orders[ClientOrderId(coid)].order for coid in ("O-1", "O-2"))
+
+    asyncio.run(
+        client._cancel_all_orders(
+            SimpleNamespace(instrument_id=None, order_side=OrderSide.NO_ORDER_SIDE),
+        ),
+    )
+
+    assert api.cancel_calls == ["7100", "7101"]
+    assert client.names()[-2:] == ["cancel_rejected", "canceled"]
+
+
+def test_unknown_order_in_history_is_skipped_instead_of_blocking_startup(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.orders[1] = {**_broker_order(1, status="Filled", filled=1), "orderType": "CONDITIONAL"}
+    api.orders[2] = _broker_order(2, status="Filled", order_type="MAK", filled=1)
+
+    reports = asyncio.run(
+        client._generate_order_status_reports(
+            SimpleNamespace(instrument_id=None, open_only=False, start=None),
+        ),
+    )
+
+    assert [report.venue_order_id for report in reports] == [VenueOrderId("2")]
+
+
+def test_position_reports_answer_only_the_requested_contract_and_net_both_sides(
+    tmp_path: Path,
+) -> None:
+    client, api = _entrade_client(tmp_path)
+    api.deals = [
+        {"id": 1, "symbol": CONTRACT_SYMBOL, "side": "NB", "openQuantity": 3,
+         "positionCostPrice": "1900.0", "status": "ACTIVE", "modifiedDate": "2026-07-20T04:21:48.100Z"},
+        {"id": 2, "symbol": CONTRACT_SYMBOL, "side": "NS", "openQuantity": 1,
+         "positionCostPrice": "1910.0", "status": "ACTIVE", "modifiedDate": "2026-07-20T04:21:48.100Z"},
+    ]
+
+    [report] = asyncio.run(
+        client._generate_position_status_reports(
+            SimpleNamespace(instrument_id=InstrumentId.from_str(f"{CONTRACT_SYMBOL}.HNX")),
+        ),
+    )
+    other = asyncio.run(
+        client._generate_position_status_reports(
+            SimpleNamespace(instrument_id=InstrumentId.from_str("VN30F1M.HNX")),
+        ),
+    )
+
+    assert (report.position_side, report.quantity) == (PositionSide.LONG, Quantity.from_int(2))
+    assert report.avg_px_open == Decimal("1900.0")
+    assert other == []
+
+
+def test_reports_carry_exact_broker_values(tmp_path: Path) -> None:
+    client, api = _entrade_client(tmp_path)
+    payload = _broker_order(7100, status="Filled", order_type="MAK", quantity=2, filled=2)
+
+    status_report = client._order_status_report(payload)
+    [fill] = client._fill_reports(payload)
+    balance = entrade_account_balance({"nav": "100000000.00", "availableCash": "90000000.00"}, VND)
+
+    assert status_report.order_status == OrderStatus.FILLED
+    assert status_report.avg_px == Decimal("1905.8")
+    assert fill.last_px == Price.from_str("1905.8")
+    assert fill.commission.as_decimal() == 31_500
+    assert isinstance(balance, AccountBalance)
+    assert balance.locked.as_decimal() == 10_000_000
+
+
+def test_connect_refuses_a_different_account_than_configured(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not match the authenticated account"):
+        _entrade_client(tmp_path, account_id="ENTRADE-999")
+
+
+# --- Entrade HTTP client ------------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.content = json.dumps(payload).encode()
+        self.url = "https://services.entrade.com.vn/x"
+        self.request = SimpleNamespace(method="GET")
+
+    def json(self) -> object:
+        return self._payload
+
+
+class ScriptedSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+        self.calls.append((method, url, kwargs))
+        return self.responses.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def test_expired_token_signs_in_again_and_repeats_the_request_once() -> None:
+    session = ScriptedSession(
+        [
+            FakeResponse(200, {"token": "first"}),
+            FakeResponse(401, {"message": "token expired"}),
+            FakeResponse(200, {"token": "second"}),
+            FakeResponse(200, {"nav": 1}),
+        ],
+    )
+    client = EntradeClient(EntradeClientConfig(), session=session)  # type: ignore[arg-type]
+    client.authenticate("user", "password")
+
+    assert client.get_account_balance(123) == {"nav": 1}
+    assert [url.rsplit("/", 1)[-1] for _, url, _ in session.calls] == ["auth", "123", "auth", "123"]
+    assert session.calls[-1][2]["headers"]["Authorization"] == "Bearer second"
+
+
+def test_order_list_is_read_past_the_first_page() -> None:
+    orders = [{"id": i} for i in range(250)]
+    responses = [FakeResponse(200, {"data": orders[i : i + 100]}) for i in range(0, 300, 100)]
+    session = ScriptedSession([FakeResponse(200, {"token": "t"}), *responses])
+    client = EntradeClient(EntradeClientConfig(), session=session)  # type: ignore[arg-type]
+    client.authenticate("user", "password")
+
+    assert [order["id"] for order in client.list_all_orders(investor_account_id=456)] == list(range(250))
+
+
+def test_order_list_stops_when_the_server_ignores_the_page_offset() -> None:
+    page = {"data": [{"id": i} for i in range(100)]}
+    session = ScriptedSession([FakeResponse(200, {"token": "t"}), FakeResponse(200, page), FakeResponse(200, page)])
+    client = EntradeClient(EntradeClientConfig(), session=session)  # type: ignore[arg-type]
+    client.authenticate("user", "password")
+
+    assert len(client.list_all_orders(investor_account_id=456)) == 100
 
 
 @pytest.mark.parametrize(
@@ -536,7 +1138,7 @@ def _entrade_client(
         (EntradeAccount.LIVE, "bankMarginPortfolio"),
     ],
 )
-def test_entrade_buying_power_uses_account_specific_margin_parameter(
+def test_buying_power_uses_the_parameter_name_of_each_account_kind(
     account: EntradeAccount,
     margin_portfolio_parameter: str,
 ) -> None:
@@ -546,454 +1148,25 @@ def test_entrade_buying_power_uses_account_specific_margin_parameter(
         client.get_buying_power(
             investor_id=123,
             margin_portfolio_id=32,
-            symbol="41I1G8000",
+            symbol=CONTRACT_SYMBOL,
             side="NB",
             price=1535.2,
         )
 
-    assert request.call_args.kwargs["params"] == {
-        margin_portfolio_parameter: 32,
-        "price": 1535.2,
-        "symbol": "41I1G8000",
-        "side": "NB",
-    }
+    assert request.call_args.kwargs["params"][margin_portfolio_parameter] == 32
 
 
-def test_entrade_connect_rejects_an_authenticated_account_mismatch() -> None:
-    client, _, _ = _entrade_client(account_id="ENTRADE-999")
+def test_requests_exception_is_an_unknown_outcome_not_an_http_answer() -> None:
+    """A transport failure carries no status code, which the submit path reads as 'unknown'."""
 
-    try:
-        asyncio.run(client._connect())
-    except ValueError as e:
-        assert "does not match the authenticated account" in str(e)
-    else:
-        raise AssertionError("Entrade accepted a mismatched account identity")
+    class FailingSession(ScriptedSession):
+        def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+            raise requests.ReadTimeout("read timed out")
 
+    client = EntradeClient(EntradeClientConfig(), session=FailingSession([]))  # type: ignore[arg-type]
+    client.set_token("t")
 
-def test_entrade_connect_and_submit_preserves_qmax_and_fill_flow() -> None:
-    client, api, provider = _entrade_client()
+    with pytest.raises(EntradeApiError) as error:
+        client.get_order(1)
+    assert error.value.status_code is None
 
-    async def run() -> None:
-        await client._connect()
-        instrument = provider.resolve_active_instrument()
-        order = MarketOrder(
-            TraderId("TRADER-001"),
-            StrategyId("S-001"),
-            instrument.id,
-            ClientOrderId("O-001"),
-            OrderSide.BUY,
-            instrument.make_qty(5),
-            UUID4(),
-            1,
-            TimeInForce.IOC,
-            False,
-            False,
-        )
-        await client._submit_order(SimpleNamespace(order=order))
-
-    asyncio.run(run())
-
-    assert client.account_id == AccountId("ENTRADE-456")
-    assert client._investor_account_id == 456
-    assert api.order_requests[0]["quantity"] == 2
-    assert [name for name, _ in client.events] == [
-        "submitted",
-        "accepted",
-        "updated",
-        "filled",
-    ]
-
-
-def test_entrade_order_type_and_status_mappings_cover_supported_wire_values() -> None:
-    client, _, provider = _entrade_client()
-    asyncio.run(client._connect())
-    instrument = provider.resolve_active_instrument()
-
-    limit = type(
-        "LimitLikeOrder",
-        (),
-        {
-            "side": OrderSide.BUY,
-            "quantity": instrument.make_qty(2),
-            "order_type": OrderType.LIMIT,
-            "time_in_force": TimeInForce.DAY,
-            "price": instrument.make_price(1900.5),
-        },
-    )()
-    assert entrade_order_parameters(limit) == ("NB", "LO", 2, 1900.5)
-    assert entrade_order_status("PartiallyFilled") == OrderStatus.PARTIALLY_FILLED
-    assert entrade_order_status("DoneForDay") == OrderStatus.EXPIRED
-    assert entrade_order_type("MAK")[0].name == "MARKET"
-
-
-@pytest.mark.parametrize(
-    ("order_type", "time_in_force", "side", "order_price", "expected"),
-    [
-        (
-            OrderType.LIMIT,
-            TimeInForce.DAY,
-            OrderSide.SELL,
-            1900.5,
-            ("NS", "LO", 2, 1900.5),
-        ),
-        (
-            OrderType.MARKET_TO_LIMIT,
-            TimeInForce.DAY,
-            OrderSide.SELL,
-            0.0,
-            ("NS", "MTL", 2, 0.0),
-        ),
-        (
-            OrderType.MARKET,
-            TimeInForce.IOC,
-            OrderSide.BUY,
-            0.0,
-            ("NB", "MAK", 2, 0.0),
-        ),
-        (
-            OrderType.MARKET,
-            TimeInForce.FOK,
-            OrderSide.SELL,
-            0.0,
-            ("NS", "MOK", 2, 0.0),
-        ),
-    ],
-)
-def test_entrade_order_parameters_cover_supported_order_combinations(
-    order_type: OrderType,
-    time_in_force: TimeInForce,
-    side: OrderSide,
-    order_price: float,
-    expected: tuple[str, str, int, float],
-) -> None:
-    order = SimpleNamespace(
-        side=side,
-        quantity=Quantity.from_int(2),
-        order_type=order_type,
-        time_in_force=time_in_force,
-        price=Price.from_str(str(order_price)),
-    )
-
-    assert entrade_order_parameters(order) == expected
-
-
-def test_entrade_rejects_limit_gtc_without_downgrading_to_day_order() -> None:
-    order = SimpleNamespace(
-        side=OrderSide.BUY,
-        quantity=Quantity.from_int(1),
-        order_type=OrderType.LIMIT,
-        time_in_force=TimeInForce.GTC,
-        price=Price.from_str("1900.5"),
-    )
-
-    with pytest.raises(ValueError, match="LIMIT with GTC is unsupported"):
-        entrade_order_parameters(order)
-
-
-def test_entrade_rejects_unsupported_orders_and_zero_qmax_without_broker_order() -> (
-    None
-):
-    client, api, provider = _entrade_client()
-    asyncio.run(client._connect())
-    instrument = provider.resolve_active_instrument()
-    order = MarketOrder(
-        TraderId("TRADER-001"),
-        StrategyId("S-001"),
-        instrument.id,
-        ClientOrderId("O-002"),
-        OrderSide.BUY,
-        instrument.make_qty(1),
-        UUID4(),
-        1,
-        TimeInForce.GTC,
-        False,
-        False,
-    )
-    asyncio.run(client._submit_order(SimpleNamespace(order=order)))
-    assert api.order_requests == []
-    assert client.events[-1][0] == "rejected"
-    assert "Unsupported Entrade order combination" in client.events[-1][1][1]
-
-    api.qmax = 0
-    order = MarketOrder(
-        TraderId("TRADER-001"),
-        StrategyId("S-001"),
-        instrument.id,
-        ClientOrderId("O-003"),
-        OrderSide.BUY,
-        instrument.make_qty(1),
-        UUID4(),
-        1,
-        TimeInForce.IOC,
-        False,
-        False,
-    )
-    asyncio.run(client._submit_order(SimpleNamespace(order=order)))
-    assert len(api.order_requests) == 0
-    assert "qmax is zero" in client.events[-1][1][1]
-
-
-def test_entrade_fill_deduplication_and_cancel_reconciliation() -> None:
-    client, _, provider = _entrade_client()
-    asyncio.run(client._connect())
-    instrument = provider.resolve_active_instrument()
-    order = MarketOrder(
-        TraderId("TRADER-001"),
-        StrategyId("S-001"),
-        instrument.id,
-        ClientOrderId("O-004"),
-        OrderSide.BUY,
-        instrument.make_qty(2),
-        UUID4(),
-        1,
-        TimeInForce.IOC,
-        False,
-        False,
-    )
-    context = EntradeOrderContext(order, VenueOrderId("7002"), set())
-    partial = {
-        "id": 7002,
-        "symbol": "41I1G8000",
-        "side": "NB",
-        "quantity": 2,
-        "orderType": "MAK",
-        "orderStatus": "PartiallyFilled",
-        "fillQuantity": 1,
-        "averagePrice": 1905.8,
-        "tradingFee": 15_750,
-        "tradingTax": 0,
-        "modifiedDate": "2026-07-20T04:21:48.104Z",
-        "reports": [
-            {
-                "version": 1,
-                "execType": "F",
-                "lastQuantity": 1,
-                "lastPrice": 1905.8,
-                "modifiedDate": "2026-07-20T04:21:48.100Z",
-            },
-        ],
-    }
-    client._synchronize_order(partial, context)
-    client._synchronize_order(partial, context)
-    client._synchronize_order({**partial, "orderStatus": "Canceled"}, context)
-
-    assert [name for name, _ in client.events] == ["filled", "canceled"]
-
-
-def test_entrade_cancel_endpoint_and_poll_stop_on_terminal_status() -> None:
-    client, api, provider = _entrade_client()
-    asyncio.run(client._connect())
-    instrument = provider.resolve_active_instrument()
-    order = MarketOrder(
-        TraderId("TRADER-001"),
-        StrategyId("S-001"),
-        instrument.id,
-        ClientOrderId("O-005"),
-        OrderSide.BUY,
-        instrument.make_qty(2),
-        UUID4(),
-        1,
-        TimeInForce.IOC,
-        False,
-        False,
-    )
-    context = EntradeOrderContext(order, VenueOrderId("7003"), set())
-    client._orders[order.client_order_id] = context
-    cancel_command = SimpleNamespace(
-        client_order_id=order.client_order_id,
-        venue_order_id=VenueOrderId("7003"),
-    )
-    asyncio.run(client._cancel_order(cancel_command))
-    assert api.cancel_calls == ["7003"]
-    assert client.events[-1][0] == "canceled"
-
-    terminal = api.place_order(quantity=2)
-    terminal["id"] = 7004
-    api.orders[-1] = terminal
-    poll_context = EntradeOrderContext(order, VenueOrderId("7004"), set())
-    with patch("nautilus_bridge.adapters.entrade.execution.asyncio.sleep", new=_no_sleep):
-        asyncio.run(client._poll_order(poll_context))
-    assert api.get_order_calls[-1] == "7004"
-
-
-async def _no_sleep(seconds: float) -> None:
-    return None
-
-
-def test_entrade_account_order_fill_position_and_mass_reports_are_exact() -> None:
-    client, api, provider = _entrade_client()
-    asyncio.run(client._connect())
-    instrument = provider.resolve_active_instrument()
-    payload = api.place_order(quantity=2)
-    api.deals = [
-        {
-            "id": 8001,
-            "symbol": instrument.id.symbol.value,
-            "side": "NB",
-            "openQuantity": 3,
-            "positionCostPrice": "1903.333333333333333333",
-            "status": "ACTIVE",
-            "modifiedDate": "2026-07-20T04:21:48.100Z",
-        },
-    ]
-
-    balance = entrade_account_balance(
-        {"nav": "100000000.00", "availableCash": "90000000.00"}, VND,
-    )
-    status_report = client._order_status_report(payload)
-    fill_reports = client._fill_reports(payload)
-    position_reports = client._position_status_reports(api.deals)
-    # The rc5 runtime assembles the mass from the report hooks; the adapter
-    # only pushes the account state and yields NotImplemented.
-    mass_status = asyncio.run(client._generate_mass_status())
-
-    assert isinstance(balance, AccountBalance)
-    assert balance.locked.as_decimal() == 10_000_000
-    assert status_report.order_status == OrderStatus.FILLED
-    assert status_report.avg_px == Decimal("1905.8")
-    assert fill_reports[0].commission.as_decimal() == 31_500
-    assert position_reports[0].position_side == PositionSide.LONG
-    assert position_reports[0].avg_px_open == Decimal("1903.333333333333333333")
-    assert mass_status is NotImplemented
-
-
-def test_dnse_quote_conversion_preserves_top_of_book() -> None:
-    quote = Quote.from_dict(
-        {
-            "symbol": "VN30F1M",
-            "bid": [{"price": 1000.0, "qtty": 5}],
-            "offer": [{"price": 1000.5, "qtty": 7}],
-            "receivedAt": 1735783200.0,
-        },
-    )
-    tick = dnse_quote_to_nautilus_quote_tick(quote, venue="HNX")
-    assert tick.instrument_id == InstrumentId.from_str("VN30F1M.HNX")
-    assert tick.bid_price == Price.from_str("1000.0")
-    assert tick.ask_price == Price.from_str("1000.5")
-    assert tick.bid_size == Quantity.from_int(5)
-    assert tick.ask_size == Quantity.from_int(7)
-
-
-def test_dnse_quote_missing_ask_raises() -> None:
-    quote = Quote.from_dict(
-        {"symbol": "VN30F1M", "bid": [{"price": 1000.0, "qtty": 5}]},
-    )
-    with pytest.raises(ValueError):
-        dnse_quote_to_nautilus_quote_tick(quote, venue="HNX")
-
-
-def test_dnse_subscribe_quotes_routes_sdk_events() -> None:
-    client, trading, _ = _dnse_client()
-    command = SimpleNamespace(
-        instrument_id=build_bar_type_for_symbol("VN30F1M", "1", "HNX").instrument_id,
-    )
-    asyncio.run(client._subscribe_quotes(command))
-    assert len(trading.quote_subscriptions) == 1
-    subscription = trading.quote_subscriptions[0]
-    assert subscription["symbols"] == ["VN30F1M"]
-    assert subscription["encoding"] == "json"
-
-    asyncio.run(client._subscribe_quotes(command))
-    assert len(trading.quote_subscriptions) == 1  # duplicate subscribe is deduped
-
-    subscription["on_quote"](
-        Quote.from_dict(
-            {
-                "symbol": "VN30F1M",
-                "bid": [{"price": 1000.0, "qtty": 5}],
-                "offer": [{"price": 1000.5, "qtty": 7}],
-                "receivedAt": 1735783200.0,
-            },
-        ),
-    )
-    assert len(client.data) == 1
-    assert client.data[0].bid_price == Price.from_str("1000.0")
-    assert client.data[0].ask_price == Price.from_str("1000.5")
-
-    asyncio.run(client._unsubscribe_quotes(command))
-    assert len(trading.unsubscribes) == 7
-    assert trading.unsubscribes[0] == ("top_price.G1.json", ["VN30F1M"])
-    assert client._quote_symbols == set()
-
-
-def test_dnse_trade_conversion_synthesizes_session_trade_id() -> None:
-    trade = Trade.from_dict(
-        {
-            "symbol": "41I1G9000",
-            "matchPrice": 1941.0,
-            "matchQtty": 5,
-            "totalVolumeTraded": 12345,
-            "receivedAt": 1735783200.0,
-        },
-    )
-    tick = dnse_trade_to_nautilus_trade_tick(trade, venue="HNX")
-    assert tick.instrument_id == InstrumentId.from_str("41I1G9000.HNX")
-    assert tick.price == Price.from_str("1941.0")
-    assert tick.size == Quantity.from_int(5)
-    assert tick.trade_id == TradeId("41I1G9000-12345")
-    assert tick.aggressor_side == AggressorSide.NO_AGGRESSOR
-
-
-def test_dnse_quote_conversion_builds_depth10_snapshot() -> None:
-    levels = [{"price": 1940.6 + i * 0.1, "qtty": 3 + i} for i in range(3)]
-    quote = Quote.from_dict(
-        {
-            "symbol": "41I1G9000",
-            "bid": levels,
-            "offer": [{"price": 1941.0 + i * 0.1, "qtty": 44 + i} for i in range(3)],
-            "receivedAt": 1735783200.0,
-        },
-    )
-    depth = dnse_quote_to_nautilus_depth10(quote, venue="HNX")
-    assert depth.instrument_id == InstrumentId.from_str("41I1G9000.HNX")
-    assert len(depth.bids) == 10
-    assert len(depth.asks) == 10
-    assert depth.bids[0].price == Price.from_str("1940.6")
-    assert depth.asks[0].price == Price.from_str("1941.0")
-    assert depth.bids[3].size == Quantity.from_int(0)  # padded to ten levels
-    assert depth.bid_counts[:3] == [3, 4, 5]
-    assert depth.bid_counts[3:] == [0] * 7
-
-
-def test_dnse_subscribe_trades_routes_sdk_events() -> None:
-    client, trading, _ = _dnse_client()
-    command = SimpleNamespace(
-        instrument_id=build_bar_type_for_symbol("41I1G9000", "1", "HNX").instrument_id,
-    )
-    asyncio.run(client._subscribe_trades(command))
-    assert len(trading.trade_subscriptions) == 1
-    subscription = trading.trade_subscriptions[0]
-    assert subscription["symbols"] == ["41I1G9000"]
-
-    subscription["on_trade"](
-        Trade.from_dict(
-            {
-                "symbol": "41I1G9000",
-                "matchPrice": 1941.0,
-                "matchQtty": 5,
-                "totalVolumeTraded": 12345,
-                "receivedAt": 1735783200.0,
-            },
-        ),
-    )
-    assert len(client.data) == 1
-    assert client.data[0].trade_id == TradeId("41I1G9000-12345")
-
-    asyncio.run(client._unsubscribe_trades(command))
-    assert trading.unsubscribes[0][0] == "tick.G1.json"
-
-
-def test_dnse_quote_stream_shared_between_quotes_and_depth10() -> None:
-    client, trading, _ = _dnse_client()
-    command = SimpleNamespace(
-        instrument_id=build_bar_type_for_symbol("41I1G9000", "1", "HNX").instrument_id,
-    )
-    asyncio.run(client._subscribe_quotes(command))
-    asyncio.run(client._subscribe_book_depth10(command))
-    assert len(trading.quote_subscriptions) == 1  # one shared SDK stream
-
-    asyncio.run(client._unsubscribe_quotes(command))
-    assert not trading.unsubscribes  # depth10 still uses the stream
-
-    asyncio.run(client._unsubscribe_book_depth10(command))
-    assert trading.unsubscribes[0][0] == "top_price.G1.json"

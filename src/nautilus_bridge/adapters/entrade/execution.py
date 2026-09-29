@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import NotImplementedType
 from typing import Any
+from typing import Protocol
 
+from nautilus_trader.common import Logger
 from nautilus_trader.core import UUID4
 from nautilus_trader.live import (
     BatchCancelOrders,
@@ -32,6 +34,7 @@ from nautilus_trader.model import (
     Currency,
     ExecutionMassStatus,
     FillReport,
+    FuturesContract,
     InstrumentId,
     LiquiditySide,
     Money,
@@ -55,52 +58,118 @@ from nautilus_trader.model import (
 from .config import EntradeExecClientConfig
 from .constants import DNSE_EXECUTION_CLIENT_NAME
 from .constants import NOT_IMPLEMENTED
-from .api.contracts import EntradeMonthlyContract
+from .api.contracts import VN_TZINFO
+from .api.entrade_api import EntradeApiError
 from .api.entrade_api import EntradeClient
 from .api.entrade_api import EntradeClientConfig
 from .api.entrade_api import investor_id_from_token
 from .providers import EntradeInstrumentProvider
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_ID
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f_expiry_date
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 
 ORDER_POLL_INTERVAL_SECONDS = 1.0
+# How long an order whose submission outcome is unknown is searched for at the broker
+# before it is reported as rejected.
+UNRESOLVED_SUBMISSION_TIMEOUT_SECONDS = 30.0
+# Clock difference allowed between this node and Entrade createdDate when matching a
+# lost submission.
+UNRESOLVED_SUBMISSION_CLOCK_SKEW_SECONDS = 5.0
+DISCONNECT_POLL_JOIN_SECONDS = 2.0
+
+ENTRADE_TERMINAL_STATUSES = frozenset(
+    {"Canceled", "Expired", "DoneForDay", "Filled", "Rejected"},
+)
+# Entrade statuses on which the adapter emits OrderAccepted.
+ENTRADE_ACCEPTED_STATUSES = frozenset(
+    {"New", "PartiallyFilled", "Filled", "PendingCancel", "Expired", "DoneForDay"},
+)
+NAUTILUS_ACCEPTED_STATUSES = frozenset(
+    {
+        OrderStatus.ACCEPTED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.PENDING_CANCEL,
+        OrderStatus.PENDING_UPDATE,
+        OrderStatus.TRIGGERED,
+    },
+)
 
 
 @dataclass
 class EntradeOrderContext:
     order: Any
     venue_order_id: VenueOrderId
-    reported_fills: set[str]
+    reported_fills: set[str] = field(default_factory=set)
     last_status: str | None = None
+    accepted: bool = False
+    poll_failures: int = 0
 
 
-ENTRADE_TERMINAL_STATUSES = {"Canceled", "Expired", "Filled", "Rejected"}
+@dataclass
+class UnresolvedSubmission:
+    """An order sent to Entrade whose response was lost, so it may or may not exist."""
+
+    order: Any
+    symbol: str
+    side: str
+    order_type: str
+    quantity: int
+    price: float
+    ts_submitted_ns: int
+
+
+class EntradeOrderDenied(Exception):
+    """The order is refused before it is sent to Entrade."""
+
+
+class SymbolResolver(Protocol):
+    """Map between the instrument a strategy trades and the instrument sent to the venue."""
+
+    def to_venue(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId: ...
+
+    def to_nautilus(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId: ...
+
+
+class IdentityResolver:
+    """Trade every instrument under its own ID (no continuous symbols)."""
+
+    def to_venue(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId:
+        return instrument_id
+
+    def to_nautilus(self, instrument_id: InstrumentId, ts_ns: int) -> InstrumentId:
+        return instrument_id
 
 
 def entrade_order_parameters(order: Any) -> tuple[str, str, int, float]:
+    """Translate a Nautilus order into the Entrade (HNX) side, order type, quantity and price.
+
+    LIMIT with DAY, GTC or GTD is sent as LO; MARKET with DAY or GTC, and MARKET_TO_LIMIT,
+    as MTL; MARKET with IOC as MAK and with FOK as MOK. The venue receives no expiry time,
+    so a GTD expiry is not enforced by the venue. Other combinations raise ValueError.
+    """
     side = "NB" if order.side == OrderSide.BUY else "NS"
     quantity_decimal = order.quantity.as_decimal()
     if quantity_decimal != quantity_decimal.to_integral_value():
         raise ValueError("Entrade derivative order quantity must be a whole number")
     quantity = int(quantity_decimal)
+    order_type = order.order_type
+    time_in_force = order.time_in_force
 
-    if order.order_type == OrderType.LIMIT and order.time_in_force == TimeInForce.DAY:
-        return side, "LO", quantity, order.price.as_double()
-    if order.order_type == OrderType.LIMIT and order.time_in_force == TimeInForce.GTC:
-        raise ValueError(
-            "Entrade/HNX LO orders are valid through the trading day; "
-            "LIMIT with GTC is unsupported",
-        )
-    if order.order_type == OrderType.MARKET_TO_LIMIT:
-        return side, "MTL", quantity, 0.0
-    if order.order_type == OrderType.MARKET and order.time_in_force == TimeInForce.IOC:
-        return side, "MAK", quantity, 0.0
-    if order.order_type == OrderType.MARKET and order.time_in_force == TimeInForce.FOK:
-        return side, "MOK", quantity, 0.0
+    if order_type == OrderType.LIMIT:
+        if time_in_force in (TimeInForce.DAY, TimeInForce.GTC, TimeInForce.GTD):
+            return side, "LO", quantity, order.price.as_double()
+    elif order_type == OrderType.MARKET:
+        if time_in_force in (TimeInForce.DAY, TimeInForce.GTC):
+            return side, "MTL", quantity, 0.0
+        if time_in_force == TimeInForce.IOC:
+            return side, "MAK", quantity, 0.0
+        if time_in_force == TimeInForce.FOK:
+            return side, "MOK", quantity, 0.0
+    elif order_type == OrderType.MARKET_TO_LIMIT:
+        if time_in_force in (TimeInForce.DAY, TimeInForce.GTC):
+            return side, "MTL", quantity, 0.0
     raise ValueError(
-        f"Unsupported Entrade order combination: {order.order_type.name} "
-        f"with {order.time_in_force.name}",
+        f"{order_type.name} with {time_in_force.name} has no HNX equivalent",
     )
 
 
@@ -162,6 +231,7 @@ class EntradeExecutionClient(ExecutionClient):
         trader_id: TraderId,
         instrument_provider: EntradeInstrumentProvider | None = None,
         client: EntradeClient | None = None,
+        symbol_resolver: SymbolResolver | None = None,
     ) -> None:
         if not isinstance(config, EntradeExecClientConfig):
             raise TypeError("Expected EntradeExecClientConfig")
@@ -180,21 +250,22 @@ class EntradeExecutionClient(ExecutionClient):
         )
         self._client = client
         self._provider = instrument_provider
+        self._resolver: SymbolResolver = symbol_resolver or IdentityResolver()
         self._config = config
         self._investor_id: int | str | None = config.investor_id
         self._investor_account_id: int | str | None = None
         self._margin_portfolio_id: int | None = None
-        self._active_contract: EntradeMonthlyContract | None = None
         self._orders: dict[ClientOrderId, EntradeOrderContext] = {}
         self._client_order_ids: dict[VenueOrderId, ClientOrderId] = {}
+        self._unresolved: list[UnresolvedSubmission] = []
+        self._polling = False
+        self._poll_task: asyncio.Task | None = None
+        self._balance_stale = False
+        self._log = Logger(type(self).__name__)
 
     @property
     def investor_id(self) -> int | str | None:
         return self._investor_id
-
-    @property
-    def active_contract(self) -> EntradeMonthlyContract | None:
-        return self._active_contract
 
     async def _connect(self) -> None:
         if not self._config.username or not self._config.password:
@@ -248,12 +319,19 @@ class EntradeExecutionClient(ExecutionClient):
         self._margin_portfolio_id = int(available_portfolios[0]["id"])
 
         await self.instrument_provider.initialize()
-        self._active_contract = self._provider.resolve_active_contract()
         for instrument in self._provider.list_all():
             self._handle_instrument(instrument)
+        self._check_expiry_calendar()
         self._generate_balance(balance)
 
+        self._polling = True
+        self._poll_task = self.create_task(self._poll_orders(), name="entrade_order_poll")
+
     async def _disconnect(self) -> None:
+        self._polling = False
+        if self._poll_task is not None and not self._poll_task.done():
+            self._poll_task.cancel()
+            await asyncio.wait({self._poll_task}, timeout=DISCONNECT_POLL_JOIN_SECONDS)
         if self._client is not None:
             await asyncio.to_thread(self._client.close)
 
@@ -291,13 +369,19 @@ class EntradeExecutionClient(ExecutionClient):
         strategy_id: StrategyId,
         ts_init: int,
     ) -> None:
-        return await super()._register_external_order(
+        await super()._register_external_order(
             client_order_id,
             venue_order_id,
             instrument_id,
             strategy_id,
             ts_init,
         )
+        # Reconciliation rebuilt an order this node did not submit (e.g. one still working
+        # from before a restart); track it like our own so its later fills and
+        # cancellation reach Nautilus.
+        order = self.cache.order(client_order_id) if self.cache is not None else None
+        if order is not None and order.is_open:
+            self._context_for(order, venue_order_id)
 
     async def _on_instrument(self, instrument: object) -> None:
         return await super()._on_instrument(instrument)
@@ -325,6 +409,36 @@ class EntradeExecutionClient(ExecutionClient):
             return None
         return self.cache.order(client_order_id)
 
+    def _context_for(
+        self,
+        order: Any,
+        venue_order_id: VenueOrderId | None = None,
+    ) -> EntradeOrderContext | None:
+        """Return the tracking context of an order, creating it when the broker ID is known."""
+        context = self._orders.get(order.client_order_id)
+        if context is not None:
+            return context
+        venue_order_id = venue_order_id or order.venue_order_id
+        if venue_order_id is None:
+            return None
+        return self._track_order(
+            order,
+            venue_order_id,
+            accepted=order.status in NAUTILUS_ACCEPTED_STATUSES,
+        )
+
+    def _track_order(
+        self,
+        order: Any,
+        venue_order_id: VenueOrderId,
+        *,
+        accepted: bool,
+    ) -> EntradeOrderContext:
+        context = EntradeOrderContext(order, venue_order_id, accepted=accepted)
+        self._orders[order.client_order_id] = context
+        self._client_order_ids[venue_order_id] = order.client_order_id
+        return context
+
     async def _generate_order_status_report(
         self,
         command: GenerateOrderStatusReport,
@@ -346,14 +460,18 @@ class EntradeExecutionClient(ExecutionClient):
     ) -> list[OrderStatusReport]:
         self._require_account()
         assert self._client is not None
-        payload = await asyncio.to_thread(
-            self._client.list_orders,
+        orders = await asyncio.to_thread(
+            self._client.list_all_orders,
             investor_account_id=self._investor_account_id,
-            end=255,
         )
-        reports = [
-            self._order_status_report(order) for order in payload.get("data", [])
-        ]
+        reports = []
+        for order in orders:
+            try:
+                reports.append(self._order_status_report(order))
+            except (KeyError, ValueError) as e:
+                self._log.warning(
+                    f"Skipping Entrade order {order.get('id')} in reconciliation: {e}",
+                )
         if command.instrument_id is not None:
             reports = [
                 report
@@ -370,9 +488,8 @@ class EntradeExecutionClient(ExecutionClient):
             reports = [
                 report for report in reports if report.order_status not in terminal
             ]
-        start = getattr(command, "start", None)
-        if start is not None:
-            reports = [report for report in reports if report.ts_last >= start]
+        if command.start is not None:
+            reports = [report for report in reports if report.ts_last >= command.start]
         return reports
 
     async def _generate_fill_reports(
@@ -387,22 +504,26 @@ class EntradeExecutionClient(ExecutionClient):
                 )
             ]
         else:
-            payload = await asyncio.to_thread(
-                self._client.list_orders,
+            orders = await asyncio.to_thread(
+                self._client.list_all_orders,
                 investor_account_id=self._investor_account_id,
-                end=255,
             )
-            orders = payload.get("data", [])
-        reports = [report for order in orders for report in self._fill_reports(order)]
+        reports = []
+        for order in orders:
+            try:
+                reports.extend(self._fill_reports(order))
+            except (KeyError, ValueError) as e:
+                self._log.warning(
+                    f"Skipping fills of Entrade order {order.get('id')} in reconciliation: {e}",
+                )
         if command.instrument_id is not None:
             reports = [
                 report
                 for report in reports
                 if report.instrument_id == command.instrument_id
             ]
-        start = getattr(command, "start", None)
-        if start is not None:
-            reports = [report for report in reports if report.ts_event >= start]
+        if command.start is not None:
+            reports = [report for report in reports if report.ts_event >= command.start]
         return reports
 
     async def _generate_position_status_reports(
@@ -411,15 +532,12 @@ class EntradeExecutionClient(ExecutionClient):
     ) -> list[PositionStatusReport]:
         self._require_account()
         assert self._client is not None
-        payload = await asyncio.to_thread(
-            self._client.list_deals,
+        deals = await asyncio.to_thread(
+            self._client.list_all_deals,
             investor_account_id=self._investor_account_id,
-            end=255,
         )
-        reports = self._position_status_reports(payload.get("data", []))
+        reports = self._position_status_reports(deals)
         if command.instrument_id is None:
-            return reports
-        if command.instrument_id == CONTINUOUS_ID:
             return reports
         return [
             report
@@ -443,107 +561,188 @@ class EntradeExecutionClient(ExecutionClient):
     async def _submit_order(self, command: SubmitOrder) -> None:
         await self._submit_order_object(command.order)
 
-    async def _submit_order_object(self, order: Any) -> None:
+    async def _prepare_submission(self, order: Any) -> UnresolvedSubmission:
+        """Check an order before sending it; raise EntradeOrderDenied when it must not be sent."""
+        if (
+            self._investor_id is None
+            or self._investor_account_id is None
+            or self._margin_portfolio_id is None
+            or self._provider is None
+            or self._client is None
+        ):
+            raise EntradeOrderDenied("Entrade execution client is not connected")
         try:
-            self._require_account()
-            if self._provider is None or self._client is None:
-                raise RuntimeError("Entrade execution client is not connected")
             side, order_type, quantity, price = entrade_order_parameters(order)
-            contract = self._provider.contract_for_instrument(order.instrument_id)
-            if contract is None:
-                raise ValueError(
-                    "Entrade orders must name a concrete monthly contract",
-                )
+        except ValueError as e:
+            raise EntradeOrderDenied(str(e)) from e
+        try:
+            venue_instrument_id = self._resolver.to_venue(
+                order.instrument_id, self.clock.timestamp_ns()
+            )
+        except ValueError as e:
+            raise EntradeOrderDenied(str(e)) from e
+        contract = self._provider.contract_for_instrument(venue_instrument_id)
+        if contract is None:
+            raise EntradeOrderDenied(
+                f"{order.instrument_id} does not resolve to a loaded Entrade monthly contract",
+            )
+
+        # Reduce-only orders skip the qmax check so a close is never blocked by it.
+        if not order.is_reduce_only:
             reference_price = price or contract.market_price or contract.basic_price
             if reference_price is None:
-                raise ValueError(
+                raise EntradeOrderDenied(
                     f"Entrade buying-power check has no reference price for {contract.symbol}",
                 )
-            buying_power = await asyncio.to_thread(
-                self._client.get_buying_power,
-                investor_id=self._investor_id,
-                margin_portfolio_id=self._margin_portfolio_id,
-                symbol=contract.symbol,
-                side=side,
-                price=reference_price,
-            )
-            qmax = _parse_qmax(buying_power)
-            quantity = min(quantity, qmax)
-            if quantity < 1:
-                raise ValueError(
-                    f"Entrade qmax is zero for {contract.symbol} {side}",
+            try:
+                buying_power = await asyncio.to_thread(
+                    self._client.get_buying_power,
+                    investor_id=self._investor_id,
+                    margin_portfolio_id=self._margin_portfolio_id,
+                    symbol=contract.symbol,
+                    side=side,
+                    price=reference_price,
                 )
-        except (RuntimeError, ValueError) as e:
-            self.generate_order_rejected(
-                order, str(e), self.clock.timestamp_ns(), False
-            )
+                qmax = _parse_qmax(buying_power)
+            except (EntradeApiError, ValueError) as e:
+                raise EntradeOrderDenied(f"Entrade buying-power check failed: {e}") from e
+            if quantity > qmax:
+                raise EntradeOrderDenied(
+                    f"Entrade buying power allows at most {qmax} {contract.symbol} "
+                    f"contracts on side {side}; the order asks for {quantity}",
+                )
+
+        return UnresolvedSubmission(
+            order=order,
+            symbol=contract.symbol,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            price=price,
+            ts_submitted_ns=self.clock.timestamp_ns(),
+        )
+
+    async def _submit_order_object(self, order: Any) -> None:
+        try:
+            submission = await self._prepare_submission(order)
+        except EntradeOrderDenied as e:
+            self.generate_order_denied(order, str(e))
             return
 
+        if order.time_in_force == TimeInForce.GTC:
+            self._log.info(
+                f"{order.client_order_id}: GTC is sent as a {submission.order_type} order, "
+                "which HNX cancels at the end of the trading day",
+            )
         self.generate_order_submitted(order)
+        assert self._client is not None
         try:
-            assert self._client is not None
             payload = await asyncio.to_thread(
                 self._client.place_order,
                 investor_id=self._investor_id,
                 margin_portfolio_id=self._margin_portfolio_id,
-                symbol=contract.symbol,
-                side=side,
-                order_type=order_type,
-                quantity=quantity,
-                price=price,
+                symbol=submission.symbol,
+                side=submission.side,
+                order_type=submission.order_type,
+                quantity=submission.quantity,
+                price=submission.price,
             )
-        except Exception as e:  # noqa: BLE001 - broker errors become order rejections.
-            self.generate_order_rejected(
-                order,
-                f"Entrade order submission failed: {e}",
-                self.clock.timestamp_ns(),
-                False,
-            )
-            return
-
-        broker_order_id = payload.get("id")
-        if broker_order_id is None:
-            self.generate_order_rejected(
-                order,
-                "Entrade order response did not contain an ID",
-                self.clock.timestamp_ns(),
-                False,
-            )
-            return
-
-        venue_order_id = VenueOrderId(str(broker_order_id))
-        context = EntradeOrderContext(order, venue_order_id, set())
-        self._orders[order.client_order_id] = context
-        self._client_order_ids[venue_order_id] = order.client_order_id
-        self.generate_order_accepted(
-            order,
-            venue_order_id,
-            _timestamp_ns(payload.get("createdDate"), self.clock.timestamp_ns()),
-        )
-        if quantity < int(order.quantity.as_decimal()):
-            instrument = self._provider.find(order.instrument_id)
-            if instrument is not None:
-                self.generate_order_updated(
+        except EntradeApiError as e:
+            if e.status_code is not None and e.status_code < 500:
+                # An HTTP 4xx answer is treated as Entrade refusing the order.
+                self.generate_order_rejected(
                     order,
-                    venue_order_id,
-                    Quantity.from_decimal_dp(
-                        Decimal(quantity), instrument.size_precision
-                    ),
-                    getattr(order, "price", None)
-                    if getattr(order, "has_price", False)
-                    else None,
-                    getattr(order, "trigger_price", None)
-                    if getattr(order, "has_trigger_price", False)
-                    else None,
-                    None,
+                    f"Entrade rejected the order (HTTP {e.status_code}): {e.payload}",
                     self.clock.timestamp_ns(),
+                    False,
                 )
-        self._synchronize_order(payload, context)
-        if payload.get("orderStatus") not in ENTRADE_TERMINAL_STATUSES:
-            self.create_task(
-                self._poll_order(context),
-                name=f"poll_entrade_order: {venue_order_id.value}",
+                return
+            self._defer_unknown_submission(submission, str(e))
+            return
+        except Exception as e:  # noqa: BLE001 - any other failure also leaves the outcome unknown.
+            self._defer_unknown_submission(submission, repr(e))
+            return
+
+        broker_order_id = payload.get("id") if isinstance(payload, dict) else None
+        if broker_order_id is None:
+            self._defer_unknown_submission(
+                submission,
+                f"Entrade response did not contain an order ID: {payload}",
             )
+            return
+        context = self._track_order(order, VenueOrderId(str(broker_order_id)), accepted=False)
+        self._synchronize_order(payload, context)
+
+    def _defer_unknown_submission(self, submission: UnresolvedSubmission, reason: str) -> None:
+        self._log.warning(
+            f"{submission.order.client_order_id}: Entrade submission outcome unknown ({reason}); "
+            "searching the broker order list before reporting it",
+        )
+        self._unresolved.append(submission)
+
+    async def _resolve_unresolved_submissions(self) -> None:
+        if not self._unresolved or self._client is None:
+            return
+        try:
+            broker_orders = await asyncio.to_thread(
+                self._client.list_all_orders,
+                investor_account_id=self._investor_account_id,
+            )
+        except Exception as e:  # noqa: BLE001 - retried on the next poll cycle.
+            self._log.warning(f"Could not list Entrade orders to resolve submissions: {e}")
+            broker_orders = None
+
+        now = self.clock.timestamp_ns()
+        still_unresolved: list[UnresolvedSubmission] = []
+        for submission in self._unresolved:
+            match = (
+                self._find_broker_order(submission, broker_orders)
+                if broker_orders is not None
+                else None
+            )
+            if match is not None:
+                self._log.info(
+                    f"{submission.order.client_order_id}: found at Entrade as order {match['id']}",
+                )
+                context = self._track_order(
+                    submission.order,
+                    VenueOrderId(str(match["id"])),
+                    accepted=False,
+                )
+                self._synchronize_order(match, context)
+            elif now - submission.ts_submitted_ns > UNRESOLVED_SUBMISSION_TIMEOUT_SECONDS * 1e9:
+                self.generate_order_rejected(
+                    submission.order,
+                    "Entrade submission failed and no matching order appeared at the broker "
+                    f"within {UNRESOLVED_SUBMISSION_TIMEOUT_SECONDS:.0f}s",
+                    now,
+                    False,
+                )
+            else:
+                still_unresolved.append(submission)
+        self._unresolved = still_unresolved
+
+    def _find_broker_order(
+        self,
+        submission: UnresolvedSubmission,
+        broker_orders: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        earliest_ns = submission.ts_submitted_ns - UNRESOLVED_SUBMISSION_CLOCK_SKEW_SECONDS * 1e9
+        candidates = [
+            order
+            for order in broker_orders
+            if VenueOrderId(str(order.get("id"))) not in self._client_order_ids
+            and order.get("symbol") == submission.symbol
+            and order.get("side") == submission.side
+            and order.get("orderType") == submission.order_type
+            and _decimal(order.get("quantity")) == submission.quantity
+            and (
+                submission.order_type != "LO"
+                or _decimal(order.get("price")) == Decimal(str(submission.price))
+            )
+            and _timestamp_ns(order.get("createdDate"), 0) >= earliest_ns
+        ]
+        return min(candidates, key=lambda order: _timestamp_ns(order.get("createdDate"), 0), default=None)
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
         for client_order_id in command.order_list.client_order_ids():
@@ -556,42 +755,42 @@ class EntradeExecutionClient(ExecutionClient):
 
     async def _modify_order(self, command: ModifyOrder) -> None:
         order = self._order_for_client_id(command.client_order_id)
-        if order is not None:
-            self.generate_order_modify_rejected(
-                order,
-                command.venue_order_id,
-                "Entrade order modification is not supported by the current MVP adapter",
-                self.clock.timestamp_ns(),
-            )
+        if order is None:
+            self._log.warning(f"Cannot modify {command.client_order_id}: order is unknown")
+            return
+        self.generate_order_modify_rejected(
+            order,
+            command.venue_order_id,
+            "Entrade order modification is not supported by the current MVP adapter",
+            self.clock.timestamp_ns(),
+        )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
-        context = self._orders.get(command.client_order_id)
-        venue_order_id = command.venue_order_id or (
-            context.venue_order_id if context else None
-        )
-        order = (
-            context.order
-            if context
-            else self._order_for_client_id(command.client_order_id)
-        )
-        if venue_order_id is None or context is None or order is None:
-            if order is not None:
-                self.generate_order_cancel_rejected(
-                    order,
-                    venue_order_id,
-                    "Entrade broker order ID is not known",
-                    self.clock.timestamp_ns(),
-                )
+        order = self._order_for_client_id(command.client_order_id)
+        if order is None:
+            self._log.warning(f"Cannot cancel {command.client_order_id}: order is unknown")
+            return
+        await self._cancel_one(order, command.venue_order_id)
+
+    async def _cancel_one(self, order: Any, venue_order_id: VenueOrderId | None) -> None:
+        context = self._context_for(order, venue_order_id)
+        if context is None:
+            self.generate_order_cancel_rejected(
+                order,
+                venue_order_id,
+                "Entrade order ID is not known yet (submission outcome still being resolved)",
+                self.clock.timestamp_ns(),
+            )
             return
         try:
             assert self._client is not None
             payload = await asyncio.to_thread(
-                self._client.cancel_order, venue_order_id.value
+                self._client.cancel_order, context.venue_order_id.value
             )
         except Exception as e:  # noqa: BLE001 - broker errors become cancel rejections.
             self.generate_order_cancel_rejected(
                 order,
-                venue_order_id,
+                context.venue_order_id,
                 f"Entrade order cancellation failed: {e}",
                 self.clock.timestamp_ns(),
             )
@@ -599,41 +798,81 @@ class EntradeExecutionClient(ExecutionClient):
         self._synchronize_order(payload, context)
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
-        for order in self.cache.orders_open(instrument_id=command.instrument_id):
-            context = self._orders.get(order.client_order_id)
-            if context is None:
-                continue
-            assert self._client is not None
-            payload = await asyncio.to_thread(
-                self._client.cancel_order, context.venue_order_id.value
-            )
-            self._synchronize_order(payload, context)
+        side = None if command.order_side == OrderSide.NO_ORDER_SIDE else command.order_side
+        for order in self.cache.orders_open(instrument_id=command.instrument_id, side=side):
+            await self._cancel_one(order, order.venue_order_id)
 
     async def _batch_cancel_orders(self, command: BatchCancelOrders) -> None:
         for cancel in command.cancels:
             await self._cancel_order(cancel)
 
-    async def _poll_order(self, context: EntradeOrderContext) -> None:
-        if self._client is None:
-            return
-        while True:
+    async def _poll_orders(self) -> None:
+        """Keep every working order in sync with Entrade; one failed request never stops it."""
+        while self._polling:
             await asyncio.sleep(ORDER_POLL_INTERVAL_SECONDS)
+            await self._resolve_unresolved_submissions()
+            working = [
+                context
+                for context in self._orders.values()
+                if context.last_status not in ENTRADE_TERMINAL_STATUSES
+            ]
+            for context in working:
+                await self._poll_one(context)
+            if self._balance_stale:
+                await self._refresh_balance()
+
+    async def _poll_one(self, context: EntradeOrderContext) -> None:
+        assert self._client is not None
+        try:
             payload = await asyncio.to_thread(
                 self._client.get_order, context.venue_order_id.value
             )
+        except Exception as e:  # noqa: BLE001 - retried on the next poll cycle.
+            context.poll_failures += 1
+            if context.poll_failures == 1 or context.poll_failures % 30 == 0:
+                self._log.warning(
+                    f"Entrade order {context.venue_order_id} poll failed "
+                    f"({context.poll_failures} in a row): {e}",
+                )
+            return
+        context.poll_failures = 0
+        try:
             self._synchronize_order(payload, context)
-            if payload.get("orderStatus") in ENTRADE_TERMINAL_STATUSES:
-                return
+        except Exception as e:  # noqa: BLE001 - one malformed payload must not stop polling.
+            self._log.error(f"Entrade order {context.venue_order_id} update failed: {e}")
+
+    async def _refresh_balance(self) -> None:
+        assert self._client is not None
+        try:
+            balance = await asyncio.to_thread(
+                self._client.get_account_balance, self._investor_id
+            )
+        except Exception as e:  # noqa: BLE001 - retried on the next poll cycle.
+            self._log.warning(f"Entrade balance refresh failed: {e}")
+            return
+        self._balance_stale = False
+        self._generate_balance(balance)
 
     def _synchronize_order(
         self, payload: dict[str, Any], context: EntradeOrderContext
     ) -> None:
         order = context.order
-        for fill in self._fill_reports(payload, client_order_id=order.client_order_id):
-            fill_key = fill.trade_id.value
-            if fill_key in context.reported_fills:
-                continue
-            context.reported_fills.add(fill_key)
+        status = payload.get("orderStatus")
+        fills = self._fill_reports(payload, client_order_id=order.client_order_id)
+        new_fills = [
+            fill for fill in fills if fill.trade_id.value not in context.reported_fills
+        ]
+
+        if not context.accepted and (status in ENTRADE_ACCEPTED_STATUSES or new_fills):
+            context.accepted = True
+            self.generate_order_accepted(
+                order,
+                context.venue_order_id,
+                _timestamp_ns(payload.get("createdDate"), self.clock.timestamp_ns()),
+            )
+
+        for fill in new_fills:
+            context.reported_fills.add(fill.trade_id.value)
             self.generate_order_filled(
                 order,
                 context.venue_order_id,
@@ -646,15 +885,15 @@ class EntradeExecutionClient(ExecutionClient):
                 fill.liquidity_side,
                 fill.ts_event,
             )
+            self._balance_stale = True
 
-        status = payload.get("orderStatus")
         if not status or status == context.last_status:
             return
         context.last_status = status
         ts_event = _timestamp_ns(payload.get("modifiedDate"), self.clock.timestamp_ns())
         if status == "Canceled":
             self.generate_order_canceled(order, context.venue_order_id, ts_event)
-        elif status == "Expired":
+        elif status in ("Expired", "DoneForDay"):
             self.generate_order_expired(order, context.venue_order_id, ts_event)
         elif status == "Rejected":
             self.generate_order_rejected(
@@ -664,25 +903,36 @@ class EntradeExecutionClient(ExecutionClient):
                 False,
             )
 
-    def _order_status_report(self, payload: dict[str, Any]) -> OrderStatusReport:
-        venue_order_id = VenueOrderId(str(payload["id"]))
-        client_order_id = self._client_order_ids.get(venue_order_id)
-        context = self._orders.get(client_order_id) if client_order_id else None
+    def _instrument_for_payload(
+        self,
+        payload: dict[str, Any],
+        context: EntradeOrderContext | None,
+    ) -> tuple[InstrumentId, Any]:
         instrument_id = (
             context.order.instrument_id
             if context is not None
-            else InstrumentId.from_str(f"{payload['symbol']}.{self.venue.value}")
+            else self._resolver.to_nautilus(
+                InstrumentId.from_str(f"{payload['symbol']}.{self.venue.value}"),
+                self.clock.timestamp_ns(),
+            )
         )
         if self._provider is None:
             raise RuntimeError("Entrade instrument provider is not connected")
         instrument = self._provider.find(instrument_id)
         if instrument is None:
-            instrument = self._provider.find(
-                CONTINUOUS_ID
-            )
-        if instrument is None:
-            raise ValueError(f"No instrument loaded for Entrade order {payload['id']}")
-        order_type, time_in_force = entrade_order_type(payload["orderType"])
+            raise ValueError(f"No instrument loaded for Entrade symbol {payload.get('symbol')}")
+        return instrument_id, instrument
+
+    def _order_status_report(self, payload: dict[str, Any]) -> OrderStatusReport:
+        venue_order_id = VenueOrderId(str(payload["id"]))
+        client_order_id = self._client_order_ids.get(venue_order_id)
+        context = self._orders.get(client_order_id) if client_order_id else None
+        instrument_id, instrument = self._instrument_for_payload(payload, context)
+        if context is not None:
+            order_type = context.order.order_type
+            time_in_force = context.order.time_in_force
+        else:
+            order_type, time_in_force = entrade_order_type(payload["orderType"])
         ts_init = self.clock.timestamp_ns()
         ts_accepted = _timestamp_ns(payload.get("createdDate"), ts_init)
         price = _decimal(payload.get("price"))
@@ -721,20 +971,7 @@ class EntradeExecutionClient(ExecutionClient):
         venue_order_id = VenueOrderId(str(payload["id"]))
         client_order_id = client_order_id or self._client_order_ids.get(venue_order_id)
         context = self._orders.get(client_order_id) if client_order_id else None
-        instrument_id = (
-            context.order.instrument_id
-            if context is not None
-            else InstrumentId.from_str(f"{payload['symbol']}.{self.venue.value}")
-        )
-        if self._provider is None:
-            raise RuntimeError("Entrade instrument provider is not connected")
-        instrument = self._provider.find(instrument_id)
-        if instrument is None:
-            instrument = self._provider.find(
-                CONTINUOUS_ID
-            )
-        if instrument is None:
-            raise ValueError(f"No instrument loaded for Entrade fill {payload['id']}")
+        instrument_id, instrument = self._instrument_for_payload(payload, context)
 
         fill_quantity = _decimal(payload.get("fillQuantity"))
         total_cost = _decimal(payload.get("tradingFee")) + _decimal(
@@ -797,38 +1034,48 @@ class EntradeExecutionClient(ExecutionClient):
             open_quantity = _decimal(deal.get("openQuantity"))
             if deal.get("status") != "ACTIVE" or open_quantity <= 0:
                 continue
+            if deal.get("side") not in ("NB", "NS"):
+                self._log.warning(
+                    f"Skipping Entrade deal {deal.get('id')} with unknown side {deal.get('side')}",
+                )
+                continue
             grouped.setdefault(str(deal["symbol"]), []).append(deal)
 
         reports: list[PositionStatusReport] = []
         for symbol, open_deals in grouped.items():
-            broker_sides = {deal["side"] for deal in open_deals}
-            if not broker_sides <= {"NB", "NS"}:
-                raise ValueError(
-                    f"Unsupported Entrade position side for {symbol}: {broker_sides}"
-                )
-            if len(broker_sides) != 1:
-                raise ValueError(
-                    f"Entrade returned opposing active deals for netting instrument {symbol}",
-                )
-
-            instrument_id = InstrumentId.from_str(f"{symbol}.{self.venue.value}")
+            instrument_id = self._resolver.to_nautilus(
+                InstrumentId.from_str(f"{symbol}.{self.venue.value}"),
+                self.clock.timestamp_ns(),
+            )
             if self._provider is None:
                 raise RuntimeError("Entrade instrument provider is not connected")
             instrument = self._provider.find(instrument_id)
             if instrument is None:
-                raise ValueError(f"No instrument loaded for Entrade position {symbol}")
+                self._log.warning(f"Skipping Entrade position in unloaded symbol {symbol}")
+                continue
 
-            broker_side = next(iter(broker_sides))
-            position_side = (
-                PositionSide.LONG if broker_side == "NB" else PositionSide.SHORT
-            )
-            quantity = sum(
-                (_decimal(deal["openQuantity"]) for deal in open_deals), Decimal(0)
-            )
+            long_deals = [deal for deal in open_deals if deal["side"] == "NB"]
+            short_deals = [deal for deal in open_deals if deal["side"] == "NS"]
+            if long_deals and short_deals:
+                self._log.warning(
+                    f"Entrade holds long and short deals in {symbol}; reporting the net position",
+                )
+            long_quantity = sum((_decimal(d["openQuantity"]) for d in long_deals), Decimal(0))
+            short_quantity = sum((_decimal(d["openQuantity"]) for d in short_deals), Decimal(0))
+            net_quantity = long_quantity - short_quantity
+            if net_quantity == 0:
+                continue
+            position_side = PositionSide.LONG if net_quantity > 0 else PositionSide.SHORT
+            # avg_px_open is taken from the deals on the net side only.
+            side_deals = long_deals if net_quantity > 0 else short_deals
+            side_quantity = long_quantity if net_quantity > 0 else short_quantity
             weighted_cost = sum(
-                _decimal(deal.get("positionCostPrice") or deal.get("averageCostPrice"))
-                * _decimal(deal["openQuantity"])
-                for deal in open_deals
+                (
+                    _decimal(deal.get("positionCostPrice") or deal.get("averageCostPrice"))
+                    * _decimal(deal["openQuantity"])
+                    for deal in side_deals
+                ),
+                Decimal(0),
             )
             latest_timestamp = max(
                 _timestamp_ns(deal.get("modifiedDate"), self.clock.timestamp_ns())
@@ -840,15 +1087,31 @@ class EntradeExecutionClient(ExecutionClient):
                     instrument_id=instrument_id,
                     position_side=position_side,
                     quantity=Quantity.from_decimal_dp(
-                        quantity, instrument.size_precision
+                        abs(net_quantity), instrument.size_precision
                     ),
-                    avg_px_open=(weighted_cost / quantity if quantity else None),
+                    avg_px_open=weighted_cost / side_quantity,
                     report_id=UUID4(),
                     ts_last=latest_timestamp,
                     ts_init=self.clock.timestamp_ns(),
                 ),
             )
         return reports
+
+    def _check_expiry_calendar(self) -> None:
+        """Log an ERROR for each loaded contract whose expiry differs from vn30f_expiry_date."""
+        assert self._provider is not None
+        for contract in self._provider.list_all():
+            if not isinstance(contract, FuturesContract):
+                continue
+            broker_date = (
+                datetime.fromtimestamp(contract.expiration_ns / 1e9, tz=VN_TZINFO).date()
+            )
+            rule_date = vn30f_expiry_date(broker_date.year, broker_date.month)
+            if broker_date != rule_date:
+                self._log.error(
+                    f"{contract.id} expires on {broker_date} at the broker but "
+                    f"vn30f_expiry_date gives {rule_date}; the symbol resolver uses the broker date",
+                )
 
     def _require_account(self) -> None:
         if (

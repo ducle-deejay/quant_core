@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,8 @@ from nautilus_trader.model import (
 from nautilus_trader.persistence import ParquetDataCatalog
 
 from .config import DnseDataClientConfig
+from .constants import ATC_LOCAL_MINUTE
+from .constants import DNSE_MAIN_BOARD
 from .constants import NOT_IMPLEMENTED
 from .constants import SUPPORTED_DNSE_RESOLUTIONS
 from .constants import VN_TZ
@@ -65,6 +68,10 @@ from .providers import DnseInstrumentProvider
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog"
+# Largest gap between the parsed DNSE time field and the local receipt time for which
+# the DNSE time is used as ts_event; beyond it the receipt time is used.
+MAX_EXCHANGE_CLOCK_GAP_NS = 60_000_000_000
+SECOND_NS = 1_000_000_000
 
 
 def normalize_dnse_resolution(resolution: str) -> str:
@@ -105,6 +112,39 @@ def bar_type_to_dnse_resolution(bar_type: BarType) -> str:
     raise ValueError(f"Unsupported bar type for DNSE OHLC subscription: {bar_type}")
 
 
+def bar_interval_ns(bar_type: BarType) -> int:
+    seconds_per_unit = {
+        BarAggregation.MINUTE: 60,
+        BarAggregation.HOUR: 3_600,
+        BarAggregation.DAY: 86_400,
+        BarAggregation.WEEK: 604_800,
+    }
+    return bar_type.spec.step * seconds_per_unit[bar_type.spec.aggregation] * SECOND_NS
+
+
+def dnse_bar_ts_init(bar_type: BarType, ts_event: int, timezone_name: str = VN_TZ) -> int:
+    """Return ``ts_init`` for a DNSE bar whose ``ts_event`` is the interval open.
+
+    ``ts_init`` is the interval close, except for an intraday bar opening at 14:45
+    (closing auction), which keeps ``ts_init == ts_event``. This is the same rule as
+    ``_bar_ts_init`` in market_data/sources/dnse/transform.py.
+    """
+    if bar_type.spec.aggregation in (BarAggregation.MINUTE, BarAggregation.HOUR):
+        local = pd.Timestamp(ts_event, tz="UTC").tz_convert(timezone_name)
+        if (local.hour, local.minute) == ATC_LOCAL_MINUTE:
+            return ts_event
+    return ts_event + bar_interval_ns(bar_type)
+
+
+def dnse_price(value: float, precision: int) -> Price:
+    """Build a Price from a DNSE float through its shortest decimal text, not binary float."""
+    return Price.from_decimal_dp(Decimal(str(value)), precision)
+
+
+def dnse_quantity(value: float, precision: int) -> Quantity:
+    return Quantity.from_decimal_dp(Decimal(str(value)), precision)
+
+
 def dnse_epoch_to_utc_timestamp(value: float) -> pd.Timestamp:
     unit = "ms" if value >= 1_000_000_000_000 else "s"
     return pd.to_datetime(value, unit=unit, utc=True)  # type: ignore[call-overload]
@@ -133,6 +173,41 @@ def build_bar_type_for_symbol(
     )
 
 
+def dnse_exchange_time_ns(value: Any, timezone_name: str = VN_TZ) -> int | None:
+    """Parse the DNSE ``time`` field of a quote or trade; None when it cannot be parsed.
+
+    The format of this field has not been confirmed against live payloads. Epoch
+    numbers and ISO text are accepted; text without an offset is read as Vietnam
+    local time.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return int(dnse_epoch_to_utc_timestamp(value).value)
+        timestamp = pd.Timestamp(value)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize(timezone_name)
+        return int(timestamp.tz_convert("UTC").value)
+    except (TypeError, ValueError):
+        return None
+
+
+def dnse_payload_timestamps(
+    payload: Quote | Trade,
+    timezone_name: str,
+    fallback_ts_ns: int,
+) -> tuple[int, int]:
+    """Return (ts_event, ts_init): exchange time of the event and local receipt time."""
+    ts_init = (
+        int(payload.receivedAt * SECOND_NS) if payload.receivedAt else fallback_ts_ns
+    )
+    ts_event = dnse_exchange_time_ns(payload.time, timezone_name)
+    if ts_event is None or abs(ts_init - ts_event) > MAX_EXCHANGE_CLOCK_GAP_NS:
+        return ts_init, ts_init
+    return ts_event, ts_init
+
+
 def dnse_quote_to_nautilus_quote_tick(
     quote: Quote,
     venue: str,
@@ -147,35 +222,16 @@ def dnse_quote_to_nautilus_quote_tick(
     if best_bid is None or best_ask is None:
         raise ValueError(f"DNSE quote for {quote.symbol} is missing a bid or ask")
 
-    if quote.receivedAt:
-        ts_event = int(pd.to_datetime(quote.receivedAt, unit="s", utc=True).value)
-    elif quote.time:
-        ts_event = int(pd.Timestamp(quote.time, tz=timezone_name).value)
-    else:
-        ts_event = fallback_ts_ns
-
+    ts_event, ts_init = dnse_payload_timestamps(quote, timezone_name, fallback_ts_ns)
     return QuoteTick(
         instrument_id=InstrumentId(Symbol(quote.symbol), Venue(venue)),
-        bid_price=Price(best_bid[0], price_precision),
-        ask_price=Price(best_ask[0], price_precision),
-        bid_size=Quantity(best_bid[1], volume_precision),
-        ask_size=Quantity(best_ask[1], volume_precision),
+        bid_price=dnse_price(best_bid[0], price_precision),
+        ask_price=dnse_price(best_ask[0], price_precision),
+        bid_size=dnse_quantity(best_bid[1], volume_precision),
+        ask_size=dnse_quantity(best_ask[1], volume_precision),
         ts_event=ts_event,
-        ts_init=ts_event,
+        ts_init=ts_init,
     )
-
-
-def dnse_payload_timestamp_ns(
-    payload: Quote | Trade,
-    timezone_name: str,
-    fallback_ts_ns: int,
-) -> int:
-    """Resolve the event timestamp of a DNSE websocket payload in nanoseconds."""
-    if payload.receivedAt:
-        return int(pd.to_datetime(payload.receivedAt, unit="s", utc=True).value)
-    if payload.time:
-        return int(pd.Timestamp(payload.time, tz=timezone_name).value)
-    return fallback_ts_ns
 
 
 def dnse_levels_to_book_orders(
@@ -185,7 +241,12 @@ def dnse_levels_to_book_orders(
     volume_precision: int,
 ) -> tuple[list[BookOrder], list[int]]:
     orders = [
-        BookOrder(side, Price(level.price, price_precision), Quantity(level.quantity, volume_precision), 0)
+        BookOrder(
+            side,
+            dnse_price(level.price, price_precision),
+            dnse_quantity(level.quantity, volume_precision),
+            0,
+        )
         for level in levels[:10]
     ]
     counts = [int(level.quantity) for level in levels[:10]]
@@ -205,7 +266,7 @@ def dnse_quote_to_nautilus_depth10(
     fallback_ts_ns: int = 0,
 ) -> OrderBookDepth10:
     """Convert a DNSE top-price payload (ten levels per side) to a Depth10 snapshot."""
-    ts_event = dnse_payload_timestamp_ns(quote, timezone_name, fallback_ts_ns)
+    ts_event, ts_init = dnse_payload_timestamps(quote, timezone_name, fallback_ts_ns)
     bids, bid_counts = dnse_levels_to_book_orders(quote.bid, OrderSide.BUY, price_precision, volume_precision)
     asks, ask_counts = dnse_levels_to_book_orders(quote.offer, OrderSide.SELL, price_precision, volume_precision)
     # DNSE does not expose order counts per level; the level size stands in for it.
@@ -218,7 +279,7 @@ def dnse_quote_to_nautilus_depth10(
         flags=0,
         sequence=0,
         ts_event=ts_event,
-        ts_init=ts_event,
+        ts_init=ts_init,
     )
 
 
@@ -235,15 +296,15 @@ def dnse_trade_to_nautilus_trade_tick(
     DNSE exposes no aggressor side and no trade id; the session-cumulative
     ``totalVolumeTraded`` stands in as the unique per-session trade id.
     """
-    ts_event = dnse_payload_timestamp_ns(trade, timezone_name, fallback_ts_ns)
+    ts_event, ts_init = dnse_payload_timestamps(trade, timezone_name, fallback_ts_ns)
     return TradeTick(
         instrument_id=InstrumentId(Symbol(trade.symbol), Venue(venue)),
-        price=Price(trade.price, price_precision),
-        size=Quantity(trade.quantity, volume_precision),
+        price=dnse_price(trade.price, price_precision),
+        size=dnse_quantity(trade.quantity, volume_precision),
         aggressor_side=AggressorSide.NO_AGGRESSOR,
         trade_id=TradeId(f"{trade.symbol}-{trade.totalVolumeTraded}"),
         ts_event=ts_event,
-        ts_init=ts_event,
+        ts_init=ts_init,
     )
 
 
@@ -252,22 +313,22 @@ def dnse_ohlc_to_nautilus_bar(
     venue: str,
     price_precision: int = 1,
     volume_precision: int = 0,
+    timezone_name: str = VN_TZ,
 ) -> Bar:
     bar_type = build_bar_type_for_symbol(
         symbol=ohlc.symbol, resolution=ohlc.resolution, venue=venue
     )
-    timestamp = dnse_epoch_to_utc_timestamp(ohlc.time)
-    ts_event = int(timestamp.value)
+    ts_event = int(dnse_epoch_to_utc_timestamp(ohlc.time).value)
 
     return Bar(
         bar_type,
-        Price(ohlc.open, price_precision),
-        Price(ohlc.high, price_precision),
-        Price(ohlc.low, price_precision),
-        Price(ohlc.close, price_precision),
-        Quantity(ohlc.volume, volume_precision),
+        dnse_price(ohlc.open, price_precision),
+        dnse_price(ohlc.high, price_precision),
+        dnse_price(ohlc.low, price_precision),
+        dnse_price(ohlc.close, price_precision),
+        dnse_quantity(ohlc.volume, volume_precision),
         ts_event,
-        ts_event,
+        dnse_bar_ts_init(bar_type, ts_event, timezone_name),
     )
 
 
@@ -357,6 +418,7 @@ def dnse_ohlc_body_to_nautilus_bars(
                 venue=venue,
                 price_precision=price_precision,
                 volume_precision=volume_precision,
+                timezone_name=timezone_name,
             ),
         )
 
@@ -373,8 +435,8 @@ def _load_catalog_bars(
     """Query bars for a bar type within [start, end] from a ParquetDataCatalog.
 
     The catalog stores bars under ``data/bars/{bar_type}`` and filters on
-    ``ts_init``; catalog bars carry ``ts_event == ts_init`` at the bar open
-    time in UTC (see ``dnse_ohlc_to_nautilus_bar``).
+    ``ts_init``, which market_data sets to the interval close (see
+    ``dnse_bar_ts_init``).
     """
     try:
         bars = catalog.query_bars(
@@ -385,6 +447,24 @@ def _load_catalog_bars(
     except (OSError, RuntimeError):
         bars = []
     return bars
+
+
+def _with_bar_type(bars: list[Bar], bar_type: BarType) -> list[Bar]:
+    if not bars or bars[0].bar_type == bar_type:
+        return bars
+    return [
+        Bar(
+            bar_type,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            bar.ts_event,
+            bar.ts_init,
+        )
+        for bar in bars
+    ]
 
 
 @dataclass(frozen=True)
@@ -434,10 +514,8 @@ class DnseLiveDataClient(MarketDataClient):
         self._subscribed_keys: set[SubscriptionKey] = set()
         self._last_bar_ts_by_key: dict[SubscriptionKey, int] = {}
         self._recovering_keys: set[SubscriptionKey] = set()
-        self._failed_recovery_keys: set[SubscriptionKey] = set()
         self._buffered_ohlc_by_key: dict[SubscriptionKey, list[Ohlc]] = {}
-        self._registered_ohlc_handler = False
-        self._registered_reconnect_handler = False
+        self._registered_handlers = False
         self._market_working_dates: tuple[str, ...] = config.market_working_dates
         self._quote_stream_symbols: set[str] = set()
         self._quote_symbols: set[str] = set()
@@ -445,8 +523,9 @@ class DnseLiveDataClient(MarketDataClient):
         self._trade_symbols: set[str] = set()
         self._log = Logger(type(self).__name__)
 
-    def _open_resources(self) -> None:
-        """Create transport resources after the rc5 runtime binds the client."""
+    async def _connect(self) -> None:
+        # Clients are created on the node's event-loop thread; the network connection
+        # is opened by connect() below.
         if self._trading_client is None:
             self._trading_client = TradingClient(
                 api_key=self._config.api_key,
@@ -467,23 +546,23 @@ class DnseLiveDataClient(MarketDataClient):
             )
         if self._catalog is None and self._config.historical_source == "catalog":
             self._catalog = ParquetDataCatalog(str(self._catalog_path))
-
-    async def _connect(self) -> None:
-        await asyncio.to_thread(self._open_resources)
         if self.instrument_provider is None:
             raise RuntimeError("The DNSE data client requires an instrument provider")
         await self.instrument_provider.initialize()
         if self._config.use_dnse_working_dates and not self._market_working_dates:
             self._market_working_dates = await self._load_market_working_dates()
-        if not self._registered_ohlc_handler:
-            assert self._trading_client is not None
+        if not self._registered_handlers:
+            # In the installed DNSE SDK, each subscribe_* call given a callback registers
+            # one more handler, so each handler is registered once here and subscribe
+            # calls pass no callback.
             self._trading_client.on("ohlc_closed", self._on_ohlc_event)
-            self._registered_ohlc_handler = True
-        if not self._registered_reconnect_handler:
-            assert self._trading_client is not None
+            self._trading_client.on("quote", self._on_quote_event)
+            self._trading_client.on("trade", self._on_trade_event)
+            self._trading_client.on("reconnecting", self._on_reconnecting)
             self._trading_client.on("reconnected", self._on_reconnected)
-            self._registered_reconnect_handler = True
-        assert self._trading_client is not None
+            self._trading_client.on("max_reconnect_exceeded", self._on_stream_lost)
+            self._trading_client.on("error", self._on_stream_error)
+            self._registered_handlers = True
         await self._trading_client.connect()
 
         if self._config.publish_instruments_on_connect:
@@ -523,10 +602,15 @@ class DnseLiveDataClient(MarketDataClient):
 
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
+        # The installed DNSE SDK stores one symbol list per channel (the last one sent)
+        # and resubscribes that list after a reconnect, so each call sends every
+        # symbol of the channel.
+        symbols = sorted(
+            {k.symbol for k in self._subscribed_keys if k.resolution == resolution} | {symbol},
+        )
         await self._trading_client.subscribe_ohlc_closed(
-            symbols=[symbol],
+            symbols=symbols,
             resolution=resolution,
-            on_ohlc=self._on_ohlc_event,
             encoding=self._config.ws_encoding,
         )
         self._subscribed_keys.add(key)
@@ -540,9 +624,8 @@ class DnseLiveDataClient(MarketDataClient):
         self._last_bar_ts_by_key.pop(key, None)
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
-        suffix = "msgpack" if self._config.ws_encoding == "msgpack" else "json"
         await self._trading_client.unsubscribe(
-            f"ohlc_closed.{resolution}.{suffix}",
+            f"ohlc_closed.{resolution}.{self._channel_suffix}",
             [symbol],
         )
 
@@ -627,69 +710,13 @@ class DnseLiveDataClient(MarketDataClient):
                     )
 
         if not bars:
-            query: dict[str, Any] = {
-                "symbol": key.symbol,
-                "resolution": resolution,
-            }
-            if start is not None:
-                query["from"] = int(start.value // 1_000_000_000)
-            if end is not None:
-                query["to"] = int(end.value // 1_000_000_000)
-
-            try:
-                if self._rest_client is None:
-                    await asyncio.to_thread(self._open_resources)
-                assert self._rest_client is not None
-                status, body = await asyncio.to_thread(
-                    self._rest_client.get_ohlc,
-                    bar_type=self._config.historical_bar_type,
-                    query=query,
-                    dry_run=False,
-                )
-                if status != 200:
-                    raise ValueError(
-                        "DNSE get_ohlc failed with "
-                        f"status={status}, symbol={query['symbol']}, "
-                        f"resolution={resolution}, body={body}",
-                    )
-
-                bars = dnse_ohlc_body_to_nautilus_bars(
-                    body=body,
-                    symbol=query["symbol"],
-                    resolution=resolution,
-                    venue=self._config.venue,
-                    price_precision=self._config.price_precision,
-                    volume_precision=self._config.volume_precision,
-                    timezone_name=self._config.timezone_name,
-                    working_dates=self._market_working_dates,
-                    drop_invalid_trading_days=self._config.drop_weekend_bars,
-                )
-            except Exception:
-                if key in self._recovering_keys:
-                    self._failed_recovery_keys.add(key)
-                    self._buffered_ohlc_by_key.pop(key, None)
-                raise
-
-        if bars and bars[0].bar_type != request.bar_type:
-            bars = [
-                Bar(
-                    request.bar_type,
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
-                    bar.ts_event,
-                    bar.ts_init,
-                )
-                for bar in bars
-            ]
+            bars = await self._fetch_api_bars(key, start, end)
 
         self._handle_response(
             BarsResponse(
                 self.client_id,
                 request.bar_type,
-                bars,
+                _with_bar_type(bars, request.bar_type),
                 request.request_id,
                 self.clock.timestamp_ns(),
                 request.start_ns,
@@ -699,8 +726,49 @@ class DnseLiveDataClient(MarketDataClient):
         )
         self._log.info(f"Served {len(bars)} bars from {source} for {request.bar_type}")
 
-        if key in self._recovering_keys:
-            self._complete_bar_recovery(key, bars)
+    async def _fetch_api_bars(
+        self,
+        key: SubscriptionKey,
+        start: pd.Timestamp | None,
+        end: pd.Timestamp | None,
+    ) -> list[Bar]:
+        """Fetch finished bars from the DNSE REST API; the still-forming bar is left out."""
+        query: dict[str, Any] = {
+            "symbol": key.symbol,
+            "resolution": key.resolution,
+        }
+        if start is not None:
+            query["from"] = int(start.value // SECOND_NS)
+        if end is not None:
+            query["to"] = int(end.value // SECOND_NS)
+
+        assert self._rest_client is not None
+        status, body = await asyncio.to_thread(
+            self._rest_client.get_ohlc,
+            bar_type=self._config.historical_bar_type,
+            query=query,
+            dry_run=False,
+        )
+        if status != 200:
+            raise ValueError(
+                "DNSE get_ohlc failed with "
+                f"status={status}, symbol={query['symbol']}, "
+                f"resolution={key.resolution}, body={body}",
+            )
+
+        bars = dnse_ohlc_body_to_nautilus_bars(
+            body=body,
+            symbol=key.symbol,
+            resolution=key.resolution,
+            venue=self._config.venue,
+            price_precision=self._config.price_precision,
+            volume_precision=self._config.volume_precision,
+            timezone_name=self._config.timezone_name,
+            working_dates=self._market_working_dates,
+            drop_invalid_trading_days=self._config.drop_weekend_bars,
+        )
+        now = self.clock.timestamp_ns()
+        return [bar for bar in bars if bar.ts_init <= now]
 
     async def _ensure_instrument(self, symbol: str) -> object:
         if self.instrument_provider is None:
@@ -724,8 +792,6 @@ class DnseLiveDataClient(MarketDataClient):
     def _on_ohlc_event(self, ohlc: Ohlc) -> None:
         resolution = normalize_dnse_resolution(ohlc.resolution)
         key = SubscriptionKey(symbol=ohlc.symbol, resolution=resolution)
-        if key in self._failed_recovery_keys:
-            return
         if key in self._recovering_keys:
             self._buffered_ohlc_by_key.setdefault(key, []).append(ohlc)
             return
@@ -746,27 +812,20 @@ class DnseLiveDataClient(MarketDataClient):
             venue=self._config.venue,
             price_precision=self._config.price_precision,
             volume_precision=self._config.volume_precision,
+            timezone_name=self._config.timezone_name,
         )
-        if bar.bar_type != bar_type:
-            bar = Bar(
-                bar_type,
-                bar.open,
-                bar.high,
-                bar.low,
-                bar.close,
-                bar.volume,
-                bar.ts_event,
-                bar.ts_init,
-            )
+        self._publish_bar(key, _with_bar_type([bar], bar_type)[0])
 
+    def _publish_bar(self, key: SubscriptionKey, bar: Bar) -> None:
         last_ts = self._last_bar_ts_by_key.get(key)
         if last_ts is not None and bar.ts_event <= last_ts:
             return
-
         self._last_bar_ts_by_key[key] = bar.ts_event
         self._handle_data(bar)
 
     def _on_quote_event(self, quote: Quote) -> None:
+        if quote.boardId and quote.boardId != DNSE_MAIN_BOARD:
+            return
         symbol = quote.symbol
         if symbol in self._quote_symbols:
             self._handle_data(
@@ -792,6 +851,10 @@ class DnseLiveDataClient(MarketDataClient):
             )
 
     def _on_trade_event(self, trade: Trade) -> None:
+        if trade.boardId and trade.boardId != DNSE_MAIN_BOARD:
+            return
+        if trade.symbol not in self._trade_symbols:
+            return
         self._handle_data(
             dnse_trade_to_nautilus_trade_tick(
                 trade,
@@ -803,22 +866,52 @@ class DnseLiveDataClient(MarketDataClient):
             ),
         )
 
+    def _on_reconnecting(self, info: object) -> None:
+        self._log.warning(f"DNSE market-data stream disconnected; reconnecting: {info}")
+
+    def _on_stream_lost(self, attempts: object) -> None:
+        self._log.error(
+            f"DNSE market-data stream is down after {attempts} reconnect attempts; "
+            "no bars, quotes or trades will arrive until the node is restarted",
+        )
+
+    def _on_stream_error(self, error: object) -> None:
+        self._log.error(f"DNSE market-data stream error: {error}")
+
     def _on_reconnected(self, _: object) -> None:
+        self._log.info("DNSE market-data stream reconnected; recovering missed bars")
         for key in self._subscribed_keys:
-            if key not in self._bar_types_by_key:
+            if key in self._recovering_keys or key not in self._bar_types_by_key:
                 continue
             self._recovering_keys.add(key)
-            self._failed_recovery_keys.discard(key)
             self._buffered_ohlc_by_key[key] = []
+            self.create_task(
+                self._recover_bars(key),
+                name=f"dnse_recover_bars: {key.symbol} {key.resolution}",
+            )
 
-    def _complete_bar_recovery(self, key: SubscriptionKey, bars: list[Bar]) -> None:
-        if bars:
-            self._last_bar_ts_by_key[key] = max(bar.ts_event for bar in bars)
-        buffered = self._buffered_ohlc_by_key.pop(key, [])
-        self._recovering_keys.discard(key)
-        self._failed_recovery_keys.discard(key)
-        for ohlc in buffered:
-            self._on_ohlc_event(ohlc)
+    async def _recover_bars(self, key: SubscriptionKey) -> None:
+        """Publish the bars that closed while the stream was down, then resume live bars."""
+        try:
+            last_ts = self._last_bar_ts_by_key.get(key)
+            bar_type = self._bar_types_by_key.get(key)
+            if last_ts is not None and bar_type is not None:
+                missed = await self._fetch_api_bars(
+                    key,
+                    pd.Timestamp(last_ts, tz="UTC"),
+                    pd.Timestamp(self.clock.timestamp_ns(), tz="UTC"),
+                )
+                for bar in _with_bar_type(missed, bar_type):
+                    self._publish_bar(key, bar)
+        except Exception as e:  # noqa: BLE001 - live bars must resume even when the gap cannot be filled.
+            self._log.error(
+                f"Could not recover missed {key.symbol} {key.resolution} bars after "
+                f"reconnect: {e}; live bars resume with a gap",
+            )
+        finally:
+            self._recovering_keys.discard(key)
+            for ohlc in self._buffered_ohlc_by_key.pop(key, []):
+                self._on_ohlc_event(ohlc)
 
     async def _load_market_working_dates(self) -> tuple[str, ...]:
         assert self._rest_client is not None
@@ -833,15 +926,19 @@ class DnseLiveDataClient(MarketDataClient):
 
         return parse_working_dates_body(body)
 
+    @property
+    def _channel_suffix(self) -> str:
+        return "msgpack" if self._config.ws_encoding == "msgpack" else "json"
+
     async def _ensure_quote_stream(self, symbol: str) -> None:
         if symbol in self._quote_stream_symbols:
             return
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
         await self._trading_client.subscribe_quotes(
-            symbols=[symbol],
-            on_quote=self._on_quote_event,
+            symbols=sorted(self._quote_stream_symbols | {symbol}),
             encoding=self._config.ws_encoding,
+            board_id=DNSE_MAIN_BOARD,
         )
         self._quote_stream_symbols.add(symbol)
 
@@ -850,26 +947,37 @@ class DnseLiveDataClient(MarketDataClient):
             return
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
-        suffix = "msgpack" if self._config.ws_encoding == "msgpack" else "json"
-        for board in ("G1", "G2", "G3", "G4", "G5", "G6", "G7"):
-            await self._trading_client.unsubscribe(f"top_price.{board}.{suffix}", [symbol])
+        await self._trading_client.unsubscribe(
+            f"top_price.{DNSE_MAIN_BOARD}.{self._channel_suffix}",
+            [symbol],
+        )
+        self._quote_stream_symbols.discard(symbol)
 
     async def _subscribe_quotes(self, command) -> None:
         symbol = command.instrument_id.symbol.value
         if symbol in self._quote_symbols:
             return
-        await self._ensure_quote_stream(symbol)
+        # Registered before subscribing so a quote delivered during the call is kept.
         self._quote_symbols.add(symbol)
+        try:
+            await self._ensure_quote_stream(symbol)
+        except Exception:
+            self._quote_symbols.discard(symbol)
+            raise
 
     async def _subscribe_book_deltas(self, command) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
-    async def _subscribe_book_depth10(self, command) -> None:
+    async def _subscribe_book_depth(self, command) -> None:
         symbol = command.instrument_id.symbol.value
         if symbol in self._book_symbols:
             return
-        await self._ensure_quote_stream(symbol)
         self._book_symbols.add(symbol)
+        try:
+            await self._ensure_quote_stream(symbol)
+        except Exception:
+            self._book_symbols.discard(symbol)
+            raise
 
     async def _subscribe_mark_prices(self, command) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
@@ -899,7 +1007,7 @@ class DnseLiveDataClient(MarketDataClient):
     async def _unsubscribe_book_deltas(self, command) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
-    async def _unsubscribe_book_depth10(self, command) -> None:
+    async def _unsubscribe_book_depth(self, command) -> None:
         symbol = command.instrument_id.symbol.value
         if symbol not in self._book_symbols:
             return
@@ -930,12 +1038,16 @@ class DnseLiveDataClient(MarketDataClient):
             return
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
-        await self._trading_client.subscribe_trades(
-            symbols=[symbol],
-            on_trade=self._on_trade_event,
-            encoding=self._config.ws_encoding,
-        )
         self._trade_symbols.add(symbol)
+        try:
+            await self._trading_client.subscribe_trades(
+                symbols=sorted(self._trade_symbols),
+                encoding=self._config.ws_encoding,
+                board_id=DNSE_MAIN_BOARD,
+            )
+        except Exception:
+            self._trade_symbols.discard(symbol)
+            raise
 
     async def _unsubscribe_trades(self, command) -> None:
         symbol = command.instrument_id.symbol.value
@@ -943,12 +1055,10 @@ class DnseLiveDataClient(MarketDataClient):
             return
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
-        suffix = "msgpack" if self._config.ws_encoding == "msgpack" else "json"
-        for board in ("G1", "G2", "G3", "G4", "G5", "G6", "G7"):
-            await self._trading_client.unsubscribe(
-                f"tick.{board}.{suffix}",
-                [symbol],
-            )
+        await self._trading_client.unsubscribe(
+            f"tick.{DNSE_MAIN_BOARD}.{self._channel_suffix}",
+            [symbol],
+        )
         self._trade_symbols.discard(symbol)
 
     async def _request_quotes(self, request) -> None:
