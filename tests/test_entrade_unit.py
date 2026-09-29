@@ -136,15 +136,23 @@ class FakeDnseTradingClient:
 
 
 class FakeDnseRestClient:
-    def __init__(self, status: int = 200, body: dict | None = None) -> None:
+    def __init__(
+        self,
+        status: int = 200,
+        body: dict | None = None,
+        failures_first: int = 0,
+    ) -> None:
         self.status = status
         self.body = body
+        self.failures_first = failures_first
         self.ohlc_calls: list[dict] = []
 
     def get_ohlc(self, **kwargs: object) -> tuple[int, dict]:
         self.ohlc_calls.append(kwargs)
+        if len(self.ohlc_calls) <= self.failures_first:
+            return 503, {"error": "unavailable"}
         return self.status, self.body or {
-            "t": [BAR_OPEN_S, BAR_OPEN_S + 86_400],
+            "t": [BAR_OPEN_S, BAR_OPEN_S + 2 * 86_400],  # Thursday, Saturday
             "o": [1000.0, 990.0],
             "h": [1001.0, 991.0],
             "l": [999.0, 989.0],
@@ -153,7 +161,38 @@ class FakeDnseRestClient:
         }
 
     def get_working_dates(self, **kwargs: object) -> tuple[int, dict]:
+        self.working_dates_calls += 1
+        if self.working_dates_calls <= self.working_dates_failures_first:
+            return 503, {"error": "unavailable"}
         return 200, {"workingDates": ["2025-01-02"]}
+
+    working_dates_calls = 0
+    working_dates_failures_first = 0
+
+
+class FakeLog:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def info(self, message: str) -> None:
+        self.records.append(("INFO", message))
+
+    def warning(self, message: str) -> None:
+        self.records.append(("WARNING", message))
+
+    def error(self, message: str) -> None:
+        self.records.append(("ERROR", message))
+
+    def levels(self, level: str) -> list[str]:
+        return [message for record_level, message in self.records if record_level == level]
+
+
+class FakeReceiveTask:
+    def __init__(self, done: bool) -> None:
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
 
 
 class RecordingDnseClient(DnseLiveDataClient):
@@ -162,7 +201,18 @@ class RecordingDnseClient(DnseLiveDataClient):
         self.responses: list[object] = []
         self.instruments: list[object] = []
         self.data: list[object] = []
-        self.tasks: list[object] = []
+        self.tasks: list[tuple[str, object]] = []
+        self._log = FakeLog()
+
+    def run_tasks(self, prefix: str) -> None:
+        """Run the scheduled background coroutines whose task name starts with prefix."""
+        pending, self.tasks = self.tasks, []
+        with patch("nautilus_bridge.adapters.entrade.data.asyncio.sleep", new=_no_sleep):
+            for name, coroutine in pending:
+                if name.startswith(prefix):
+                    asyncio.run(coroutine)
+                else:
+                    self.tasks.append((name, coroutine))
 
     def _handle_response(self, response: object) -> None:
         self.responses.append(response)
@@ -174,7 +224,14 @@ class RecordingDnseClient(DnseLiveDataClient):
         self.data.append(data)
 
     def create_task(self, coroutine, name: str = "background"):
-        self.tasks.append(coroutine)
+        if name == "dnse_bar_watchdog":
+            coroutine.close()  # the watchdog loop is exercised through _check_bar_watchdog
+            return
+        self.tasks.append((name, coroutine))
+
+
+async def _no_sleep(seconds: float) -> None:
+    return None
 
 
 def _dnse_client(
@@ -293,14 +350,14 @@ def test_live_bar_is_released_at_the_same_time_as_the_catalog_bar(
         assert bar.ts_init == open_utc.value + 5 * 60 * 1_000_000_000
 
 
-def test_dnse_closed_bars_skip_non_working_days_and_repeated_bars() -> None:
+def test_dnse_closed_bars_skip_weekends_and_repeated_bars() -> None:
     client, trading, _ = _dnse_client()
     asyncio.run(client._connect())
     bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
     asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
 
     for open_s, close in (
-        (BAR_OPEN_S + 86_400, 990.5),  # 2025-01-03 is not in the working dates
+        (BAR_OPEN_S + 2 * 86_400, 990.5),  # 2025-01-04 is a Saturday
         (BAR_OPEN_S, 1000.5),
         (BAR_OPEN_S, 1001.5),  # same bar again
         (BAR_OPEN_S + 60, 1002.5),
@@ -340,16 +397,23 @@ def test_bars_missed_during_a_disconnect_are_recovered_without_a_strategy_reques
     trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 3 * minute, 1003.0))
     assert len(client.data) == 1
 
-    for task in client.tasks:
-        asyncio.run(task)
+    client.run_tasks("dnse_recover_bars")
 
     closes = [bar.close.as_decimal() for bar in client.data]
     assert closes == [Decimal("1000.0"), Decimal("1001.0"), Decimal("1002.0"), Decimal("1003.0")]
     assert rest.ohlc_calls[0]["query"]["from"] == BAR_OPEN_S
 
 
-def test_failed_bar_recovery_still_resumes_the_live_stream() -> None:
-    client, trading, _ = _dnse_client(rest=FakeDnseRestClient(status=503, body={"error": "down"}))
+@pytest.mark.parametrize(("failures_first", "recovered"), [(2, True), (3, False)])
+def test_bar_recovery_retries_three_times_before_reporting_an_error(
+    failures_first: int,
+    recovered: bool,
+) -> None:
+    rest = FakeDnseRestClient(
+        failures_first=failures_first,
+        body={"t": [BAR_OPEN_S + 60], "o": [1001.0], "h": [1002.0], "l": [1000.0], "c": [1001.0], "v": [10]},
+    )
+    client, trading, _ = _dnse_client(rest=rest, clock=FakeClock((BAR_OPEN_S + 150) * 1_000_000_000))
     asyncio.run(client._connect())
     bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
     asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
@@ -357,15 +421,68 @@ def test_failed_bar_recovery_still_resumes_the_live_stream() -> None:
 
     trading.emit("reconnected", {})
     trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 120, 1002.0))
-    for task in client.tasks:
-        asyncio.run(task)
-    trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S + 180, 1003.0))
+    client.run_tasks("dnse_recover_bars")
 
-    assert [bar.close.as_decimal() for bar in client.data] == [
-        Decimal("1000.0"),
-        Decimal("1002.0"),
-        Decimal("1003.0"),
-    ]
+    closes = [bar.close.as_decimal() for bar in client.data]
+    expected = ["1000.0", "1001.0", "1002.0"] if recovered else ["1000.0", "1002.0"]
+    assert closes == [Decimal(value) for value in expected]
+    assert len(rest.ohlc_calls) == min(failures_first + 1, 3)
+    assert bool(client._log.levels("ERROR")) is not recovered
+
+
+def test_sdk_error_is_an_error_only_when_the_receive_loop_has_stopped() -> None:
+    client, trading, _ = _dnse_client()
+    asyncio.run(client._connect())
+
+    trading._message_handler_task = FakeReceiveTask(done=False)
+    trading.emit("error", ConnectionError("connection reset"))
+    client.run_tasks("dnse_stream_check")
+    assert client._log.levels("ERROR") == []
+    assert len(client._log.levels("WARNING")) == 1
+
+    trading._message_handler_task = FakeReceiveTask(done=True)
+    trading.emit("error", ConnectionError("reconnect failed"))
+    trading.emit("max_reconnect_exceeded", 11)
+    client.run_tasks("dnse_stream_check")
+    [error] = client._log.levels("ERROR")
+    assert "stopped" in error
+
+
+def _local_ns(local: str) -> int:
+    return pd.Timestamp(local, tz="Asia/Ho_Chi_Minh").value
+
+
+@pytest.mark.parametrize(
+    ("last_bar_local", "now_local", "expect_error"),
+    [
+        ("2025-01-02 10:00:30", "2025-01-02 10:03:00", False),  # 2.5 minutes
+        ("2025-01-02 10:00:30", "2025-01-02 10:03:31", True),
+        ("2025-01-02 11:29:05", "2025-01-02 12:15:00", False),  # lunch break
+        ("2025-01-02 11:29:05", "2025-01-02 13:02:30", False),  # counted from 13:00
+        ("2025-01-02 11:29:05", "2025-01-02 13:03:00", True),
+        (None, "2025-01-02 09:03:00", True),  # nothing since the session opened
+        ("2025-01-02 14:29:05", "2025-01-02 14:40:00", False),  # after the continuous session
+        (None, "2025-01-03 10:30:00", False),  # not a working date
+    ],
+)
+def test_bar_watchdog_reports_missing_minute_bars_only_during_sessions(
+    last_bar_local: str | None,
+    now_local: str,
+    expect_error: bool,
+) -> None:
+    clock = FakeClock()
+    client, trading, _ = _dnse_client(clock=clock)
+    asyncio.run(client._connect())
+    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
+    asyncio.run(client._subscribe_bars(SimpleNamespace(bar_type=bar_type)))
+    if last_bar_local is not None:
+        clock.now_ns = _local_ns(last_bar_local)
+        trading.emit("ohlc_closed", _ohlc(BAR_OPEN_S, 1000.0))
+
+    asyncio.run(client._check_bar_watchdog(_local_ns(now_local)))
+    asyncio.run(client._check_bar_watchdog(_local_ns(now_local)))  # a stall is reported once
+
+    assert len(client._log.levels("ERROR")) == (1 if expect_error else 0)
 
 
 def test_each_quote_and_trade_is_published_once_and_only_from_the_main_board() -> None:
@@ -461,6 +578,126 @@ def test_historical_bar_request_answers_through_the_typed_response() -> None:
     assert isinstance(response, BarsResponse)
     assert response.correlation_id == request.request_id
     assert [bar.bar_type for bar in response.data] == [bar_type]
+
+
+def _client_without_working_dates(
+    rest: FakeDnseRestClient,
+) -> tuple[RecordingDnseClient, FakeDnseTradingClient]:
+    config = DnseDataClientConfig(api_key="key", api_secret="secret", historical_source="api")
+    trading = FakeDnseTradingClient()
+    client = RecordingDnseClient(
+        name="DNSE",
+        config=config,
+        cache=None,
+        clock=FakeClock(),
+        venue="HNX",
+        instrument_provider=DnseInstrumentProvider(config),
+        trading_client=trading,
+        rest_client=rest,
+    )
+    with patch("nautilus_bridge.adapters.entrade.data.asyncio.sleep", new=_no_sleep):
+        asyncio.run(client._connect())
+    asyncio.run(
+        client._subscribe_bars(
+            SimpleNamespace(bar_type=build_bar_type_for_symbol("VN30F1M", "1", "HNX")),
+        ),
+    )
+    return client, trading
+
+
+def test_working_dates_are_retried_at_connect() -> None:
+    rest = FakeDnseRestClient()
+    rest.working_dates_failures_first = 2
+
+    client, _ = _client_without_working_dates(rest)
+
+    assert client._market_working_dates == ("2025-01-02",)
+    assert client._log.levels("WARNING") == []
+
+
+def test_watchdog_reloads_working_dates_that_failed_at_connect() -> None:
+    rest = FakeDnseRestClient()
+    rest.working_dates_failures_first = 3  # every attempt at connect fails
+    client, _ = _client_without_working_dates(rest)
+    assert len(client._log.levels("WARNING")) == 1
+
+    # 2025-01-03 is a Friday that is not in the list, i.e. a holiday.
+    asyncio.run(client._check_bar_watchdog(_local_ns("2025-01-03 10:30:00")))
+
+    assert client._market_working_dates == ("2025-01-02",)
+    assert client._log.levels("ERROR") == []
+
+
+@pytest.mark.parametrize(
+    ("ohlc_status", "bar_times", "expect_error"),
+    [
+        (200, [1735873200], True),  # 2025-01-03 10:00 local: market open, stream stalled
+        (200, [1735783200], False),  # only yesterday's bar: market closed today
+        (503, [], True),  # REST unreachable: cannot confirm a closed market
+    ],
+)
+def test_watchdog_without_working_dates_asks_rest_whether_the_market_traded_today(
+    ohlc_status: int,
+    bar_times: list[int],
+    expect_error: bool,
+) -> None:
+    rest = FakeDnseRestClient(
+        status=ohlc_status,
+        body={
+            "t": bar_times,
+            "o": [1000.0] * len(bar_times),
+            "h": [1001.0] * len(bar_times),
+            "l": [999.0] * len(bar_times),
+            "c": [1000.5] * len(bar_times),
+            "v": [10] * len(bar_times),
+        } if bar_times else {"error": "unavailable"},
+    )
+    rest.working_dates_failures_first = 10**6  # the list never loads
+    client, _ = _client_without_working_dates(rest)
+
+    asyncio.run(client._check_bar_watchdog(_local_ns("2025-01-03 10:30:00")))
+    calls_after_first_check = len(rest.ohlc_calls)
+    asyncio.run(client._check_bar_watchdog(_local_ns("2025-01-03 10:31:00")))
+
+    assert len(client._log.levels("ERROR")) == (1 if expect_error else 0)
+    if not expect_error:
+        # A closed day is decided once; later checks that day do not call REST again.
+        assert len(rest.ohlc_calls) == calls_after_first_check
+
+
+def test_bars_of_days_before_the_dnse_working_date_list_are_kept() -> None:
+    """The DNSE working-date list starts at the current day; earlier bars must not be dropped."""
+    config = DnseDataClientConfig(
+        api_key="key",
+        api_secret="secret",
+        historical_source="api",
+        market_working_dates=("2025-01-03", "2025-01-06"),  # the list as DNSE returns it on 01-03
+    )
+    client = RecordingDnseClient(
+        name="DNSE",
+        config=config,
+        cache=None,
+        clock=FakeClock(),
+        venue="HNX",
+        instrument_provider=DnseInstrumentProvider(config),
+        trading_client=FakeDnseTradingClient(),
+        rest_client=FakeDnseRestClient(),
+    )
+    bar_type = build_bar_type_for_symbol("VN30F1M", "1", "HNX")
+    request = SimpleNamespace(
+        request_id=UUID4(),
+        bar_type=bar_type,
+        start=datetime(2025, 1, 2, 2, tzinfo=UTC),
+        end=datetime(2025, 1, 5, 2, tzinfo=UTC),
+        start_ns=1735783200000000000,
+        end_ns=1736042400000000000,
+        params={},
+    )
+
+    asyncio.run(client._request_bars(request))
+
+    [response] = client.responses
+    assert [bar.ts_event for bar in response.data] == [BAR_OPEN_S * 1_000_000_000]
 
 
 def test_instrument_requests_answer_and_api_failure_propagates() -> None:

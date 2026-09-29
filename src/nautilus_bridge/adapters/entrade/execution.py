@@ -1098,7 +1098,7 @@ class EntradeExecutionClient(ExecutionClient):
         return reports
 
     def _check_expiry_calendar(self) -> None:
-        """Log an ERROR for each loaded contract whose expiry differs from vn30f_expiry_date."""
+        """Log a WARNING for each loaded contract whose expiry differs from vn30f_expiry_date."""
         assert self._provider is not None
         for contract in self._provider.list_all():
             if not isinstance(contract, FuturesContract):
@@ -1108,7 +1108,7 @@ class EntradeExecutionClient(ExecutionClient):
             )
             rule_date = vn30f_expiry_date(broker_date.year, broker_date.month)
             if broker_date != rule_date:
-                self._log.error(
+                self._log.warning(
                     f"{contract.id} expires on {broker_date} at the broker but "
                     f"vn30f_expiry_date gives {rule_date}; the symbol resolver uses the broker date",
                 )

@@ -58,6 +58,7 @@ from nautilus_trader.persistence import ParquetDataCatalog
 
 from .config import DnseDataClientConfig
 from .constants import ATC_LOCAL_MINUTE
+from .constants import CONTINUOUS_SESSIONS_LOCAL
 from .constants import DNSE_MAIN_BOARD
 from .constants import NOT_IMPLEMENTED
 from .constants import SUPPORTED_DNSE_RESOLUTIONS
@@ -72,6 +73,17 @@ DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog"
 # the DNSE time is used as ts_event; beyond it the receipt time is used.
 MAX_EXCHANGE_CLOCK_GAP_NS = 60_000_000_000
 SECOND_NS = 1_000_000_000
+# Wait before checking whether the DNSE SDK receive loop survived an error event; the SDK
+# emits "error" just before it stops that loop.
+STREAM_CHECK_DELAY_SECONDS = 1.0
+# During continuous sessions, no one-minute bar for this long is reported as an ERROR.
+BAR_WATCHDOG_MINUTES = 3
+BAR_WATCHDOG_INTERVAL_SECONDS = 60.0
+# Waits between the attempts to fetch bars missed during a reconnect (three attempts).
+BAR_RECOVERY_RETRY_DELAYS_SECONDS = (2.0, 5.0)
+# Waits between the attempts to load the DNSE working-date list at connect (three attempts).
+WORKING_DATES_RETRY_DELAYS_SECONDS = (2.0, 5.0)
+_MISSING = object()
 
 
 def normalize_dnse_resolution(resolution: str) -> str:
@@ -521,6 +533,12 @@ class DnseLiveDataClient(MarketDataClient):
         self._quote_symbols: set[str] = set()
         self._book_symbols: set[str] = set()
         self._trade_symbols: set[str] = set()
+        self._closing = False
+        self._stream_stop_reported = False
+        self._last_minute_bar_received_ns: int | None = None
+        self._bar_stall_reported = False
+        self._market_closed_date: str | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._log = Logger(type(self).__name__)
 
     async def _connect(self) -> None:
@@ -550,7 +568,19 @@ class DnseLiveDataClient(MarketDataClient):
             raise RuntimeError("The DNSE data client requires an instrument provider")
         await self.instrument_provider.initialize()
         if self._config.use_dnse_working_dates and not self._market_working_dates:
-            self._market_working_dates = await self._load_market_working_dates()
+            delays = (*WORKING_DATES_RETRY_DELAYS_SECONDS, None)
+            for delay in delays:
+                try:
+                    self._market_working_dates = await self._load_market_working_dates()
+                    break
+                except Exception as e:  # noqa: BLE001 - retried, then the watchdog falls back.
+                    if delay is None:
+                        self._log.warning(
+                            f"DNSE working dates unavailable ({e}); the bar watchdog retries "
+                            "loading them and asks the REST API whether bars exist today",
+                        )
+                        break
+                    await asyncio.sleep(delay)
         if not self._registered_handlers:
             # In the installed DNSE SDK, each subscribe_* call given a callback registers
             # one more handler, so each handler is registered once here and subscribe
@@ -564,11 +594,17 @@ class DnseLiveDataClient(MarketDataClient):
             self._trading_client.on("error", self._on_stream_error)
             self._registered_handlers = True
         await self._trading_client.connect()
+        self._closing = False
+        self._watchdog_task = self.create_task(self._run_bar_watchdog(), name="dnse_bar_watchdog")
 
         if self._config.publish_instruments_on_connect:
             self._publish_all_instruments()
 
     async def _disconnect(self) -> None:
+        self._closing = True
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            await asyncio.wait({self._watchdog_task}, timeout=STREAM_CHECK_DELAY_SECONDS)
         if self._trading_client is not None:
             await self._trading_client.disconnect()
         close_dnse_rest_client(self._rest_client)
@@ -764,7 +800,9 @@ class DnseLiveDataClient(MarketDataClient):
             price_precision=self._config.price_precision,
             volume_precision=self._config.volume_precision,
             timezone_name=self._config.timezone_name,
-            working_dates=self._market_working_dates,
+            # Weekday rule only: the DNSE working-date list starts today, so it would
+            # drop every bar of earlier days.
+            working_dates=None,
             drop_invalid_trading_days=self._config.drop_weekend_bars,
         )
         now = self.clock.timestamp_ns()
@@ -792,6 +830,9 @@ class DnseLiveDataClient(MarketDataClient):
     def _on_ohlc_event(self, ohlc: Ohlc) -> None:
         resolution = normalize_dnse_resolution(ohlc.resolution)
         key = SubscriptionKey(symbol=ohlc.symbol, resolution=resolution)
+        if resolution == "1" and key in self._subscribed_keys:
+            self._last_minute_bar_received_ns = self.clock.timestamp_ns()
+            self._bar_stall_reported = False
         if key in self._recovering_keys:
             self._buffered_ohlc_by_key.setdefault(key, []).append(ohlc)
             return
@@ -803,7 +844,6 @@ class DnseLiveDataClient(MarketDataClient):
         if self._config.drop_weekend_bars and not is_valid_vn_trading_day(
             timestamp,
             self._config.timezone_name,
-            self._market_working_dates,
         ):
             return
 
@@ -870,13 +910,113 @@ class DnseLiveDataClient(MarketDataClient):
         self._log.warning(f"DNSE market-data stream disconnected; reconnecting: {info}")
 
     def _on_stream_lost(self, attempts: object) -> None:
-        self._log.error(
-            f"DNSE market-data stream is down after {attempts} reconnect attempts; "
-            "no bars, quotes or trades will arrive until the node is restarted",
-        )
+        self._schedule_stream_check(f"gave up after {attempts} reconnect attempts")
 
     def _on_stream_error(self, error: object) -> None:
-        self._log.error(f"DNSE market-data stream error: {error}")
+        self._schedule_stream_check(str(error))
+
+    def _schedule_stream_check(self, reason: str) -> None:
+        if self._closing:
+            return
+        self.create_task(self._check_stream_alive(reason), name="dnse_stream_check")
+
+    async def _check_stream_alive(self, reason: str) -> None:
+        """Report ERROR only when the DNSE SDK receive loop has stopped, WARNING otherwise."""
+        await asyncio.sleep(STREAM_CHECK_DELAY_SECONDS)
+        if self._closing:
+            return
+        # Private attribute of the installed DNSE SDK: the task running its receive loop,
+        # which also performs the reconnects. It ends only when the SDK stops receiving.
+        receive_task = getattr(self._trading_client, "_message_handler_task", _MISSING)
+        if receive_task is _MISSING:
+            self._log.warning(
+                f"DNSE market-data stream error ({reason}); the DNSE SDK exposes no receive "
+                "task, so only the bar watchdog can detect a stopped stream",
+            )
+            return
+        if receive_task is None or receive_task.done():
+            if not self._stream_stop_reported:
+                self._stream_stop_reported = True
+                self._log.error(
+                    f"DNSE market-data stream stopped ({reason}); no bars, quotes or trades "
+                    "arrive until the node is restarted",
+                )
+            return
+        self._log.warning(f"DNSE market-data stream error ({reason}); the DNSE SDK is reconnecting")
+
+    async def _run_bar_watchdog(self) -> None:
+        while not self._closing:
+            await asyncio.sleep(BAR_WATCHDOG_INTERVAL_SECONDS)
+            await self._check_bar_watchdog(self.clock.timestamp_ns())
+
+    async def _check_bar_watchdog(self, now_ns: int) -> None:
+        """Log an ERROR when one-minute bars stop arriving during a continuous session."""
+        if self._bar_stall_reported:
+            return
+        minute_keys = sorted(
+            (key for key in self._subscribed_keys if key.resolution == "1"),
+            key=lambda key: key.symbol,
+        )
+        if not minute_keys:
+            return
+        now = pd.Timestamp(now_ns, tz="UTC").tz_convert(self._config.timezone_name)
+        if now.date().isoformat() == self._market_closed_date:
+            return
+        if self._config.use_dnse_working_dates and not self._market_working_dates:
+            try:
+                self._market_working_dates = await self._load_market_working_dates()
+                self._log.info("DNSE working dates loaded")
+            except Exception:  # noqa: BLE001 - still unavailable; checked below via REST bars.
+                pass
+        if not is_valid_vn_trading_day(
+            now.tz_convert("UTC"),
+            self._config.timezone_name,
+            self._market_working_dates,
+        ):
+            return
+        session_start = next(
+            (start for start, end in CONTINUOUS_SESSIONS_LOCAL if start <= now.time() < end),
+            None,
+        )
+        if session_start is None:
+            return
+        session_start_ns = pd.Timestamp.combine(now.date(), session_start).tz_localize(
+            self._config.timezone_name,
+        ).value
+        last_ns = max(self._last_minute_bar_received_ns or 0, session_start_ns)
+        if now_ns - last_ns < BAR_WATCHDOG_MINUTES * 60 * SECOND_NS:
+            return
+        if not self._market_working_dates:
+            # Without the working-date list a weekday holiday also has no bars; the REST
+            # API tells the two apart when it still answers.
+            has_bars_today = await self._rest_has_bars_on(minute_keys[0], now, now_ns)
+            if has_bars_today is False:
+                self._market_closed_date = now.date().isoformat()
+                self._log.warning(
+                    f"No DNSE bar today ({now.date()}) from the stream or the REST API; "
+                    "treating the market as closed for the day",
+                )
+                return
+        self._bar_stall_reported = True
+        since = pd.Timestamp(last_ns, tz="UTC").tz_convert(self._config.timezone_name)
+        self._log.error(
+            f"No DNSE one-minute bar since {since:%H:%M:%S} local time "
+            f"({BAR_WATCHDOG_MINUTES} minutes) during the continuous session",
+        )
+
+    async def _rest_has_bars_on(
+        self,
+        key: SubscriptionKey,
+        now: pd.Timestamp,
+        now_ns: int,
+    ) -> bool | None:
+        """Whether the REST API has one-minute bars for the local day of ``now``; None on failure."""
+        day_start = now.normalize()
+        try:
+            bars = await self._fetch_api_bars(key, day_start.tz_convert("UTC"), now.tz_convert("UTC"))
+        except Exception:  # noqa: BLE001 - an unreachable REST API cannot confirm a closed market.
+            return None
+        return any(day_start.value <= bar.ts_event <= now_ns for bar in bars)
 
     def _on_reconnected(self, _: object) -> None:
         self._log.info("DNSE market-data stream reconnected; recovering missed bars")
@@ -895,19 +1035,33 @@ class DnseLiveDataClient(MarketDataClient):
         try:
             last_ts = self._last_bar_ts_by_key.get(key)
             bar_type = self._bar_types_by_key.get(key)
-            if last_ts is not None and bar_type is not None:
-                missed = await self._fetch_api_bars(
-                    key,
-                    pd.Timestamp(last_ts, tz="UTC"),
-                    pd.Timestamp(self.clock.timestamp_ns(), tz="UTC"),
-                )
+            if last_ts is None or bar_type is None:
+                return
+            delays = (*BAR_RECOVERY_RETRY_DELAYS_SECONDS, None)
+            for attempt, delay in enumerate(delays, start=1):
+                try:
+                    missed = await self._fetch_api_bars(
+                        key,
+                        pd.Timestamp(last_ts, tz="UTC"),
+                        pd.Timestamp(self.clock.timestamp_ns(), tz="UTC"),
+                    )
+                except Exception as e:  # noqa: BLE001 - retried, then reported below.
+                    if delay is None:
+                        since = pd.Timestamp(last_ts, tz="UTC").tz_convert(self._config.timezone_name)
+                        self._log.error(
+                            f"Could not recover {key.symbol} {key.resolution} bars missed since "
+                            f"{since:%Y-%m-%d %H:%M} local time after {attempt} attempts: {e}",
+                        )
+                        return
+                    self._log.warning(
+                        f"Bar recovery attempt {attempt} for {key.symbol} {key.resolution} "
+                        f"failed: {e}; retrying in {delay:.0f}s",
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 for bar in _with_bar_type(missed, bar_type):
                     self._publish_bar(key, bar)
-        except Exception as e:  # noqa: BLE001 - live bars must resume even when the gap cannot be filled.
-            self._log.error(
-                f"Could not recover missed {key.symbol} {key.resolution} bars after "
-                f"reconnect: {e}; live bars resume with a gap",
-            )
+                return
         finally:
             self._recovering_keys.discard(key)
             for ohlc in self._buffered_ohlc_by_key.pop(key, []):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import time
+
 VN_TZ = "Asia/Ho_Chi_Minh"
 DNSE_DATA_CLIENT_NAME = "DNSE"
 DNSE_EXECUTION_CLIENT_NAME = "DNSE"
@@ -14,3 +16,5 @@ NOT_IMPLEMENTED = "This operation is not implemented by the entrade adapter"
 DNSE_MAIN_BOARD = "G1"
 # The 14:45 bar is the single closing-auction (ATC) print, known at 14:45 itself.
 ATC_LOCAL_MINUTE = (14, 45)
+# HNX continuous-matching sessions in local time; the bar watchdog only runs inside them.
+CONTINUOUS_SESSIONS_LOCAL = ((time(9, 0), time(11, 30)), (time(13, 0), time(14, 30)))

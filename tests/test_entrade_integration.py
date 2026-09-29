@@ -103,6 +103,9 @@ class FakeDnseRestClient:
     def get_ohlc(self, **kwargs: object) -> tuple[int, dict]:
         return 200, {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
 
+    def get_working_dates(self, **kwargs: object) -> tuple[int, dict]:
+        return 200, {"workingDates": ["2025-01-02"]}
+
 
 class FakeEntradeClient:
     """Fills every order in full at 1905.8 and records what the adapter sent."""

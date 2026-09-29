@@ -50,7 +50,17 @@ The template rules are enforced by this package:
 - Bars carry `ts_init` at the close of their interval (a bar opening at 14:45 keeps
   `ts_init` at 14:45), the same rule as `_bar_ts_init` in market_data.
 - After a WebSocket reconnect the bars missed during the outage are fetched from
-  the REST API and published before live bars resume.
+  the REST API (three attempts) and published before live bars resume; a failed
+  recovery is logged as ERROR.
+- A DNSE SDK error event is logged as ERROR only when the SDK receive loop has
+  stopped, otherwise as WARNING. During continuous sessions (09:00-11:30 and
+  13:00-14:30 local time) three minutes without a one-minute bar are logged as
+  ERROR. Trading days for this check come from the DNSE working-date list
+  (`use_dnse_working_dates`, on by default). When the list cannot be loaded (three
+  attempts at connect, retried by each watchdog check), Monday to Friday count as
+  trading days and a stall is reported as ERROR only if the REST API has bars for
+  that day or cannot be reached; otherwise the day is treated as closed. Bar
+  filtering only drops weekends, because the list starts at the current day.
 - Unsupported data operations raise `NotImplementedError` with the shared
   `NOT_IMPLEMENTED` message. Order modification is handled as a typed
   `generate_order_modify_rejected` instead, because the venue surface is known.
@@ -65,7 +75,7 @@ expiry day), and fills and positions of that contract are reported as
 
 The adapter does not roll positions. `nautilus_bridge.strategies.rollover.FuturesRollover`
 is an optional strategy-side helper that signals CLOSE and OPEN around expiry. At
-connect the adapter logs an ERROR for any broker expiry that differs from
+connect the adapter logs a WARNING for any broker expiry that differs from
 `vn30f_expiry_date`.
 
 ## Order mapping
