@@ -21,8 +21,6 @@ UNKNOWN_ACTIVATION = datetime(1970, 1, 1, tzinfo=UTC)
 
 @dataclass(frozen=True)
 class EntradeMonthlyContract:
-    """External boundary representation of an Entrade monthly contract."""
-
     symbol: str
     contract_type: str
     expiration_date: date
@@ -38,8 +36,7 @@ class EntradeMonthlyContract:
             symbol=str(payload["symbol"]),
             contract_type=str(payload.get("type", "")),
             expiration_date=_parse_date(payload["expirationDate"]),
-            # Entrade currently lists only contracts which are available to trade,
-            # but its derivative payload does not publish the first trading date.
+            # The Entrade derivative payload does not publish the first trading date.
             activation=None,
             market_price=_optional_float(payload.get("marketPrice")),
             basic_price=_optional_float(payload.get("basicPrice")),

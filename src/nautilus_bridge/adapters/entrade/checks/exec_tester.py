@@ -18,11 +18,7 @@ Two modes:
   and MAK close on stop. Runs until Ctrl+C.
 - --sweep: a one-shot sequential strategy covering the commands the builtin
   never sends — MTL (market-to-limit) entry, MOK entry, MAK flatten,
-  CancelAllOrders sweep, QueryAccount — then shuts the node down. One run
-  completes in well under a minute during a trading session.
-
-Upgrade workflow: re-run both modes to exercise the full adapter
-surface.
+  CancelAllOrders sweep, QueryAccount — then shuts the node down.
 
 Usage:
     uv run python -m nautilus_bridge.adapters.entrade.checks.exec_tester                 # dry run: commands are built but not sent
@@ -132,8 +128,8 @@ class CapabilitySweepStrategy(Strategy):
         *,
         dry_run: bool,
     ) -> None:
-        # The PyO3 Strategy.__new__ accepts at most one positional argument,
-        # so subclasses take no constructor arguments.
+        # This class takes no StrategyConfig subclass, so its values are set here
+        # after construction.
         self._contract_id = contract_id
         self._account_id = AccountId.from_str(account_id)
         self._dry_run = dry_run

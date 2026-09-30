@@ -68,9 +68,7 @@ node = (
 )
 
 node.add_strategy(...)  # FILL IN
-# StrategyConfig: strategy_id, order_id_tag, oms_type,
-# use_uuid_client_order_ids, external_order_instrument_ids,
-# manage_contingent_orders, manage_gtd_expiry
+# StrategyConfig fields: see StrategyConfig in nautilus_trader.
 
 try:
     node.run()

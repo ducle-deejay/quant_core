@@ -13,8 +13,6 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResol
 
 
 class DnseLiveDataClientFactory(DataClientFactory):
-    """Nautilus extension factory constructing the DNSE live data client."""
-
     @staticmethod
     def create(
         *,
@@ -37,8 +35,6 @@ class DnseLiveDataClientFactory(DataClientFactory):
 
 
 class EntradeLiveExecClientFactory(ExecutionClientFactory):
-    """Nautilus factory composing the Entrade execution adapter."""
-
     @staticmethod
     def create(
         *,

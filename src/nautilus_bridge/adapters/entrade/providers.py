@@ -21,8 +21,6 @@ from .api.entrade_api import EntradeClient
 
 
 class DnseInstrumentProvider(InstrumentProvider):
-    """Nautilus extension providing configured DNSE instruments."""
-
     def __init__(self, config: DnseDataClientConfig, clock: Clock | None = None) -> None:
         provider_config = config.instrument_provider or InstrumentProviderConfig(
             load_all=True,
@@ -57,8 +55,6 @@ class DnseInstrumentProvider(InstrumentProvider):
 
 
 class EntradeInstrumentProvider(InstrumentProvider):
-    """Nautilus extension providing Entrade monthly futures instruments."""
-
     def __init__(
         self,
         client: EntradeClient | None,

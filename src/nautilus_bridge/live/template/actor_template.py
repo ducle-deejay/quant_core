@@ -1,4 +1,8 @@
-"""Data actor template — the complete public surface of nautilus_trader DataActor."""
+"""Data actor template: a partial listing of DataActor methods; the stubs (.pyi) in nautilus_trader are authoritative.
+
+Every method here overrides a base-class method and raises NotImplementedError, so delete the
+overrides a real component does not implement.
+"""
 from nautilus_trader.common import DataActor
 from nautilus_trader.config import DataActorConfig
 
@@ -12,7 +16,7 @@ class MyActor(DataActor):
 
     # Properties inherited from the base class (never override): actor_id, cache, clock, config, log, registered_indicators, trader_id
 
-    # Lifecycle hooks
+    # Event handlers
     def on_bar(self, bar) -> None:
         raise NotImplementedError
     def on_block(self, block) -> None:
@@ -116,7 +120,7 @@ class MyActor(DataActor):
     def update_synthetic(self, synthetic) -> None:
         raise NotImplementedError
 
-    # Component control (system-called; delete these overrides in a real component)
+    # Component control (system-called)
     def degrade(self) -> None:
         raise NotImplementedError
     def dispose(self) -> None:

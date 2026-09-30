@@ -17,8 +17,6 @@ TERMINAL_ORDER_STATUSES = {"Canceled", "Expired", "Filled", "Rejected"}
 
 
 class EntradeDemoAuditor:
-    """External-boundary acceptance checks for Entrade demo endpoints."""
-
     def __init__(
         self,
         client: EntradeClient,

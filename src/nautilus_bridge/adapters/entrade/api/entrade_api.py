@@ -27,16 +27,12 @@ class EntradeAccount(StrEnum):
 
 @dataclass(frozen=True)
 class EntradeClientConfig:
-    """External boundary configuration for Entrade HTTP requests."""
-
     account: EntradeAccount = EntradeAccount.DEMO
     base_url: str = "https://services.entrade.com.vn"
     timeout_seconds: float = 30.0
 
 
 class EntradeApiError(RuntimeError):
-    """External boundary error returned by Entrade."""
-
     def __init__(
         self,
         message: str,
@@ -54,8 +50,6 @@ class EntradeApiError(RuntimeError):
 
 
 class EntradeTransport:
-    """External boundary HTTP transport for Entrade."""
-
     def __init__(
         self,
         config: EntradeClientConfig | None = None,
@@ -160,8 +154,6 @@ def investor_id_from_token(token: str) -> int | str | None:
 
 
 class EntradeClient(EntradeTransport):
-    """External boundary client exposing current Entrade resources."""
-
     def __init__(
         self,
         config: EntradeClientConfig | None = None,
@@ -208,8 +200,10 @@ class EntradeClient(EntradeTransport):
         try:
             return super()._request(method, path, authenticated=authenticated, **kwargs)
         except EntradeApiError as e:
-            # Sign in again and repeat the request once on 401/403. This assumes Entrade
-            # rejects an expired token without processing the request; not yet confirmed.
+            # Sign in again and repeat the request once on 401/403. Entrade answers an
+            # invalid token with HTTP 401 and does not process the request (verified on the
+            # Entrade demo API, 2026-09-30: POST derivative/orders with an invalid token
+            # -> 401, no order created; token lifetime 8 h from the JWT iat/exp claims).
             if (
                 not authenticated
                 or e.status_code not in TOKEN_REJECTED_STATUS_CODES

@@ -1,8 +1,8 @@
-"""Signal when a futures strategy should close before expiry and when it may re-enter.
+"""Decide when a futures strategy should close before expiry and when it may re-enter.
 
 ``update(ts_ns)`` returns CLOSE at ``close_time`` on the expiry day given by
-``expiry_date``, is ``frozen`` until the next day, and returns OPEN on the first update
-of that day. It reads only the timestamp passed in and the expiry calendar.
+``expiry_date``, is ``frozen`` until a later calendar day, and returns OPEN on the first
+update on that day. It reads only the timestamp passed in and the expiry calendar.
 
 Example of wiring in a strategy::
 
@@ -16,7 +16,7 @@ Example of wiring in a strategy::
             self.on_roll_open(bar)
         if self.rollover.frozen:
             return
-        ...  # normal signal handling
+        ...  # normal handling
 """
 
 from __future__ import annotations
@@ -34,12 +34,12 @@ VN_TZ = "Asia/Ho_Chi_Minh"
 
 
 class RollAction(Enum):
-    CLOSE = "close"  # flatten the expiring contract and stop opening positions
-    OPEN = "open"  # first bar of the next trading day: re-enter in the new contract
+    CLOSE = "close"  # close_time reached on the expiry day
+    OPEN = "open"  # first update on a later calendar day than the CLOSE
 
 
 class FuturesRollover:
-    """Emit CLOSE at ``close_time`` on the expiry day and OPEN on the next trading day."""
+    """Emit CLOSE at ``close_time`` on the expiry day and OPEN on the first update of a later calendar day."""
 
     def __init__(
         self,
@@ -55,7 +55,7 @@ class FuturesRollover:
 
     @property
     def frozen(self) -> bool:
-        """True from the roll close until the first bar of the next trading day."""
+        """True from CLOSE until the first update on a later calendar day."""
         return self._rolling_since is not None
 
     def update(self, ts_ns: int) -> RollAction | None:

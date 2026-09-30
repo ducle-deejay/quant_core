@@ -138,8 +138,7 @@ def dnse_bar_ts_init(bar_type: BarType, ts_event: int, timezone_name: str = VN_T
     """Return ``ts_init`` for a DNSE bar whose ``ts_event`` is the interval open.
 
     ``ts_init`` is the interval close, except for an intraday bar opening at 14:45
-    (closing auction), which keeps ``ts_init == ts_event``. This is the same rule as
-    ``_bar_ts_init`` in market_data/sources/dnse/transform.py.
+    (closing auction), which keeps ``ts_init == ts_event``.
     """
     if bar_type.spec.aggregation in (BarAggregation.MINUTE, BarAggregation.HOUR):
         local = pd.Timestamp(ts_event, tz="UTC").tz_convert(timezone_name)
@@ -447,8 +446,7 @@ def _load_catalog_bars(
     """Query bars for a bar type within [start, end] from a ParquetDataCatalog.
 
     The catalog stores bars under ``data/bars/{bar_type}`` and filters on
-    ``ts_init``, which market_data sets to the interval close (see
-    ``dnse_bar_ts_init``).
+    ``ts_init``, which for these bars is the interval close (see ``dnse_bar_ts_init``).
     """
     try:
         bars = catalog.query_bars(
@@ -481,15 +479,11 @@ def _with_bar_type(bars: list[Bar], bar_type: BarType) -> list[Bar]:
 
 @dataclass(frozen=True)
 class SubscriptionKey:
-    """Composition key for a DNSE OHLC subscription."""
-
     symbol: str
     resolution: str
 
 
 class DnseLiveDataClient(MarketDataClient):
-    """Nautilus extension implementing live and historical DNSE market data."""
-
     def __init__(
         self,
         *,

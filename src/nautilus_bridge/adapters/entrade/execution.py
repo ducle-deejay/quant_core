@@ -219,8 +219,6 @@ def _timestamp_ns(value: str | None, fallback: int) -> int:
 
 
 class EntradeExecutionClient(ExecutionClient):
-    """Nautilus execution-client extension backed by Entrade."""
-
     def __init__(
         self,
         *,
@@ -554,7 +552,7 @@ class EntradeExecutionClient(ExecutionClient):
             self._client.get_account_balance, self._investor_id
         )
         self._generate_balance(balance)
-        # The runtime assembles the mass from the report hooks below and
+        # The runtime assembles the mass from the report hooks above and
         # rejects an assembled mass whose identity does not match the client.
         return NotImplemented
 
@@ -587,7 +585,8 @@ class EntradeExecutionClient(ExecutionClient):
                 f"{order.instrument_id} does not resolve to a loaded Entrade monthly contract",
             )
 
-        # Reduce-only orders skip the qmax check so a close is never blocked by it.
+        # qmax is the maximum contracts Entrade's buying-power endpoint allows for this side
+        # and price. Reduce-only orders skip that check so a close is never blocked by it.
         if not order.is_reduce_only:
             reference_price = price or contract.market_price or contract.basic_price
             if reference_price is None:

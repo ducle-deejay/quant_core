@@ -17,15 +17,12 @@ from .constants import DNSE_API_VERSION
 from .constants import VN_TZ
 from .api.entrade_api import EntradeAccount
 
-# The PyO3 base configs materialize a default ``InstrumentProviderConfig``
-# with ``load_all=False``, so the default must be normalized while the value
-# is forwarded into the base constructor.
+# The base configs default to ``InstrumentProviderConfig(load_all=False)``; this adapter
+# defaults to ``load_all=True``.
 DEFAULT_INSTRUMENT_PROVIDER = InstrumentProviderConfig(load_all=True)
 
 
 class DnseDataClientConfig(DataClientConfig):
-    """Nautilus extension configuration for the DNSE live data client."""
-
     def __new__(
         cls,
         *,
@@ -153,12 +150,8 @@ class DnseDataClientConfig(DataClientConfig):
 
 
 class EntradeExecClientConfig(ExecutionClientConfig):
-    """
-    Nautilus extension configuration for Entrade execution.
-
-    The ``account`` field selects the Entrade account (demo papertrade or
-    live real money); it is independent of the Nautilus node ``Environment``
-    context, which should be ``Environment.LIVE`` for this client.
+    """``account`` selects the Entrade demo or live account and is independent of the
+    Nautilus node ``Environment``, which should be ``Environment.LIVE``.
     """
 
     def __new__(

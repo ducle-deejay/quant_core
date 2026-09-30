@@ -85,7 +85,8 @@ class DirectionalStrategy(Strategy):
             self._submit_opening_order(qty_to_target, bar, account)
             return
 
-        # (b) reduce, (c) go flat, (d) reverse: close with a reduce-only order first
+        # (b) reduce, (c) go flat, (d) reverse: submit a reduce-only order; (d) opens the
+        # new side afterwards in on_position_closed
         is_reversing = target_contracts * current_contracts < 0
         if is_reversing or target_contracts == 0:
             reduce_qty = abs(current_contracts)
@@ -96,7 +97,8 @@ class DirectionalStrategy(Strategy):
         self._submit_order(close_side, reduce_qty, close_price, reduce_only=True)
 
     def on_position_closed(self, event: PositionClosed) -> None:
-        # (d) second leg of a reversal: open the new side once flat
+        # Runs on any close of this position, including manual or external ones; opens toward
+        # a non-zero target. For (d) this is the second leg.
         if self.target_contracts == 0:
             return
         bar = self.cache.bar(self.config.bar_type.standard())

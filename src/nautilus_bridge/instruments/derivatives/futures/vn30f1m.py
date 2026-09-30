@@ -33,8 +33,9 @@ PRICE_PRECISION = 1
 SIZE_INCREMENT = Quantity.from_int(1)
 MULTIPLIER = Quantity.from_int(100_000)
 LOT_SIZE = Quantity.from_int(1)
-# EnTrade rates are 0.05 initial margin, 0.03 maintenance margin, and a 0.02
-# force-sell threshold. Use 4x margin rates as a conservative risk buffer.
+# Entrade publishes 0.05 initial margin, 0.03 maintenance margin and a 0.02 force-sell
+# threshold. The values below are 4x Entrade's published rates, chosen as a risk buffer
+# (design decision).
 MARGIN_INIT = Decimal("0.2")
 MARGIN_MAINT = Decimal("0.12")
 

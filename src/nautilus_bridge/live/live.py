@@ -1,8 +1,7 @@
 """Run the VN30F1M directional system live: DNSE market data, Entrade execution.
 
-The actor, strategy, instrument and bar type match apps/research/backtest.py. The node is
-run by ``runner.run_node``, whose exit codes are described in runner.py; a failure while
-building the node raises, which also exits with a non-zero code.
+The node is run by ``runner.run_node``, whose exit codes are described in runner.py; a
+failure while building the node raises, which also exits with a non-zero code.
 
 Usage: uv run python -m nautilus_bridge.live.live
 Env (.env at the repository root): API_KEY, API_SECRET, ENTRADE_USERNAME,
@@ -81,7 +80,7 @@ def build_node() -> LiveNode:
             fileout_level=LogLevel.INFO,
             file_config=FileWriterConfig(directory=str(LOG_DIRECTORY)),
         ),
-        # Same bar building as the research backtest: no time bars without updates.
+        # Build no time bars for intervals without updates.
         data_engine=LiveDataEngineConfig(time_bars_build_with_no_updates=False),
         # Compare cached positions with Entrade every 60 s and query fills on a mismatch
         # (docs/how_to/configure_live_trading.md, "Continuous reconciliation").

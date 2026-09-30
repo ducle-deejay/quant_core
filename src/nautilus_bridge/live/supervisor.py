@@ -11,11 +11,6 @@ NautilusTrader leaves restart after a failed process to an external supervisor
 At ``STOP_AT`` (Vietnam local time) it sends SIGTERM to the node, waits ``STOP_GRACE_SECONDS``
 for the node's own shutdown, then kills it. SIGINT or SIGTERM sent to the supervisor stops the
 node the same way.
-
-Start it once per trading day, before the session, e.g. with cron on a machine whose clock is
-in Asia/Ho_Chi_Minh:
-
-    30 8 * * 1-5 cd /path/to/quant_core && uv run python -m nautilus_bridge.live.supervisor
 """
 
 from __future__ import annotations

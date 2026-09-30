@@ -2,7 +2,7 @@
 
 Follows the NautilusTrader per-adapter live tester convention
 (examples/live/<adapter>/data_tester.py). The node connects to the DNSE
-OpenAPI, subscribes to the configured instrument's quotes and bars, and logs
+OpenAPI, subscribes to quotes, trades, order book depth and bars, and logs
 everything through DataTester. No orders are placed.
 
 DNSE serves quotes per monthly contract only (the continuous symbol is
