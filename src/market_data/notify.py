@@ -25,8 +25,6 @@ def esc(value: object) -> str:
 
 @dataclass(frozen=True)
 class TelegramConfig:
-    """External Telegram transport configuration."""
-
     bot_token: str
     chat_id: str | int
     timeout_seconds: float = 15.0
@@ -34,8 +32,6 @@ class TelegramConfig:
 
 
 class TelegramNotificationError(RuntimeError):
-    """External Telegram transport failure."""
-
     def __init__(
         self,
         message: str,

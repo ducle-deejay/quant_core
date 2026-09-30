@@ -59,7 +59,6 @@ def test_dnse_ok_mirae_ok():
 
 
 def test_mirae_resolves_dnse_gaps_succeeds():
-    # THE regression: nox failed here; we must succeed.
     report = run_daily(
         day=DAY,
         run_dnse=lambda d: dict(DNSE_WITH_GAPS),
@@ -113,7 +112,7 @@ def test_remaining_missing_math():
 
 
 # --------------------------------------------------------------------------- #
-# Alert formatting (DEC-012 unified template)
+# Alert formatting
 # --------------------------------------------------------------------------- #
 
 SUCCESS_REPORT = {
@@ -167,7 +166,7 @@ def test_format_run_missing_format():
 
 
 # --------------------------------------------------------------------------- #
-# run_and_alert alert coverage (DEC-012)
+# run_and_alert alert coverage
 # --------------------------------------------------------------------------- #
 
 
@@ -237,7 +236,7 @@ def test_run_and_alert_raise_on_error_propagates_notify_failure():
 
 
 # --------------------------------------------------------------------------- #
-# Pipeline bootstrap guard (DEC-012): config failures alert + exit non-zero
+# Pipeline bootstrap guard: config failures alert + exit non-zero
 # --------------------------------------------------------------------------- #
 
 

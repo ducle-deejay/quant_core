@@ -1,6 +1,5 @@
 """Daily ETL entrypoint: DNSE primary + Mirae candlestick fallback + Telegram.
-Usage (repo root): set API_KEY/API_SECRET/TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID,
-then ``.venv/bin/python3 apps/data/daily/pipeline.py [--date YYYY-MM-DD]``.
+Usage: .venv/bin/python3 apps/data/daily/pipeline.py [--date YYYY-MM-DD]
 """
 
 from __future__ import annotations
@@ -40,10 +39,9 @@ def main() -> None:
       load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero.
     - The success/failure alert is sent with ``raise_on_error=True``: an
       undeliverable alert fails the run loudly instead of pretending success.
-    - Every run writes a heartbeat status file (``market_data.heartbeat``)
-      that the io.quant-core.daily-etl-watch LaunchAgent checks for missed
-      runs; exits non-zero when both sources failed or bars remain missing
-      after the Mirae backfill.
+    - Every run writes a heartbeat status file (``market_data.heartbeat``);
+      exits non-zero when DNSE failed or bars remain missing after both
+      sources.
     """
     parser = argparse.ArgumentParser(description="Run the daily DNSE + Mirae data pipelines")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -54,11 +52,11 @@ def main() -> None:
     day = args.date or datetime.now(LOCAL_TIMEZONE).date()
 
     # The notifier is built before anything that can fail: config-load crashes
-    # must still reach Telegram (DEC-012).
+    # must still reach Telegram.
     notifier = data_notifier_from_env()
 
-    # Bootstrap phase: config resolution. Any error here previously died
-    # silently before the notifier existed (OBS-013); now it alerts loudly.
+    # Bootstrap phase: config resolution. Any error here sends a
+    # STARTUP FAILED alert.
     try:
         config = load_json_config(args.config)
         dnse_config = load_json_config(_resolve(config["dnse_config"]))
@@ -94,7 +92,7 @@ def main() -> None:
 
 def _slim_report(report: dict[str, object]) -> dict[str, object]:
     """Strip huge per-bar timestamp arrays from the printed report (the full
-    report stays available programmatically for the acceptance layers)."""
+    report stays available to callers)."""
     slim = copy.deepcopy(report)
     for source in ("dnse", "mirae"):
         section = slim.get(source)
@@ -105,7 +103,7 @@ def _slim_report(report: dict[str, object]) -> dict[str, object]:
 
 
 def _resolve(value: object) -> Path:
-    """Resolve a config path against the repo root (matches daily._resolve_path)."""
+    """Resolve a config path against the repo root."""
     path = Path(str(value))
     return path if path.is_absolute() else ROOT / path
 

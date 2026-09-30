@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def status_path(root: Path | None = None) -> Path:
-    """Location of the heartbeat status file (repo-root-relative, DEC-012)."""
     base = root if root is not None else ROOT
     return base / "data" / "state" / STATUS_FILENAME
 
@@ -53,10 +52,10 @@ def check_status(
 
     Returns (status, detail) with status in:
       "ok"      - a successful run for this day is on record
-      "failed"  - a run happened for this day but failed (already alerted by
-                  the run itself; the watcher must stay quiet)
-      "missing" - no record for this day, or the record is stale while the
-                  run was still marked "running" (hard kill)
+      "failed"  - a run happened for this day but failed
+      "running" - the run is marked "running" and the record is not stale
+      "missing" - no usable record for this day, or the record is still
+                  "running" after RUNNING_STALE_AFTER (run treated as killed)
     """
     path = status_path(root)
     if not path.exists():

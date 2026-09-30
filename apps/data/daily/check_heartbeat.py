@@ -1,5 +1,5 @@
-"""Daily ETL heartbeat watcher: alerts RUN MISSING when today's 16:00 run never happened.
-LaunchAgent io.quant-core.daily-etl-watch 16:10 Mon-Fri; exit 0 healthy, 1 missing.
+"""Daily ETL heartbeat watcher: alerts RUN MISSING when today has no usable heartbeat.
+Exits 1 only when the status is "missing"; every other status exits 0.
 """
 
 from __future__ import annotations

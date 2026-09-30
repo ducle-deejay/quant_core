@@ -64,7 +64,8 @@ def load_day(
 
         validate_transformed_bars(batch)
         candidate_days = _group_by_trading_day(batch)
-        # Catalog time bounds apply to ts_init, so query whole local days
+        # Catalog queries filter start/end on ts_init (nautilus_trader crates/persistence
+        # common/datafusion.rs build_query), so query whole local days
         existing_days = _group_by_trading_day(
             catalog.query_bars(
                 identifiers=[BAR_TYPE],

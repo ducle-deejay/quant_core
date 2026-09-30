@@ -87,8 +87,7 @@ def test_notify_or_log_none_is_noop():
 
 
 def test_send_message_uses_html_parse_mode():
-    # DEC-012: the transport always sends parse_mode=HTML so formatter <pre>
-    # blocks render as monospace in Telegram.
+    # The default parse_mode is HTML so <pre> blocks in alert text are interpreted as markup.
     session = FakeSession()
     notifier = TelegramNotifier(TelegramConfig(bot_token="tok", chat_id="123"), session=session)
     notifier.send_message("<pre>DNSE  ✅ bars 241</pre>")

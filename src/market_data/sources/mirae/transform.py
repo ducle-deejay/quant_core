@@ -16,12 +16,14 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
 LOCAL_TIMEZONE = "Asia/Ho_Chi_Minh"
-# External payloads can include two session-boundary records at 11:30 and
-# 14:30 local time; the canonical session grid has 241 bars.
+# External payloads include two session-boundary records at 11:30 and 14:30 local
+# time (verified in data/raw/vietnam/{dnse,mirae}, 2026-09-30); the canonical session
+# grid has 241 bars (verified in data/catalog: 09:00-11:29, 13:00-14:29 and 14:45).
 BOUNDARY_PREDECESSORS = {(11, 30): (11, 29), (14, 30): (14, 29)}
 # Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
-# the interval close, so ts_init = ts_event + 1 minute. The 14:45 ATC bar is a single
-# closing-auction print known at 14:45, so its ts_init stays at ts_event.
+# the interval close, so ts_init = ts_event + 1 minute. The 14:45 bar is the ATC
+# (at-the-close auction) print, a single event known at 14:45 (HNX derivatives
+# closing auction 14:30-14:45; DNSE trading-hours guide), so its ts_init stays at ts_event.
 ATC_LOCAL_MINUTE = (14, 45)
 ONE_MINUTE_NS = 60_000_000_000
 
@@ -96,7 +98,8 @@ def _normalize_boundary_bars(
     *,
     bar_type: object,
 ) -> pd.DataFrame:
-    """Merge session-boundary rows for the target external bar type."""
+    """Merge 11:30/14:30 boundary rows into the preceding minute and keep only
+    canonical session minutes; no-op for other bar types."""
     if str(bar_type) != BAR_TYPE or frame.empty:
         return frame
 

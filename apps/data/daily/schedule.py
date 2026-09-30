@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 DEFAULT_CONFIG = HERE / "config" / "pipeline.json"
 LABEL = "io.quant-core.daily-data-etl"
-RUN_HOUR = 16  # after the VN close (14:45) so the day's bars are complete
+RUN_HOUR = 16  # after the VN close (14:45, HNX derivatives close) so the day's bars are complete
 RUN_MINUTE = 0
 
 
@@ -69,9 +69,9 @@ def _launch_agent(
         "StartCalendarInterval": {
             "Hour": RUN_HOUR,
             "Minute": RUN_MINUTE,
-            # Mon-Fri only (launchd 1=Sunday..7=Saturday): on non-trading days
-            # DNSE returns no bars and the Mirae fallback has no payload, which
-            # would fail the run and spam alerts every weekend.
+            # Mon-Fri only (launchd.plist(5): 1=Monday, 0 and 7=Sunday): assumed
+            # that on non-trading days DNSE returns no bars and the Mirae
+            # fallback has no payload, failing the run and alerting.
             "Weekday": [1, 2, 3, 4, 5],
         },
         "WorkingDirectory": str(ROOT),

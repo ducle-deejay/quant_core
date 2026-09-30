@@ -1,7 +1,7 @@
 """Daily extract, transform, and load (ETL) orchestration for market data.
 
-Runs DNSE first, then uses Mirae candlesticks to fill only catalog-absent
-timestamps. Final coverage is judged after both sources, and the aggregated
+Runs DNSE first, then uses Mirae candlesticks to backfill days where DNSE
+left bars missing. Final coverage is judged after both sources, and the aggregated
 result or failure is sent through the Telegram notifier.
 
 Source settings are loaded from a JSON object. The DNSE runner reads
@@ -33,7 +33,7 @@ SourceRunner = Callable[[date], dict[str, object]]
 
 
 class DailyDataPipelineError(RuntimeError):
-    """Both sources failed, or bars remain missing after the Mirae backfill."""
+    """DNSE failed, or bars remain missing after the Mirae backfill."""
 
     def __init__(
         self,
@@ -127,11 +127,6 @@ def _mirae_added_timestamps(report: dict[str, object] | None) -> set[int]:
     return {int(timestamp) for timestamp in value} if isinstance(value, list) else set()
 
 
-# --------------------------------------------------------------------------- #
-# Composition helpers (used by apps/data/daily/pipeline.py)
-# --------------------------------------------------------------------------- #
-
-
 def dnse_runner(config: dict[str, Any]) -> SourceRunner:
     """DNSE source runner; reports missing timestamps in its report."""
 
@@ -197,21 +192,15 @@ def load_json_config(path: Path) -> dict[str, Any]:
     return payload
 
 
-# --------------------------------------------------------------------------- #
-# Telegram alert formatting (unified template, DEC-012)
-#
-# Header : <icon> QC-<DOMAIN> <EVENT> | <date> [<time>] | <verdict>
-# Body   : monospace <pre> block, source-grouped, thousands separators
-# Footer : only when actionable
-# --------------------------------------------------------------------------- #
-
-
 def alert_success(
     day: date,
     report: dict[str, object],
     run_duration: str | None = None,
 ) -> str:
-    """[QC-DATA] success alert: per-source bullet counts, verdict OK."""
+    """[QC-DATA] success alert: per-source bullet counts, verdict OK.
+
+    QC-DATA is the job label printed in data ETL alerts.
+    """
     dnse = report.get("dnse")
     mirae = report.get("mirae")
     dnse_counts = _records(dnse)
@@ -247,7 +236,7 @@ def alert_failure(
     report: dict[str, object] | None,
     run_duration: str | None = None,
 ) -> str:
-    """[QC-DATA] run-failure alert: the error, catalog untouched."""
+    """[QC-DATA] failure alert; lists each failed source's stage and exception."""
     source_errors = getattr(error, "source_errors", None)
     if isinstance(source_errors, dict) and source_errors:
         details = "\n\n".join(
@@ -282,7 +271,7 @@ def _elapsed_text(elapsed_seconds: float) -> str:
 
 
 def alert_bootstrap_failure(day: date, error: Exception) -> str:
-    """[QC-DATA] startup alert (DEC-012): any failure before the run starts."""
+    """[QC-DATA] startup alert: any failure before the run starts."""
     return (
         "Job: QC-DATA ETL\n"
         f"Run date: {day:%d-%m-%Y}\n"
@@ -293,7 +282,7 @@ def alert_bootstrap_failure(day: date, error: Exception) -> str:
 
 
 def format_run_missing(day: date) -> str:
-    """[QC-DATA] heartbeat alert (DEC-012): the scheduled run never happened."""
+    """[QC-DATA] heartbeat alert: the scheduled run never happened."""
     return (
         "Job: QC-DATA ETL\n"
         f"Run date: {day:%d-%m-%Y}\n"
@@ -325,8 +314,8 @@ def run_and_alert(
 ) -> dict[str, object]:
     """Run the daily pipeline and send the corresponding Telegram alert.
 
-    ``raise_on_error`` opts out of the failure-safe contract (DEC-012): the
-    ETL entrypoint passes True so an undeliverable alert fails the run loudly.
+    ``raise_on_error=True`` propagates alert delivery errors instead of
+    logging and suppressing them.
     """
     started_at = monotonic()
     try:
