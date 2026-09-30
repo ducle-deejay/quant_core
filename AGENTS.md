@@ -10,6 +10,27 @@ When asked what the project is, what it is for, or what its goal is, answer at t
 
 Treat notation as a correctness boundary. Within a defined scope, use one stable name for one concept and one meaning for one name. Define non-obvious symbols, units, conventions, and namespaces before use; qualify collisions by owner, layer, or namespace. When established vocabularies differ, state their mapping and authority rather than silently renaming them. Resolve any plausible ambiguity before designing, implementing, or testing.
 
+## Comments and docstrings
+
+A comment states only what the code cannot: why it is written this way, or an
+outside fact it depends on.
+
+1. **Code is the authority.** Treat every comment as an unverified claim. When a
+   comment and the code disagree, the code wins; check the code before relying on
+   a comment for a design or an edit.
+2. **Outside facts carry evidence.** A claim about a venue, SDK, library, or market
+   rule is verified (repo data and code, official documentation, or the user) and
+   names its source. Do not write hedged claims; ask the user when a fact cannot
+   be verified.
+3. **No cross-file sync claims.** Do not write that code matches, mirrors, or
+   follows another file; enforce that with shared code or a test.
+4. **Describe, do not prescribe.** No setup, deployment, or workflow instructions
+   in source; those belong in documentation.
+5. **No restatement.** Omit docstrings that repeat the name, signature, or type,
+   and labels that carry no information.
+6. **Framework terms keep their meaning.** Do not reuse a term the framework
+   defines for a different concept.
+
 ## Communication style
 
 1. **Answer first.** The first sentence responds to what was asked. No greetings, no restating the request, no confirmation phrases, no closing summary, no offer of further help unless requested.
@@ -42,6 +63,8 @@ You are working in a repo:
   use.
 - Notation discipline: within a defined scope, one concept has one stable
   name and one name has one meaning; define or qualify ambiguity before use.
+- Comments are claims, not ground truth: verify against the code before
+  relying on them.
 ```
 
 ## Harness notes
