@@ -100,6 +100,9 @@ class FakeDnseTradingClient:
 
 
 class FakeDnseRestClient:
+    def get_instruments(self, **kwargs: object) -> tuple[int, str]:
+        return 200, '{"data": []}'
+
     def get_ohlc(self, **kwargs: object) -> tuple[int, dict]:
         return 200, {"t": [], "o": [], "h": [], "l": [], "c": [], "v": []}
 

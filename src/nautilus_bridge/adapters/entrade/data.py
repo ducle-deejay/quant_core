@@ -56,6 +56,8 @@ from nautilus_trader.model import (
 )
 from nautilus_trader.persistence import ParquetDataCatalog
 
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResolver
+
 from .config import DnseDataClientConfig
 from .constants import ATC_LOCAL_MINUTE
 from .constants import CONTINUOUS_SESSIONS_LOCAL
@@ -226,6 +228,7 @@ def dnse_quote_to_nautilus_quote_tick(
     volume_precision: int = 0,
     timezone_name: str = VN_TZ,
     fallback_ts_ns: int = 0,
+    symbol: str | None = None,
 ) -> QuoteTick:
     """Convert a DNSE top-of-book quote to a Nautilus QuoteTick."""
     best_bid = quote.best_bid
@@ -235,7 +238,7 @@ def dnse_quote_to_nautilus_quote_tick(
 
     ts_event, ts_init = dnse_payload_timestamps(quote, timezone_name, fallback_ts_ns)
     return QuoteTick(
-        instrument_id=InstrumentId(Symbol(quote.symbol), Venue(venue)),
+        instrument_id=InstrumentId(Symbol(symbol or quote.symbol), Venue(venue)),
         bid_price=dnse_price(best_bid[0], price_precision),
         ask_price=dnse_price(best_ask[0], price_precision),
         bid_size=dnse_quantity(best_bid[1], volume_precision),
@@ -275,6 +278,7 @@ def dnse_quote_to_nautilus_depth10(
     volume_precision: int = 0,
     timezone_name: str = VN_TZ,
     fallback_ts_ns: int = 0,
+    symbol: str | None = None,
 ) -> OrderBookDepth10:
     """Convert a DNSE top-price payload (ten levels per side) to a Depth10 snapshot."""
     ts_event, ts_init = dnse_payload_timestamps(quote, timezone_name, fallback_ts_ns)
@@ -282,7 +286,7 @@ def dnse_quote_to_nautilus_depth10(
     asks, ask_counts = dnse_levels_to_book_orders(quote.offer, OrderSide.SELL, price_precision, volume_precision)
     # DNSE does not expose order counts per level; the level size stands in for it.
     return OrderBookDepth10(
-        instrument_id=InstrumentId(Symbol(quote.symbol), Venue(venue)),
+        instrument_id=InstrumentId(Symbol(symbol or quote.symbol), Venue(venue)),
         bids=bids,
         asks=asks,
         bid_counts=bid_counts,
@@ -301,6 +305,7 @@ def dnse_trade_to_nautilus_trade_tick(
     volume_precision: int = 0,
     timezone_name: str = VN_TZ,
     fallback_ts_ns: int = 0,
+    symbol: str | None = None,
 ) -> TradeTick:
     """Convert a DNSE trade tick to a Nautilus TradeTick.
 
@@ -309,7 +314,7 @@ def dnse_trade_to_nautilus_trade_tick(
     """
     ts_event, ts_init = dnse_payload_timestamps(trade, timezone_name, fallback_ts_ns)
     return TradeTick(
-        instrument_id=InstrumentId(Symbol(trade.symbol), Venue(venue)),
+        instrument_id=InstrumentId(Symbol(symbol or trade.symbol), Venue(venue)),
         price=dnse_price(trade.price, price_precision),
         size=dnse_quantity(trade.quantity, volume_precision),
         aggressor_side=AggressorSide.NO_AGGRESSOR,
@@ -527,6 +532,10 @@ class DnseLiveDataClient(MarketDataClient):
         self._quote_symbols: set[str] = set()
         self._book_symbols: set[str] = set()
         self._trade_symbols: set[str] = set()
+        self._venue_symbols: dict[str, str] = {}
+        self._resolver = VN30F1MResolver(
+            lambda: [] if self.instrument_provider is None else self.instrument_provider.list_all(),
+        )
         self._closing = False
         self._stream_stop_reported = False
         self._last_minute_bar_received_ns: int | None = None
@@ -560,6 +569,7 @@ class DnseLiveDataClient(MarketDataClient):
             self._catalog = ParquetDataCatalog(str(self._catalog_path))
         if self.instrument_provider is None:
             raise RuntimeError("The DNSE data client requires an instrument provider")
+        self.instrument_provider.set_client(self._rest_client)
         await self.instrument_provider.initialize()
         if self._config.use_dnse_working_dates and not self._market_working_dates:
             delays = (*WORKING_DATES_RETRY_DELAYS_SECONDS, None)
@@ -860,7 +870,7 @@ class DnseLiveDataClient(MarketDataClient):
     def _on_quote_event(self, quote: Quote) -> None:
         if quote.boardId and quote.boardId != DNSE_MAIN_BOARD:
             return
-        symbol = quote.symbol
+        symbol = self._nautilus_symbol(quote.symbol)
         if symbol in self._quote_symbols:
             self._handle_data(
                 dnse_quote_to_nautilus_quote_tick(
@@ -870,6 +880,7 @@ class DnseLiveDataClient(MarketDataClient):
                     volume_precision=self._config.volume_precision,
                     timezone_name=self._config.timezone_name,
                     fallback_ts_ns=self.clock.timestamp_ns(),
+                    symbol=symbol,
                 ),
             )
         if symbol in self._book_symbols:
@@ -881,13 +892,15 @@ class DnseLiveDataClient(MarketDataClient):
                     volume_precision=self._config.volume_precision,
                     timezone_name=self._config.timezone_name,
                     fallback_ts_ns=self.clock.timestamp_ns(),
+                    symbol=symbol,
                 ),
             )
 
     def _on_trade_event(self, trade: Trade) -> None:
         if trade.boardId and trade.boardId != DNSE_MAIN_BOARD:
             return
-        if trade.symbol not in self._trade_symbols:
+        symbol = self._nautilus_symbol(trade.symbol)
+        if symbol not in self._trade_symbols:
             return
         self._handle_data(
             dnse_trade_to_nautilus_trade_tick(
@@ -897,6 +910,7 @@ class DnseLiveDataClient(MarketDataClient):
                 volume_precision=self._config.volume_precision,
                 timezone_name=self._config.timezone_name,
                 fallback_ts_ns=self.clock.timestamp_ns(),
+                symbol=symbol,
             ),
         )
 
@@ -942,6 +956,7 @@ class DnseLiveDataClient(MarketDataClient):
         while not self._closing:
             await asyncio.sleep(BAR_WATCHDOG_INTERVAL_SECONDS)
             await self._check_bar_watchdog(self.clock.timestamp_ns())
+            await self._roll_streams()
 
     async def _check_bar_watchdog(self, now_ns: int) -> None:
         """Log an ERROR when one-minute bars stop arriving during a continuous session."""
@@ -1074,6 +1089,38 @@ class DnseLiveDataClient(MarketDataClient):
 
         return parse_working_dates_body(body)
 
+    def _venue_symbol(self, symbol: str) -> str:
+        instrument_id = InstrumentId(Symbol(symbol), Venue(self._config.venue))
+        venue_id = self._resolver.to_venue(instrument_id, self.clock.timestamp_ns())
+        self._venue_symbols[symbol] = venue_id.symbol.value
+        return venue_id.symbol.value
+
+    def _nautilus_symbol(self, venue_symbol: str) -> str:
+        instrument_id = InstrumentId(Symbol(venue_symbol), Venue(self._config.venue))
+        return self._resolver.to_nautilus(instrument_id, self.clock.timestamp_ns()).symbol.value
+
+    async def _roll_streams(self) -> None:
+        for symbol, old in list(self._venue_symbols.items()):
+            new = self._venue_symbol(symbol)
+            if new == old:
+                continue
+            self._log.info(f"Rolling {symbol} tick and quote streams from {old} to {new}")
+            assert self._trading_client is not None
+            if symbol in self._trade_symbols:
+                await self._trading_client.unsubscribe(
+                    f"tick.{DNSE_MAIN_BOARD}.{self._channel_suffix}", [old],
+                )
+                await self._trading_client.subscribe_trades(
+                    symbols=[new], encoding=self._config.ws_encoding, board_id=DNSE_MAIN_BOARD,
+                )
+            if symbol in self._quote_stream_symbols:
+                await self._trading_client.unsubscribe(
+                    f"top_price.{DNSE_MAIN_BOARD}.{self._channel_suffix}", [old],
+                )
+                await self._trading_client.subscribe_quotes(
+                    symbols=[new], encoding=self._config.ws_encoding, board_id=DNSE_MAIN_BOARD,
+                )
+
     @property
     def _channel_suffix(self) -> str:
         return "msgpack" if self._config.ws_encoding == "msgpack" else "json"
@@ -1084,7 +1131,9 @@ class DnseLiveDataClient(MarketDataClient):
         if self._trading_client is None:
             raise RuntimeError("DNSE data client is not connected")
         await self._trading_client.subscribe_quotes(
-            symbols=sorted(self._quote_stream_symbols | {symbol}),
+            symbols=[
+                self._venue_symbol(s) for s in sorted(self._quote_stream_symbols | {symbol})
+            ],
             encoding=self._config.ws_encoding,
             board_id=DNSE_MAIN_BOARD,
         )
@@ -1097,7 +1146,7 @@ class DnseLiveDataClient(MarketDataClient):
             raise RuntimeError("DNSE data client is not connected")
         await self._trading_client.unsubscribe(
             f"top_price.{DNSE_MAIN_BOARD}.{self._channel_suffix}",
-            [symbol],
+            [self._venue_symbols[symbol]],
         )
         self._quote_stream_symbols.discard(symbol)
 
@@ -1189,7 +1238,7 @@ class DnseLiveDataClient(MarketDataClient):
         self._trade_symbols.add(symbol)
         try:
             await self._trading_client.subscribe_trades(
-                symbols=sorted(self._trade_symbols),
+                symbols=[self._venue_symbol(s) for s in sorted(self._trade_symbols)],
                 encoding=self._config.ws_encoding,
                 board_id=DNSE_MAIN_BOARD,
             )
@@ -1205,7 +1254,7 @@ class DnseLiveDataClient(MarketDataClient):
             raise RuntimeError("DNSE data client is not connected")
         await self._trading_client.unsubscribe(
             f"tick.{DNSE_MAIN_BOARD}.{self._channel_suffix}",
-            [symbol],
+            [self._venue_symbols[symbol]],
         )
         self._trade_symbols.discard(symbol)
 

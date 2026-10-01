@@ -136,6 +136,9 @@ class FakeDnseTradingClient:
 
 
 class FakeDnseRestClient:
+    def get_instruments(self, **kwargs: object) -> tuple[int, str]:
+        return 200, '{"data": []}'
+
     def __init__(
         self,
         status: int = 200,
@@ -1407,3 +1410,38 @@ def test_requests_exception_is_an_unknown_outcome_not_an_http_answer() -> None:
         client.get_order(1)
     assert error.value.status_code is None
 
+
+
+class FakeDnseRestClientWithContracts(FakeDnseRestClient):
+    final_trade_dates = {"41I1GA000": "2026-10-15T00:00:00Z", "41I1GB000": "2026-11-19T00:00:00Z"}
+
+    def get_instruments(self, **kwargs: object) -> tuple[int, str]:
+        records = [
+            {"symbol": "41I1GA000", "symbolType": "VN30F1M"},
+            {"symbol": "41I1GB000", "symbolType": "VN30F2M"},
+        ]
+        return 200, json.dumps({"data": records})
+
+    def get_security_definition(self, symbol: str, **kwargs: object) -> tuple[int, str]:
+        return 200, json.dumps([{"finalTradeDate": self.final_trade_dates[symbol]}])
+
+
+def test_vn30f1m_trades_follow_the_front_month_contract_through_expiry() -> None:
+    def local_ns(*args: int) -> int:
+        return int(pd.Timestamp(*args, tz="Asia/Ho_Chi_Minh").value)
+
+    clock = FakeClock(local_ns(2026, 10, 15, 14, 44))
+    client, trading, _ = _dnse_client(rest=FakeDnseRestClientWithContracts(), clock=clock)
+    asyncio.run(client._connect())
+    asyncio.run(client._subscribe_trades(SimpleNamespace(instrument_id=InstrumentId.from_str("VN30F1M.HNX"))))
+
+    trading.emit("trade", _trade("41I1GA000"))
+    clock.now_ns = local_ns(2026, 10, 15, 14, 46)
+    asyncio.run(client._roll_streams())
+    trading.emit("trade", _trade("41I1GA000"))
+    trading.emit("trade", _trade("41I1GB000"))
+
+    trade_symbols = [kwargs["symbols"] for kind, kwargs in trading.subscriptions if kind == "trade"]
+    assert trade_symbols == [["41I1GA000"], ["41I1GB000"]]
+    assert trading.unsubscribes == [("tick.G1.json", ["41I1GA000"])]
+    assert [str(tick.instrument_id) for tick in client.data] == ["VN30F1M.HNX", "VN30F1M.HNX"]
