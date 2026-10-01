@@ -6,6 +6,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from tabulate import tabulate
 
 from nautilus_trader.backtest import BacktestNode
@@ -13,6 +14,8 @@ from nautilus_trader.backtest import BacktestResult
 from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.config import TearsheetConfig
 from nautilus_trader.analysis import create_tearsheet
+
+from nautilus_bridge.backtest.run_window import period_label
 
 def render_metrics(
     result: BacktestResult,
@@ -69,6 +72,9 @@ def analyze(
         theme="nautilus_dark"
     )
 
+    start = pd.Timestamp(run_configs.start, tz="UTC")
+    end = pd.Timestamp(run_configs.end, tz="UTC")
+    print(f"Period: {period_label(start, end)}")
     render_metrics(results[0], stats_returns=True)
 
     tearsheet = create_tearsheet(
