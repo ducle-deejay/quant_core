@@ -30,8 +30,8 @@ from nautilus_trader.config import LoggerConfig
 from nautilus_trader.backtest import BacktestNode
 from nautilus_trader.execution import PerContractFeeModel
 
-from nautilus_bridge.actors.directional import DirectionalActor
-from nautilus_bridge.actors.directional import DirectionalActorConfig
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActor
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActorConfig
 from nautilus_bridge.strategies.directional import DirectionalStrategy
 from nautilus_bridge.strategies.directional import DirectionalStrategyConfig
 
@@ -103,7 +103,7 @@ run_configs = BacktestRunConfig(
     dispose_on_completion=False,
 )
 
-actor_configs = DirectionalActorConfig(
+actor_configs = DirectionalAlphaActorConfig(
     instrument_id=INSTRUMENT_ID,
     bar_type=TARGET_BAR_TYPE
 )
@@ -115,7 +115,7 @@ strategy_configs = DirectionalStrategyConfig(
     manage_gtd_expiry=True,
 )
 
-actor = DirectionalActor(
+actor = DirectionalAlphaActor(
     config=actor_configs
 )
 

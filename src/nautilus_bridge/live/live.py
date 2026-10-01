@@ -35,8 +35,8 @@ from nautilus_trader.model import TraderId
 
 from nautilus_bridge.actors.data_monitor import DataMonitorActor
 from nautilus_bridge.actors.data_monitor import DataMonitorActorConfig
-from nautilus_bridge.actors.directional import DirectionalActor
-from nautilus_bridge.actors.directional import DirectionalActorConfig
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActor
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActorConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
 from nautilus_bridge.adapters.entrade.api.entrade_api import resolve_entrade_account_ids
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
@@ -132,8 +132,8 @@ def build_node() -> LiveNode:
         ),
     )
     node.add_actor(
-        DirectionalActor(
-            DirectionalActorConfig(instrument_id=INSTRUMENT_ID, bar_type=TARGET_BAR_TYPE),
+        DirectionalAlphaActor(
+            DirectionalAlphaActorConfig(instrument_id=INSTRUMENT_ID, bar_type=TARGET_BAR_TYPE),
         ),
     )
     node.add_strategy(

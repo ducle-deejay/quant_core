@@ -32,8 +32,8 @@ from nautilus_trader.live import QueueMonitorConfig
 
 from nautilus_bridge.actors.data_monitor import DataMonitorActor
 from nautilus_bridge.actors.data_monitor import DataMonitorActorConfig
-from nautilus_bridge.actors.directional import DirectionalActor
-from nautilus_bridge.actors.directional import DirectionalActorConfig
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActor
+from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActorConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import resolve_entrade_account_ids
 from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
@@ -81,10 +81,10 @@ def add_data_monitor(node: LiveNode) -> None:
     node.add_actor(TopicLogger("app.data_health.*"))
 
 
-def add_directional_actor(node: LiveNode) -> None:
+def add_directional_alpha(node: LiveNode) -> None:
     node.add_actor(
-        DirectionalActor(
-            DirectionalActorConfig(instrument_id=INSTRUMENT_ID, bar_type=TARGET_BAR_TYPE),
+        DirectionalAlphaActor(
+            DirectionalAlphaActorConfig(instrument_id=INSTRUMENT_ID, bar_type=TARGET_BAR_TYPE),
         ),
     )
 
@@ -111,7 +111,7 @@ class Component:
 
 COMPONENTS = {
     "data_monitor": Component(add_data_monitor),
-    "directional_actor": Component(add_directional_actor),
+    "directional_alpha": Component(add_directional_alpha),
     "directional_strategy": Component(add_directional_strategy, places_orders=True),
 }
 

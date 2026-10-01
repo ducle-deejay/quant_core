@@ -10,7 +10,7 @@ from nautilus_trader.model import InstrumentId
 
 from nautilus_bridge.data.custom_data import ExposureData
 
-class DirectionalActorConfig(DataActorConfig):
+class DirectionalAlphaActorConfig(DataActorConfig):
     def __init__(
         self,
         *,
@@ -23,11 +23,11 @@ class DirectionalActorConfig(DataActorConfig):
         self.bar_type = bar_type
 
 
-class DirectionalActor(DataActor):
+class DirectionalAlphaActor(DataActor):
     fast_ema_period = 10
     slow_ema_period = 20
 
-    def __init__(self, config: DirectionalActorConfig) -> None:
+    def __init__(self, config: DirectionalAlphaActorConfig) -> None:
         super().__init__(config)
         self.fast_ema = ExponentialMovingAverage(self.fast_ema_period)
         self.slow_ema = ExponentialMovingAverage(self.slow_ema_period)
