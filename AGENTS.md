@@ -44,11 +44,20 @@ outside fact it depends on.
 
 ## Commit message format
 
-Use `<type>(<scope>): <imperative summary>`.
+Follow this template exactly:
+
+    <type>(<scope>): <imperative summary>
+
+    Problem: <what was wrong or missing, and why it arose>
+
+    Fix:
+    - <area>: <what changed>
 
 - **Type:** `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, or `revert`.
 - **Scope:** one short, stable name for the affected component.
 - **Summary:** imperative present tense and states what the commit does.
+
+The message is read by people new to the code and by agents tracing history.
 
 ## Subagent handoff preamble
 
