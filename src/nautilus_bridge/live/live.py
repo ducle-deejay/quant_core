@@ -44,6 +44,7 @@ from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
 from nautilus_bridge.strategies.directional import DirectionalStrategy
+from nautilus_bridge.data.trading_days import CATALOG_PATH
 from nautilus_bridge.live.runner import run_node
 from nautilus_bridge.strategies.directional import DirectionalStrategyConfig
 
@@ -104,7 +105,8 @@ def build_node() -> LiveNode:
             DnseDataClientConfig(
                 api_key=os.environ["API_KEY"],
                 api_secret=os.environ["API_SECRET"],
-                historical_source="api",
+                historical_source="catalog",
+                catalog_path=str(CATALOG_PATH),
             ),
         )
         .add_exec_client(

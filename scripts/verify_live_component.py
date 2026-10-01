@@ -39,6 +39,7 @@ from nautilus_bridge.adapters.entrade.config import DnseDataClientConfig
 from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
+from nautilus_bridge.live.live import CATALOG_PATH
 from nautilus_bridge.live.live import CLIENT_NAME
 from nautilus_bridge.live.live import ENTRADE_ACCOUNT
 from nautilus_bridge.live.live import INSTRUMENT_ID
@@ -140,7 +141,8 @@ def build_node(selected: list[str]) -> LiveNode:
         DnseDataClientConfig(
             api_key=os.environ["API_KEY"],
             api_secret=os.environ["API_SECRET"],
-            historical_source="api",
+            historical_source="catalog",
+            catalog_path=str(CATALOG_PATH),
         ),
     )
     if any(COMPONENTS[name].places_orders for name in selected):
