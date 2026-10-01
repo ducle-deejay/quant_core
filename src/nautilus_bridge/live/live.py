@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -26,11 +27,14 @@ from nautilus_trader.live import LiveExecutionEngineConfig
 from nautilus_trader.live import LiveNode
 from nautilus_trader.live import LiveNodeBuilder
 from nautilus_trader.live import LiveNodeConfig
+from nautilus_trader.live import QueueMonitorConfig
 from nautilus_trader.model import BarType
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import StrategyId
 from nautilus_trader.model import TraderId
 
+from nautilus_bridge.actors.data_monitor import DataMonitorActor
+from nautilus_bridge.actors.data_monitor import DataMonitorActorConfig
 from nautilus_bridge.actors.directional import DirectionalActor
 from nautilus_bridge.actors.directional import DirectionalActorConfig
 from nautilus_bridge.adapters.entrade.api.entrade_api import EntradeAccount
@@ -85,6 +89,12 @@ def build_node() -> LiveNode:
         # Compare cached positions with Entrade every 60 s and query fills on a mismatch
         # (docs/how_to/configure_live_trading.md, "Continuous reconciliation").
         exec_engine=LiveExecutionEngineConfig(position_check_interval_secs=60.0),
+        queue_monitor=QueueMonitorConfig(
+            queue_depth_trigger=1_000,
+            queue_depth_clear=500,
+            mean_dispatch_ns_trigger=250_000,
+            mean_dispatch_ns_clear=150_000,
+        ),
     )
     node = (
         LiveNodeBuilder.from_config(NAME, config)
@@ -111,6 +121,16 @@ def build_node() -> LiveNode:
         .build()
     )
 
+    node.add_actor(
+        DataMonitorActor(
+            DataMonitorActorConfig(
+                instrument_id=INSTRUMENT_ID,
+                bar_type=TARGET_BAR_TYPE,
+                stale_after=timedelta(minutes=2),
+                max_latency=timedelta(seconds=5),
+            ),
+        ),
+    )
     node.add_actor(
         DirectionalActor(
             DirectionalActorConfig(instrument_id=INSTRUMENT_ID, bar_type=TARGET_BAR_TYPE),
