@@ -71,7 +71,7 @@ from nautilus_bridge.adapters.entrade.execution import (
 )
 from nautilus_bridge.adapters.entrade.providers import DnseInstrumentProvider
 from nautilus_bridge.adapters.entrade.providers import EntradeInstrumentProvider
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
+from nautilus_bridge.instruments.currencies import VND
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResolver
 
 NOW_NS = 1_800_000_000_000_000_000

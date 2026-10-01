@@ -6,8 +6,6 @@ from nautilus_trader.common import LogLevel
 from nautilus_trader.model import AccountType
 from nautilus_trader.model import BarType
 from nautilus_trader.model import BookType
-from nautilus_trader.model import Currency
-from nautilus_trader.model import CurrencyType
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import ExecAlgorithmId
 from nautilus_trader.model import Money
@@ -48,7 +46,7 @@ CATALOG_PATH = "/Users/ducle/repos/quant_core/data/catalog"
 
 INSTRUMENT_ID = InstrumentId.from_str("VN30F1M.HNX")
 
-TIME_FRAME = 15
+TIME_FRAME = 30 
 TARGET_BAR_TYPE = BarType.from_str(
     f"{INSTRUMENT_ID}-{TIME_FRAME}-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
 )
@@ -62,10 +60,6 @@ start_run, end_run = backtest_period(start=start, end=end)
 
 BOOK_SIZE = "100_000_000 VND"
 COMMISSION = "22750 VND"
-
-Currency.register(
-    Currency("VND", 0, 704, "Vietnamese dong", CurrencyType.FIAT),
-)
 
 bar_data = BacktestDataConfig(
     data_type="Bar",

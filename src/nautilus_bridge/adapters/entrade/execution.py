@@ -64,7 +64,7 @@ from .api.entrade_api import EntradeClient
 from .api.entrade_api import EntradeClientConfig
 from .api.entrade_api import investor_id_from_token
 from .providers import EntradeInstrumentProvider
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VND
+from nautilus_bridge.instruments.currencies import VND
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f_expiry_date
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VENUE
 

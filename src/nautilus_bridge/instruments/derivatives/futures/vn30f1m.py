@@ -11,8 +11,6 @@ from decimal import Decimal
 import pandas as pd
 from nautilus_trader.live.providers import InstrumentProvider
 from nautilus_trader.model import AssetClass
-from nautilus_trader.model import Currency
-from nautilus_trader.model import CurrencyType
 from nautilus_trader.model import FuturesContract
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import PerpetualContract
@@ -21,13 +19,14 @@ from nautilus_trader.model import Quantity
 from nautilus_trader.model import Symbol
 from nautilus_trader.model import Venue
 
+from nautilus_bridge.instruments.currencies import VND
+
 
 VENUE = Venue("HNX")
 EXCHANGE = "HSTC"
 UNDERLYING = "VN30"
 CONTINUOUS_SYMBOL = Symbol("VN30F1M")
 CONTINUOUS_ID = InstrumentId(CONTINUOUS_SYMBOL, VENUE)
-VND = Currency("VND", 0, 704, "Vietnamese dong", CurrencyType.FIAT)
 PRICE_INCREMENT = Price.from_str("0.1")
 PRICE_PRECISION = 1
 SIZE_INCREMENT = Quantity.from_int(1)
@@ -50,7 +49,6 @@ def build_monthly_futures_contract(
     info: dict[str, object] | None = None,
 ) -> FuturesContract:
     """Build one dated VN30 futures contract."""
-    _register_currency()
     instrument_id = InstrumentId(Symbol(symbol), VENUE)
     activation_ns = 0 if activation is None else pd.Timestamp(activation, tz="UTC").value
     expiration_ns = pd.Timestamp(expiration, tz="UTC").value
@@ -82,7 +80,6 @@ def build_continuous_futures_contract(
     ts_init: int | None = None,
 ) -> PerpetualContract:
     """Build the non-expiring VN30F1M execution proxy."""
-    _register_currency()
     instrument_id = InstrumentId(Symbol(symbol), VENUE)
     return PerpetualContract(
         instrument_id=instrument_id,
@@ -177,7 +174,3 @@ class VN30F1MResolver:
         if contract is not None and instrument_id == contract.id:
             return CONTINUOUS_ID
         return instrument_id
-
-
-def _register_currency() -> None:
-    Currency.register(VND, overwrite=True)
