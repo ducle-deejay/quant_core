@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from nautilus_trader.common import CacheConfig
 from nautilus_trader.common import LogLevel
 
@@ -31,8 +33,14 @@ from nautilus_trader.persistence import DataCatalogConfig
 from nautilus_trader.backtest import BacktestNode
 from nautilus_trader.execution import PerContractFeeModel
 
-from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActor
-from nautilus_bridge.actors.directional_alpha import DirectionalAlphaActorConfig
+from nautilus_trader.persistence import ParquetDataCatalog
+
+from nautilus_bridge.actors.vector_alpha import VectorAlphaActor
+from nautilus_bridge.actors.vector_alpha import VectorAlphaActorConfig
+from nautilus_bridge.alphas.ema_cross import ema_cross
+from nautilus_bridge.alphas.frame import bar_row
+from nautilus_bridge.alphas.frame import bars_frame
+from nautilus_bridge.alphas.frame import resample_session
 # from nautilus_bridge.execution.directional import TWAPModifiedAlgorithm
 # from nautilus_bridge.execution.directional import TWAPModifiedAlgorithmConfig
 from nautilus_bridge.backtest.run_window import backtest_period
@@ -46,10 +54,7 @@ CATALOG_PATH = "/Users/ducle/repos/quant_core/data/catalog"
 
 INSTRUMENT_ID = InstrumentId.from_str("VN30F1M.HNX")
 
-TIME_FRAME = 30 
-TARGET_BAR_TYPE = BarType.from_str(
-    f"{INSTRUMENT_ID}-{TIME_FRAME}-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
-)
+TIMEFRAME = pd.Timedelta(minutes=30)
 SOURCE_BAR_TYPE = BarType.from_str(
     f"{INSTRUMENT_ID}-1-MINUTE-LAST-EXTERNAL"
 )
@@ -110,10 +115,23 @@ run_configs = BacktestRunConfig(
     dispose_on_completion=False,
 )
 
-actor_configs = DirectionalAlphaActorConfig(
+source_bars = bars_frame(
+    bar_row(bar)
+    for bar in ParquetDataCatalog(CATALOG_PATH).query_bars(
+        [str(SOURCE_BAR_TYPE)],
+        end=end_run.value,
+    )
+)
+timeframe_bars = resample_session(source_bars, TIMEFRAME)
+precomputed_exposure = ema_cross(timeframe_bars)
+
+actor_configs = VectorAlphaActorConfig(
     instrument_id=INSTRUMENT_ID,
-    bar_type=TARGET_BAR_TYPE,
-    debug=True,
+    bar_type=SOURCE_BAR_TYPE,
+    timeframe=TIMEFRAME,
+    alpha_fn=ema_cross,
+    window=300,
+    precomputed_exposure=precomputed_exposure,
 )
 
 # execution_configs = TWAPModifiedAlgorithmConfig(
@@ -124,12 +142,12 @@ actor_configs = DirectionalAlphaActorConfig(
 strategy_configs = DirectionalStrategyConfig(
     strategy_id=StrategyId('VN30F1M-V1'),
     instrument_id=INSTRUMENT_ID,
-    bar_type=TARGET_BAR_TYPE,
+    bar_type=SOURCE_BAR_TYPE,
     manage_gtd_expiry=True,
     trade_size=1
 )
 
-actor = DirectionalAlphaActor(
+actor = VectorAlphaActor(
     config=actor_configs
 )
 
