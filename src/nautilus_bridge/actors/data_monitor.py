@@ -19,8 +19,8 @@ from nautilus_trader.model import BarType
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import TradeTick
 
-from nautilus_bridge.adapters.entrade.constants import CONTINUOUS_SESSIONS_LOCAL
 from nautilus_bridge.adapters.entrade.constants import VN_TZ
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 
 CHECK_TIMER_NAME = "data_monitor.check"
 
@@ -48,7 +48,7 @@ class DataMonitorActorConfig(DataActorConfig):
         stale_after: timedelta,
         max_latency: timedelta,
         check_interval: timedelta = timedelta(seconds=5),
-        sessions: tuple[tuple[time, time], ...] = CONTINUOUS_SESSIONS_LOCAL,
+        sessions: tuple[tuple[time, time], ...] = VN30F1M_SESSIONS.continuous,
         **_kwargs: object,
     ) -> None:
         super().__init__()

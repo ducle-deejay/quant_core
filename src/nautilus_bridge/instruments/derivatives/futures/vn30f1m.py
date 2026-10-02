@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
+from datetime import time
 from datetime import timedelta
 from decimal import Decimal
 
@@ -37,6 +39,39 @@ LOT_SIZE = Quantity.from_int(1)
 # (design decision).
 MARGIN_INIT = Decimal("0.2")
 MARGIN_MAINT = Decimal("0.12")
+
+
+@dataclass(frozen=True)
+class TradingSessions:
+    timezone: str
+    continuous: tuple[tuple[time, time], ...]
+    closing_auction: time
+
+    def session_minute_mask(self, timestamps: pd.Series) -> pd.Series:
+        minutes = self._local_minutes(timestamps)
+        mask = minutes.eq(_minute_of_day(self.closing_auction))
+        for start, end in self.continuous:
+            mask |= minutes.ge(_minute_of_day(start)) & minutes.lt(_minute_of_day(end))
+        return mask
+
+    def is_closing_auction(self, timestamp: pd.Timestamp) -> bool:
+        local = timestamp.tz_convert(self.timezone)
+        return local.hour * 60 + local.minute == _minute_of_day(self.closing_auction)
+
+    def _local_minutes(self, timestamps: pd.Series) -> pd.Series:
+        local = timestamps.dt.tz_convert(self.timezone)
+        return local.dt.hour * 60 + local.dt.minute
+
+
+def _minute_of_day(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
+VN30F1M_SESSIONS = TradingSessions(
+    timezone="Asia/Ho_Chi_Minh",
+    continuous=((time(9, 0), time(11, 30)), (time(13, 0), time(14, 30))),
+    closing_auction=time(14, 45),
+)
 
 
 def build_monthly_futures_contract(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -9,13 +9,12 @@ from nautilus_trader.model import FuturesContract
 
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     CONTINUOUS_SYMBOL,
+    VN30F1M_SESSIONS,
     build_monthly_futures_contract,
 )
 
 VN30_FRONT_MONTH_SYMBOL = CONTINUOUS_SYMBOL.value
 VN_TZINFO = ZoneInfo("Asia/Ho_Chi_Minh")
-# HNX index futures trade through 14:45 local time on the final trading day.
-VN30_MARKET_CLOSE_LOCAL = time(14, 45)
 UNKNOWN_ACTIVATION = datetime(1970, 1, 1, tzinfo=UTC)
 
 
@@ -48,7 +47,7 @@ class EntradeMonthlyContract:
     def trading_cutoff(self) -> datetime:
         return datetime.combine(
             self.expiration_date,
-            VN30_MARKET_CLOSE_LOCAL,
+            VN30F1M_SESSIONS.closing_auction,
             tzinfo=VN_TZINFO,
         ).astimezone(UTC)
 
@@ -56,7 +55,7 @@ class EntradeMonthlyContract:
     def expiration(self) -> datetime:
         return datetime.combine(
             self.expiration_date,
-            VN30_MARKET_CLOSE_LOCAL,
+            VN30F1M_SESSIONS.closing_auction,
             tzinfo=VN_TZINFO,
         ).astimezone(UTC)
 

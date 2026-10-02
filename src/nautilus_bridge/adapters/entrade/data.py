@@ -56,11 +56,10 @@ from nautilus_trader.model import (
 )
 from nautilus_trader.persistence import ParquetDataCatalog
 
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1MResolver
 
 from .config import DnseDataClientConfig
-from .constants import ATC_LOCAL_MINUTE
-from .constants import CONTINUOUS_SESSIONS_LOCAL
 from .constants import DNSE_MAIN_BOARD
 from .constants import NOT_IMPLEMENTED
 from .constants import SUPPORTED_DNSE_RESOLUTIONS
@@ -144,7 +143,7 @@ def dnse_bar_ts_init(bar_type: BarType, ts_event: int, timezone_name: str = VN_T
     """
     if bar_type.spec.aggregation in (BarAggregation.MINUTE, BarAggregation.HOUR):
         local = pd.Timestamp(ts_event, tz="UTC").tz_convert(timezone_name)
-        if (local.hour, local.minute) == ATC_LOCAL_MINUTE:
+        if VN30F1M_SESSIONS.is_closing_auction(local):
             return ts_event
     return ts_event + bar_interval_ns(bar_type)
 
@@ -984,7 +983,7 @@ class DnseLiveDataClient(MarketDataClient):
         ):
             return
         session_start = next(
-            (start for start, end in CONTINUOUS_SESSIONS_LOCAL if start <= now.time() < end),
+            (start for start, end in VN30F1M_SESSIONS.continuous if start <= now.time() < end),
             None,
         )
         if session_start is None:

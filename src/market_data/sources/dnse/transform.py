@@ -16,6 +16,7 @@ from nautilus_trader.model import OrderSide
 from nautilus_trader.model import TradeId
 from nautilus_trader.model import TradeTick
 
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     build_continuous_futures_contract,
 )
@@ -24,6 +25,7 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
 )
 from market_data.sources.dnse.quality import page_number
 from market_data.sources.dnse.quality import read_json
+from market_data.sources.legacy_boundary import legacy_boundary_record_mask
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
@@ -31,12 +33,10 @@ LOCAL_TIMEZONE = "Asia/Ho_Chi_Minh"
 # External payloads include two session-boundary records at 11:30 and 14:30 local
 # time (verified in data/raw/vietnam/{dnse,mirae}, 2026-09-30); the canonical session
 # grid has 241 bars (verified in data/catalog: 09:00-11:29, 13:00-14:29 and 14:45).
-BOUNDARY_PREDECESSORS = {(11, 30): (11, 29), (14, 30): (14, 29)}
 # Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
 # the interval close, so ts_init = ts_event + 1 minute. The 14:45 bar is the ATC
 # (at-the-close auction) print, a single event known at 14:45 (HNX derivatives
 # closing auction 14:30-14:45; DNSE trading-hours guide), so its ts_init stays at ts_event.
-ATC_LOCAL_MINUTE = (14, 45)
 ONE_MINUTE_NS = 60_000_000_000
 TRADE_PAGE_BATCH_SIZE = 50
 DEPTH_PAGE_BATCH_SIZE = 25
@@ -193,8 +193,7 @@ def _transform_bars(path: Path, instrument: Any) -> list[Any]:
 
 
 def _bar_ts_init(timestamp: pd.Timestamp, ts_event: int) -> int:
-    local = pd.Timestamp(timestamp).tz_convert(LOCAL_TIMEZONE)
-    if (local.hour, local.minute) == ATC_LOCAL_MINUTE:
+    if VN30F1M_SESSIONS.is_closing_auction(pd.Timestamp(timestamp)):
         return ts_event
     return ts_event + ONE_MINUTE_NS
 
@@ -209,32 +208,25 @@ def _normalize_boundary_bars(
     if str(bar_type) != BAR_TYPE or frame.empty:
         return frame
 
-    local_timestamps = frame["timestamp"].dt.tz_convert(LOCAL_TIMEZONE)
-    boundary_mask = (
-        local_timestamps.dt.hour.eq(11) & local_timestamps.dt.minute.eq(30)
-    ) | (
-        local_timestamps.dt.hour.eq(14) & local_timestamps.dt.minute.eq(30)
-    )
+    boundary_mask = legacy_boundary_record_mask(frame["timestamp"])
     normalized = frame.copy()
     boundary_indices: list[int] = []
     if boundary_mask.any():
         timestamp_indices = normalized.groupby("timestamp", sort=False).groups
         for index, row in normalized.loc[boundary_mask].iterrows():
             timestamp = pd.Timestamp(row["timestamp"])
-            local_timestamp = timestamp.tz_convert(LOCAL_TIMEZONE)
-            boundary_minute = (local_timestamp.hour, local_timestamp.minute)
-
             predecessor_timestamp = timestamp - pd.Timedelta(minutes=1)
             predecessor_indices = timestamp_indices.get(predecessor_timestamp, ())
             if len(predecessor_indices) == 0:
                 normalized.at[index, "timestamp"] = predecessor_timestamp
                 continue
             if len(predecessor_indices) != 1:
-                expected_minute = BOUNDARY_PREDECESSORS[boundary_minute]
+                expected_minute = predecessor_timestamp.tz_convert(
+                    VN30F1M_SESSIONS.timezone,
+                ).strftime("%H:%M")
                 raise ValueError(
                     "Cannot normalize VN30F1M.HNX one-minute bar at "
-                    f"{timestamp}: expected exactly one {expected_minute[0]:02d}:"
-                    f"{expected_minute[1]:02d} predecessor",
+                    f"{timestamp}: expected exactly one {expected_minute} predecessor",
                 )
 
             predecessor_index = predecessor_indices[0]
@@ -253,19 +245,7 @@ def _normalize_boundary_bars(
         if boundary_indices:
             normalized = normalized.drop(index=boundary_indices)
 
-    local_timestamps = normalized["timestamp"].dt.tz_convert(LOCAL_TIMEZONE)
-    canonical_mask = (
-        (
-            local_timestamps.dt.hour.eq(9)
-            | local_timestamps.dt.hour.eq(10)
-            | (local_timestamps.dt.hour.eq(11) & local_timestamps.dt.minute.le(29))
-        )
-        | (
-            local_timestamps.dt.hour.eq(13)
-            | (local_timestamps.dt.hour.eq(14) & local_timestamps.dt.minute.le(29))
-        )
-        | (local_timestamps.dt.hour.eq(14) & local_timestamps.dt.minute.eq(45))
-    )
+    canonical_mask = VN30F1M_SESSIONS.session_minute_mask(normalized["timestamp"])
     return normalized.loc[canonical_mask].reset_index(drop=True)
 
 

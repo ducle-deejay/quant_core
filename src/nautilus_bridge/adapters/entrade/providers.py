@@ -14,13 +14,13 @@ from nautilus_trader.model import Symbol
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     CONTINUOUS_SYMBOL,
     VENUE,
+    VN30F1M_SESSIONS,
     build_continuous_futures_contract,
     build_monthly_futures_contract,
 )
 
 from .config import DnseDataClientConfig
 from .api.contracts import UNKNOWN_ACTIVATION
-from .api.contracts import VN30_MARKET_CLOSE_LOCAL
 from .api.contracts import VN_TZINFO
 from .api.contracts import EntradeMonthlyContract, resolve_active_contract
 from .api.entrade_api import EntradeClient
@@ -70,7 +70,7 @@ class DnseInstrumentProvider(InstrumentProvider):
             final_trade_date = date.fromisoformat(definition[0]["finalTradeDate"][:10])
             expiration = datetime.combine(
                 final_trade_date,
-                VN30_MARKET_CLOSE_LOCAL,
+                VN30F1M_SESSIONS.closing_auction,
                 tzinfo=VN_TZINFO,
             ).astimezone(UTC)
             contracts.append(
