@@ -1,94 +1,86 @@
-"""Test Telegram notifier environment parsing, HTML transport, and failures.
-
-Covers optional configuration, HTML escaping, no-op behavior, logged errors,
-and opt-in error propagation.
-"""
+"""Test Discord webhook configuration, payload, delivery failures, and error fencing."""
 
 from __future__ import annotations
 
 import contextlib
 import io
 
-from market_data.notify import TelegramConfig
-from market_data.notify import TelegramNotifier
-from market_data.notify import esc
-from market_data.notify import notifier_from_env
+import pytest
+
+from market_data.notify import FIELD_VALUE_LIMIT
+from market_data.notify import RED
+from market_data.notify import Alert
+from market_data.notify import DiscordWebhook
+from market_data.notify import code_block
+from market_data.notify import data_notifier_from_env
 from market_data.notify import notify_or_log
 
 
 class FakeResponse:
-    status_code = 200
-    content = b"{}"
-
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        self.text = "" if status_code < 300 else "rate limited"
 
 
 class FakeSession:
-    def __init__(self):
+    def __init__(self, status_code: int = 204):
+        self.status_code = status_code
         self.calls: list[tuple[str, dict]] = []
 
     def post(self, url, *, json=None, timeout=None):
         self.calls.append((url, json or {}))
-        return FakeResponse({"ok": True})
+        return FakeResponse(self.status_code)
 
 
 class RaisingNotifier:
-    def __init__(self, error: Exception):
-        self.error = error
-
-    def send_message(self, text: str):
-        raise self.error
+    def send(self, alert: Alert):
+        raise RuntimeError("boom")
 
 
-def test_notifier_from_env_requires_both(monkeypatch):
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
-    assert notifier_from_env() is None
+ALERT = Alert(summary="❌ Data 2026-10-05 failed — retry at 17:00", color=RED, fields=(("Step: DNSE extract", "x", False),))
 
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
-    assert notifier_from_env() is None  # chat id missing
 
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
-    notifier = notifier_from_env()
-    assert isinstance(notifier, TelegramNotifier)
-    assert notifier.config.bot_token == "tok"
-    assert notifier.config.chat_id == "123"
+def test_data_notifier_needs_the_webhook_url(monkeypatch):
+    monkeypatch.delenv("DATA_DISCORD_WEBHOOK_URL", raising=False)
+    assert data_notifier_from_env() is None
+    monkeypatch.setenv("DATA_DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/token")
+    assert isinstance(data_notifier_from_env(), DiscordWebhook)
+
+
+def test_send_posts_the_summary_and_one_colored_embed():
+    session = FakeSession()
+    DiscordWebhook("https://hook", session=session).send(ALERT)
+    [(url, payload)] = session.calls
+    assert url == "https://hook"
+    assert payload["username"] == "Data Pipeline"
+    assert payload["content"] == ALERT.summary
+    assert payload["embeds"] == [
+        {"color": RED, "fields": [{"name": "Step: DNSE extract", "value": "x", "inline": False}]},
+    ]
+
+
+def test_send_raises_when_discord_rejects_the_message():
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        DiscordWebhook("https://hook", session=FakeSession(429)).send(ALERT)
 
 
 def test_notify_or_log_swallows_errors():
     buffer = io.StringIO()
     with contextlib.redirect_stderr(buffer):
-        notify_or_log(RaisingNotifier(RuntimeError("boom")), "hello")
-    assert "Telegram notification failed" in buffer.getvalue()
+        notify_or_log(RaisingNotifier(), ALERT)
+    assert "Alert delivery failed" in buffer.getvalue()
 
 
 def test_notify_or_log_raises_when_requested():
-    try:
-        notify_or_log(RaisingNotifier(RuntimeError("boom")), "hello", raise_on_error=True)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("expected RuntimeError")
+    with pytest.raises(RuntimeError):
+        notify_or_log(RaisingNotifier(), ALERT, raise_on_error=True)
 
 
 def test_notify_or_log_none_is_noop():
-    notify_or_log(None, "hello")  # must not raise
+    notify_or_log(None, ALERT)
 
 
-def test_send_message_uses_html_parse_mode():
-    # The default parse_mode is HTML so <pre> blocks in alert text are interpreted as markup.
-    session = FakeSession()
-    notifier = TelegramNotifier(TelegramConfig(bot_token="tok", chat_id="123"), session=session)
-    notifier.send_message("<pre>DNSE  ✅ bars 241</pre>")
-    _, payload = session.calls[0]
-    assert payload["parse_mode"] == "HTML"
-    assert payload["text"] == "<pre>DNSE  ✅ bars 241</pre>"
-
-
-def test_esc_html_escapes_dynamic_values():
-    assert esc("<a&b>") == "&lt;a&amp;b&gt;"
-    assert esc("plain") == "plain"
+def test_code_block_keeps_the_end_of_a_long_error():
+    fenced = code_block("x" * 5000 + "ValueError: the real cause")
+    assert len(fenced) <= FIELD_VALUE_LIMIT
+    assert fenced.endswith("ValueError: the real cause\n```")

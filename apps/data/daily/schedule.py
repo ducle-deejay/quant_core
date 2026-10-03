@@ -13,14 +13,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from market_data.daily import INGEST_AFTER
+from market_data.daily import INGEST_ERROR_LOG
+from market_data.daily import RUN_HOURS
 
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 DEFAULT_CONFIG = HERE / "config" / "pipeline.json"
 LABEL = "io.quant-core.daily-data-etl"
-# Each run ingests only the days the catalog still lacks, so the later runs retry a failed one
-RUN_HOURS = range(INGEST_AFTER.hour, INGEST_AFTER.hour + 5)
 
 
 def main() -> None:
@@ -76,7 +76,7 @@ def _launch_agent(
         ],
         "WorkingDirectory": str(ROOT),
         "StandardOutPath": str(ROOT / "data" / "logs" / "daily-etl.out.log"),
-        "StandardErrorPath": str(ROOT / "data" / "logs" / "daily-etl.err.log"),
+        "StandardErrorPath": str(ROOT / INGEST_ERROR_LOG),
         "EnvironmentVariables": {
             "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
             "PYTHONUNBUFFERED": "1",

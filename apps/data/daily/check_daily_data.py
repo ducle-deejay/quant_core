@@ -1,5 +1,5 @@
-"""Daily data check: alerts for each recent trading day the catalog holds fewer than a full session
-of bars for. Exits 1 when bars are missing, 0 otherwise.
+"""Daily data check: alerts for each recent trading day the catalog does not fully hold.
+Exits 1 when data is missing, 0 otherwise.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from market_data.daily import count_day_bars
-from market_data.daily import format_run_missing
+from market_data.daily import alert_data_missing
+from market_data.daily import count_day_records
 from market_data.daily import load_json_config
 from market_data.daily import read_working_dates
 from market_data.daily import recent_trading_days
@@ -48,21 +48,25 @@ def main() -> None:
     except Exception as error:
         # A check that cannot decide which days to read must still alert
         print(f"daily data check: {type(error).__name__}: {error}", file=sys.stderr)
-        notify_or_log(notifier, format_run_missing(args.date or now.date()))
+        notify_or_log(notifier, alert_data_missing(args.date or now.date(), None, error))
         sys.exit(1)
 
     missing = False
     for day in days:
+        counts: tuple[int, int, int] | None = None
+        read_error: Exception | None = None
         try:
-            bars = count_day_bars(catalog_path, day)
+            counts = count_day_records(catalog_path, day)
         except Exception as error:
             print(f"daily data check {day}: {type(error).__name__}: {error}", file=sys.stderr)
-            bars = 0
-        print(f"daily data check {day}: {bars}/{FULL_DAY_BARS} bars")
-        if bars >= FULL_DAY_BARS:
-            continue
-        notify_or_log(notifier, format_run_missing(day))
-        print(f"DATA MISSING: {bars}/{FULL_DAY_BARS} bars for {day}", file=sys.stderr)
+            read_error = error
+        if counts is not None:
+            bars, trades, depth = counts
+            print(f"daily data check {day}: {bars}/{FULL_DAY_BARS} bars, {trades} trades, {depth} depth rows")
+            if bars >= FULL_DAY_BARS and trades and depth:
+                continue
+        notify_or_log(notifier, alert_data_missing(day, counts, read_error))
+        print(f"DATA MISSING for {day}", file=sys.stderr)
         missing = True
     if missing:
         sys.exit(1)

@@ -2,7 +2,7 @@
 
 Runs DNSE first, then uses Mirae candlesticks to backfill days where DNSE
 left bars missing. Final coverage is judged after both sources, the catalog is then consolidated,
-and the aggregated result or failure is sent through the Telegram notifier.
+and the result or failure is sent as a Discord alert.
 
 Source settings are loaded from a JSON object. The DNSE runner reads
 ``API_KEY`` and ``API_SECRET`` from the environment, while the notifier is
@@ -15,19 +15,24 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
 from datetime import time
 from datetime import timedelta
 from pathlib import Path
-from time import monotonic
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from nautilus_trader.persistence import ParquetDataCatalog
 
-from market_data.notify import TelegramNotifier
-from market_data.notify import esc
+from market_data.notify import GREEN
+from market_data.notify import RED
+from market_data.notify import YELLOW
+from market_data.notify import Alert
+from market_data.notify import DiscordWebhook
+from market_data.notify import code_block
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
 from market_data.sources.dnse.client import create_dnse_rest_client
@@ -46,7 +51,13 @@ SourceRunner = Callable[[date], dict[str, object]]
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
 CATCH_UP_TRADING_DAYS = 5
 INGEST_AFTER = time(16, 0)
+# Each run ingests only the days the catalog still lacks, so the later runs retry a failed one
+RUN_HOURS = tuple(range(INGEST_AFTER.hour, INGEST_AFTER.hour + 5))
+INGEST_ERROR_LOG = "data/logs/daily-etl.err.log"
 WORKING_DATES_FILE = "working_dates.json"
+# Blank inline field (zero-width space as name and value) that pads the Day and Attempt row of the
+# success alert, so Started, Finished and Duration share the next row
+EMPTY_INLINE_FIELD = ("\u200b", "\u200b", True)
 
 
 class DailyDataPipelineError(RuntimeError):
@@ -57,12 +68,14 @@ class DailyDataPipelineError(RuntimeError):
         message: str,
         *,
         source_errors: dict[str, Exception | None] | None = None,
+        missing_timestamps: list[int] | None = None,
     ) -> None:
         self.source_errors = {
             source: error
             for source, error in (source_errors or {}).items()
             if error is not None
         }
+        self.missing_timestamps = missing_timestamps or []
         super().__init__(message)
 
 
@@ -77,8 +90,8 @@ def run_daily(
     then consolidate the catalog.
 
     Returns the aggregated report. Raises DailyDataPipelineError when DNSE
-    failed outright or when timestamps remain missing after both sources; an
-    error from ``consolidate`` propagates unchanged.
+    failed outright or when timestamps remain missing after both sources, and
+    ETLStageError when consolidation fails.
     """
     dnse_report: dict[str, object] | None = None
     dnse_error: Exception | None = None
@@ -106,9 +119,13 @@ def run_daily(
         raise DailyDataPipelineError(
             f"{len(remaining)} one-minute bars remain missing after both sources",
             source_errors={"DNSE": dnse_error, "Mirae": mirae_error},
+            missing_timestamps=remaining,
         )
 
-    consolidate()
+    try:
+        consolidate()
+    except Exception as error:
+        raise ETLStageError(source="Catalog", stage="consolidate", cause=error) from error
 
     report: dict[str, object] = {
         "day": day.isoformat(),
@@ -244,21 +261,21 @@ def catalog_consolidator(config: dict[str, Any]) -> Callable[[], None]:
     return consolidate
 
 
-def count_day_bars(catalog_path: Path, day: date) -> int:
-    """One-minute bars stored for the local trading day ``day``."""
+def count_day_records(catalog_path: Path, day: date) -> tuple[int, int, int]:
+    """One-minute bars, trades and order book depth rows stored for the local trading day ``day``."""
+    catalog = ParquetDataCatalog(str(catalog_path))
     start, end = _local_day_bounds(day)
-    return len(ParquetDataCatalog(str(catalog_path)).query_bars([BAR_TYPE], start=start, end=end))
+    return (
+        len(catalog.query_bars([BAR_TYPE], start=start, end=end)),
+        len(catalog.query_trade_ticks(start=start, end=end)),
+        len(catalog.query_order_book_depths(start=start, end=end)),
+    )
 
 
 def day_is_complete(catalog_path: Path, day: date) -> bool:
     """A full session of bars plus trades and order book depth for ``day``."""
-    if count_day_bars(catalog_path, day) < FULL_DAY_BARS:
-        return False
-    catalog = ParquetDataCatalog(str(catalog_path))
-    start, end = _local_day_bounds(day)
-    return bool(catalog.query_trade_ticks(start=start, end=end)) and bool(
-        catalog.query_order_book_depths(start=start, end=end),
-    )
+    bars, trades, depth = count_day_records(catalog_path, day)
+    return bars >= FULL_DAY_BARS and trades > 0 and depth > 0
 
 
 def recent_trading_days(working_dates: set[date], now: datetime) -> list[date]:
@@ -286,7 +303,7 @@ def _local_day_bounds(day: date) -> tuple[int, int]:
     return start, pd.Timestamp(day + timedelta(days=1), tz=LOCAL_TIMEZONE).value - 1
 
 
-ROOT =Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _resolve_path(value: object) -> Path:
@@ -301,103 +318,141 @@ def load_json_config(path: Path) -> dict[str, Any]:
     return payload
 
 
-def alert_success(
+@dataclass(frozen=True)
+class RunAttempt:
+    label: str  # e.g. "2/5 (17:00)", or "manual" for a run started by hand
+    next_run: str | None  # the next scheduled run that retries, None after the last one
+
+
+def run_attempt(now: datetime | None) -> RunAttempt:
+    """Place a run within the day's schedule; ``None`` marks a manual run."""
+    if now is None:
+        return RunAttempt("manual", None)
+    done = [hour for hour in RUN_HOURS if hour <= now.hour]
+    later = [hour for hour in RUN_HOURS if hour > now.hour]
+    label = f"{len(done)}/{len(RUN_HOURS)} ({now:%H:%M})" if done else f"outside schedule ({now:%H:%M})"
+    next_run = f"{later[0]:02d}:{INGEST_AFTER.minute:02d}" if later else None
+    return RunAttempt(label, next_run)
+
+
+def alert_ingested(
     day: date,
     report: dict[str, object],
-    run_duration: str | None = None,
-) -> str:
-    """[QC-DATA] success alert: DNSE record counts, and Mirae added/skipped counts or its error.
-
-    QC-DATA is the job label printed in data ETL alerts.
-    """
-    dnse = report.get("dnse")
-    mirae = report.get("mirae")
-    dnse_counts = _records(dnse)
-    mirae_counts = _records(mirae)
-    dnse_block = (
-        "DNSE \u2705\n"
-        f"\u2022 bars: {_count(dnse_counts, 'Bar'):,}\n"
-        f"\u2022 trades: {_count(dnse_counts, 'TradeTick'):,}\n"
-        f"\u2022 book: {_count(dnse_counts, 'OrderBookDepth10'):,}"
-    )
+    run: tuple[tuple[str, str, bool], ...],
+    attempt: RunAttempt,
+) -> Alert:
+    dnse = _records(report.get("dnse"))
+    mirae_added = _count(_records(report.get("mirae")), "Bar")
     mirae_error = report.get("mirae_error")
+    bars = f"{FULL_DAY_BARS}/{FULL_DAY_BARS}" + (f" (Mirae added {mirae_added})" if mirae_added else "")
     if mirae_error:
-        mirae_block = f"Mirae \u274C\n\u2022 {esc(mirae_error)}"
+        mirae = code_block(mirae_error)
     else:
-        mirae_block = (
-            "Mirae \u2705\n"
-            f"\u2022 added: {_count(mirae_counts, 'Bar'):,}\n"
-            f"\u2022 skipped: {_count(mirae_counts, 'SkippedBar'):,}"
-        )
-    duration_line = f"Run duration: {run_duration}\n" if run_duration else ""
-    return (
-        "Job: QC-DATA ETL\n"
-        f"Run date: {day:%d-%m-%Y}\n"
-        f"{duration_line}"
-        "Status: \u2705 SUCCESS\n\n"
-        f"{dnse_block}\n{mirae_block}"
+        mirae = f"added {mirae_added} bars" if mirae_added else "not needed"
+    return Alert(
+        summary=f"⚠️ Data {day} ingested — Mirae backup down" if mirae_error else f"✅ Data {day} ingested",
+        color=YELLOW if mirae_error else GREEN,
+        fields=(
+            ("Day", str(day), True),
+            ("Attempt", attempt.label, True),
+            EMPTY_INLINE_FIELD,
+            *run,
+            ("Bars", bars, True),
+            ("Trades", f"{_count(dnse, 'TradeTick'):,}", True),
+            ("Order book", f"{_count(dnse, 'OrderBookDepth10'):,}", True),
+            ("Mirae", mirae, False),
+        ),
     )
 
 
-def alert_failure(
-    day: date,
+def alert_failed(
+    subject: str,
     error: Exception,
-    report: dict[str, object] | None,
-    run_duration: str | None = None,
-) -> str:
-    """[QC-DATA] failure alert; lists each failed source's stage and exception."""
-    source_errors = getattr(error, "source_errors", None)
-    if isinstance(source_errors, dict) and source_errors:
-        details = "\n\n".join(
-            _format_source_error(source, source_error)
-            for source, source_error in source_errors.items()
-        )
+    attempt: RunAttempt,
+    run: tuple[tuple[str, str, bool], ...] = (),
+    day: date | None = None,
+) -> Alert:
+    if attempt.next_run:
+        outlook = f"retry at {attempt.next_run}"
     else:
-        details = _format_exception(error)
-    duration_line = f"Run duration: {run_duration}\n" if run_duration else ""
-    return (
-        "Job: QC-DATA ETL\n"
-        f"Run date: {day:%d-%m-%Y}\n"
-        f"{duration_line}"
-        "Status: \u274C FAIL\n\n"
-        f"<code>{esc(details)}</code>"
+        outlook = "manual run" if attempt.label == "manual" else "no retry left"
+    fields = [
+        ("Day", str(day), True) if day else EMPTY_INLINE_FIELD,
+        ("Attempt", attempt.label, True),
+        ("Next retry", attempt.next_run or "none", True),
+        *run,
+    ]
+    fields += [(f"Step: {step}", code_block(detail), False) for step, detail in _failed_steps(error)]
+    fields.append(("Log", f"`{INGEST_ERROR_LOG}`", False))
+    return Alert(summary=f"❌ {subject} failed — {outlook}", color=RED, fields=tuple(fields))
+
+
+def alert_startup_failed(error: Exception) -> Alert:
+    return Alert(
+        summary="❌ Data pipeline could not start",
+        color=RED,
+        fields=(
+            ("Step: config load", code_block(_format_exception(error)), False),
+            ("Log", f"`{INGEST_ERROR_LOG}`", False),
+        ),
     )
 
 
-def _format_source_error(source: str, error: Exception) -> str:
+def alert_data_missing(day: date, counts: tuple[int, int, int] | None, error: Exception | None = None) -> Alert:
+    """``counts`` are the day's bars, trades and depth rows; None when they could not be read."""
+    if counts is None:
+        stored = (("Error", code_block(_format_exception(error)) if error else "unknown", False),)
+    else:
+        bars, trades, depth = counts
+        stored = (
+            ("Bars", f"{bars}/{FULL_DAY_BARS}", True),
+            ("Trades", f"{trades:,}" if trades else "missing", True),
+            ("Order book", f"{depth:,}" if depth else "missing", True),
+        )
+    return Alert(
+        summary=f"❌ Data {day} missing after all retries",
+        color=RED,
+        fields=(
+            *stored,
+            ("Attempts", f"{len(RUN_HOURS)}/{len(RUN_HOURS)} finished", True),
+            ("Fix", f"`.venv/bin/python3 apps/data/daily/pipeline.py --date {day}`", False),
+            ("Log", f"`{INGEST_ERROR_LOG}`", False),
+        ),
+    )
+
+
+def _failed_steps(error: Exception) -> list[tuple[str, str]]:
     if isinstance(error, ETLStageError):
-        return f"{source}\nstage: {error.stage}\nexception: {_format_exception(error.cause)}"
-    return f"{source}\nstage: unknown\nexception: {_format_exception(error)}"
+        return [(f"{error.source} {error.stage}", _format_exception(error.cause))]
+    if isinstance(error, DailyDataPipelineError):
+        steps = [
+            (f"{source} {source_error.stage}", _format_exception(source_error.cause))
+            if isinstance(source_error, ETLStageError)
+            else (source, _format_exception(source_error))
+            for source, source_error in error.source_errors.items()
+        ]
+        if error.missing_timestamps:
+            minutes = [
+                pd.Timestamp(ts, tz="UTC").tz_convert(LOCAL_TIMEZONE).strftime("%H:%M")
+                for ts in sorted(error.missing_timestamps)
+            ]
+            shown = ", ".join(minutes[:20]) + (" …" if len(minutes) > 20 else "")
+            steps.append(("coverage check", f"{len(minutes)} bars missing after both sources: {shown}"))
+        return steps or [("unknown", _format_exception(error))]
+    return [("unknown", _format_exception(error))]
 
 
 def _format_exception(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-def _elapsed_text(elapsed_seconds: float) -> str:
-    minutes, seconds = divmod(round(elapsed_seconds), 60)
-    return f"{minutes}m{seconds:02d}s"
-
-
-def alert_bootstrap_failure(day: date, error: Exception) -> str:
-    """[QC-DATA] startup alert: any failure before the run starts."""
+def _run_fields(started: datetime, finished: datetime) -> tuple[tuple[str, str, bool], ...]:
+    """Local start and end times of a run, and its length."""
+    minutes, seconds = divmod(round((finished - started).total_seconds()), 60)
     return (
-        "Job: QC-DATA ETL\n"
-        f"Run date: {day:%d-%m-%Y}\n"
-        "Status: \u274C FAIL\n\n"
-        f"<code>{esc(error)}</code>\n\n"
-        "check data/logs/daily-etl.err.log"
-    )
-
-
-def format_run_missing(day: date) -> str:
-    """[QC-DATA] heartbeat alert: the scheduled run never happened."""
-    return (
-        "Job: QC-DATA ETL\n"
-        f"Run date: {day:%d-%m-%Y}\n"
-        "Status: \U0001F6A8 Run Missing\n\n"
-        "expected 16:00 run not detected\n\n"
-        "check: launchctl list · data/logs/daily-etl.err.log"
+        ("Started", f"{started:%H:%M:%S}", True),
+        ("Finished", f"{finished:%H:%M:%S}", True),
+        ("Duration", f"{minutes}m{seconds:02d}s", True),
     )
 
 
@@ -419,15 +474,16 @@ def run_and_alert(
     run_dnse: SourceRunner,
     run_mirae: SourceRunner,
     consolidate: Callable[[], None],
-    notifier: TelegramNotifier | None,
+    notifier: DiscordWebhook | None,
+    attempt: RunAttempt,
     raise_on_error: bool = False,
 ) -> dict[str, object]:
-    """Run the daily pipeline and send the corresponding Telegram alert.
+    """Run the daily pipeline for ``day`` and send its alert.
 
     ``raise_on_error=True`` propagates alert delivery errors instead of
     logging and suppressing them.
     """
-    started_at = monotonic()
+    started = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
     try:
         report = run_daily(
             day=day,
@@ -438,13 +494,13 @@ def run_and_alert(
     except Exception as error:
         notify_or_log(
             notifier,
-            alert_failure(day, error, None, _elapsed_text(monotonic() - started_at)),
+            alert_failed(f"Data {day}", error, attempt, _run_fields(started, datetime.now(started.tzinfo)), day),
             raise_on_error=raise_on_error,
         )
         raise
     notify_or_log(
         notifier,
-        alert_success(day, report, _elapsed_text(monotonic() - started_at)),
+        alert_ingested(day, report, _run_fields(started, datetime.now(started.tzinfo)), attempt),
         raise_on_error=raise_on_error,
     )
     return report

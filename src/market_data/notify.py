@@ -1,10 +1,7 @@
-"""Send Telegram alerts for data ingestion and live trading.
+"""Send alerts to a Discord channel through an incoming webhook.
 
-The default, data, and trading notifier factories read their respective
-bot-token and chat-ID pairs from the environment. Messages use HTML parse
-mode and dynamic values are escaped. ``TelegramNotifier.send_message`` raises
-transport errors; ``notify_or_log`` logs and suppresses them by default, or
-propagates them when ``raise_on_error=True``.
+``DiscordWebhook.send`` raises on transport and HTTP errors; ``notify_or_log`` logs
+and suppresses them by default, or propagates them when ``raise_on_error=True``.
 """
 
 from __future__ import annotations
@@ -12,140 +9,82 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from html import escape
-from typing import Any
 
 import requests
 
 
-def esc(value: object) -> str:
-    """HTML-escape dynamic text embedded in alert messages (parse_mode=HTML)."""
-    return escape(str(value))
+GREEN = 0x2ECC71
+YELLOW = 0xF1C40F
+RED = 0xE74C3C
+FIELD_VALUE_LIMIT = 1024  # Discord docs, docs.discord.com/developers/resources/message, "Embed Limits"
 
 
 @dataclass(frozen=True)
-class TelegramConfig:
-    bot_token: str
-    chat_id: str | int
-    timeout_seconds: float = 15.0
-    api_base_url: str = "https://api.telegram.org"
+class Alert:
+    summary: str  # sent as the message text above the embed
+    color: int
+    fields: tuple[tuple[str, str, bool], ...] = ()  # (name, value, inline)
 
 
-class TelegramNotificationError(RuntimeError):
+def code_block(text: object, limit: int = FIELD_VALUE_LIMIT) -> str:
+    """Fence ``text`` for an embed field, keeping its end when it is too long."""
+    body = str(text).replace("```", "'''")
+    room = limit - len("```\n\n```")
+    if len(body) > room:
+        body = "…" + body[-(room - 1):]
+    return f"```\n{body}\n```"
+
+
+class DiscordWebhook:
     def __init__(
         self,
-        message: str,
+        url: str,
         *,
-        status_code: int | None = None,
-        payload: Any = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.payload = payload
-
-
-class TelegramNotifier:
-    """Send one text message per call; callers own retry policy."""
-
-    def __init__(
-        self,
-        config: TelegramConfig,
-        *,
+        username: str = "Data Pipeline",
         session: requests.Session | None = None,
+        timeout_seconds: float = 15.0,
     ) -> None:
-        self.config = config
+        self._url = url
+        self._username = username
         self._session = session or requests.Session()
+        self._timeout_seconds = timeout_seconds
 
-    def send_message(self, text: str, *, parse_mode: str = "HTML") -> dict[str, Any]:
-        if not text:
-            raise ValueError("Telegram message cannot be empty")
-
-        url = f"{self.config.api_base_url.rstrip('/')}/bot{self.config.bot_token}/sendMessage"
-        payload: dict[str, Any] = {"chat_id": self.config.chat_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        try:
-            response = self._session.post(
-                url,
-                json=payload,
-                timeout=self.config.timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise TelegramNotificationError(f"Telegram request failed: {exc}") from exc
-
-        try:
-            payload = response.json() if response.content else {}
-        except ValueError as exc:
-            raise TelegramNotificationError(
-                "Telegram returned a non-JSON response",
-                status_code=response.status_code,
-                payload=response.text,
-            ) from exc
-
+    def send(self, alert: Alert) -> None:
+        payload = {
+            "username": self._username,
+            "content": alert.summary,
+            "embeds": [
+                {
+                    "color": alert.color,
+                    "fields": [
+                        {"name": name, "value": value, "inline": inline}
+                        for name, value, inline in alert.fields
+                    ],
+                },
+            ],
+        }
+        response = self._session.post(self._url, json=payload, timeout=self._timeout_seconds)
         if not 200 <= response.status_code < 300:
-            raise TelegramNotificationError(
-                f"Telegram returned HTTP {response.status_code}",
-                status_code=response.status_code,
-                payload=payload,
-            )
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
-            raise TelegramNotificationError(
-                "Telegram rejected the message",
-                status_code=response.status_code,
-                payload=payload,
-            )
-        return payload
+            raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text[:200]}")
 
 
-def notifier_from_env(
-    *,
-    bot_token_env: str = "TELEGRAM_BOT_TOKEN",
-    chat_id_env: str = "TELEGRAM_CHAT_ID",
-) -> TelegramNotifier | None:
-    """Build a notifier from the environment, or None when unconfigured."""
-    bot_token = os.getenv(bot_token_env, "").strip()
-    chat_id = os.getenv(chat_id_env, "").strip()
-    if not bot_token and not chat_id:
-        return None
-    if not bot_token or not chat_id:
-        print(
-            f"Telegram skipped: {bot_token_env} and {chat_id_env} must be set together",
-            file=sys.stderr,
-        )
-        return None
-    return TelegramNotifier(
-        TelegramConfig(bot_token=bot_token, chat_id=chat_id),
-    )
-
-
-def data_notifier_from_env() -> TelegramNotifier | None:
-    """Alerts for data ingest: DATA_TELEGRAM_BOT_TOKEN / DATA_TELEGRAM_CHAT_ID."""
-    return notifier_from_env(
-        bot_token_env="DATA_TELEGRAM_BOT_TOKEN",
-        chat_id_env="DATA_TELEGRAM_CHAT_ID",
-    )
-
-
-def trading_notifier_from_env() -> TelegramNotifier | None:
-    """Alerts for live trading: TRADING_TELEGRAM_BOT_TOKEN / TRADING_TELEGRAM_CHAT_ID."""
-    return notifier_from_env(
-        bot_token_env="TRADING_TELEGRAM_BOT_TOKEN",
-        chat_id_env="TRADING_TELEGRAM_CHAT_ID",
-    )
+def data_notifier_from_env() -> DiscordWebhook | None:
+    """Data-ingest alerts go to DATA_DISCORD_WEBHOOK_URL; None when it is unset."""
+    url = os.getenv("DATA_DISCORD_WEBHOOK_URL", "").strip()
+    return DiscordWebhook(url) if url else None
 
 
 def notify_or_log(
-    notifier: TelegramNotifier | None,
-    text: str,
+    notifier: DiscordWebhook | None,
+    alert: Alert,
     *,
     raise_on_error: bool = False,
 ) -> None:
-    """Send through ``notifier``; never break the caller when it fails."""
     if notifier is None:
         return
     try:
-        notifier.send_message(text)
+        notifier.send(alert)
     except Exception as error:  # noqa: BLE001 - alerting is best-effort
         if raise_on_error:
             raise
-        print(f"Telegram notification failed: {error}", file=sys.stderr)
+        print(f"Alert delivery failed: {error}", file=sys.stderr)

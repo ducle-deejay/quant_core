@@ -25,9 +25,14 @@ from nautilus_trader.persistence import ParquetDataCatalog
 from market_data.daily import DailyDataPipelineError
 from market_data.daily import catalog_consolidator
 from market_data.daily import run_and_alert
+from market_data.daily import RunAttempt
+from market_data.daily import run_attempt
 from market_data.daily import recent_trading_days
 from market_data.daily import record_working_dates
 from market_data.daily import run_daily
+from market_data.notify import GREEN
+from market_data.notify import RED
+from market_data.notify import Alert
 from market_data.sources.mirae.load import FULL_DAY_BARS
 from market_data.sources.dnse.load import load_day
 from market_data.sources.mirae.transform import BAR_TYPE
@@ -37,6 +42,7 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_contin
 
 
 DAY = date(2026, 8, 30)
+AT_16 = datetime(2026, 8, 31, 16, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
 FULL_DNSE = {"records": {"Bar": 240}, "missing_bar_timestamps": []}
 DNSE_WITH_GAPS = {"records": {"Bar": 230}, "missing_bar_timestamps": [100, 101, 102]}
 MIRAE_ADDED_ALL = {"records": {"Bar": 3, "SkippedBar": 0, "added_bar_timestamps": [100, 101, 102]}}
@@ -45,10 +51,10 @@ MIRAE_ADDED_PARTIAL = {"records": {"Bar": 1, "SkippedBar": 0, "added_bar_timesta
 
 class RecordingNotifier:
     def __init__(self):
-        self.messages: list[str] = []
+        self.alerts: list[Alert] = []
 
-    def send_message(self, text: str):
-        self.messages.append(text)
+    def send(self, alert: Alert):
+        self.alerts.append(alert)
 
 
 def test_mirae_resolves_dnse_gaps_succeeds():
@@ -125,9 +131,12 @@ def _run_daily_data_check(tmp_path, n_bars):
         Bar(BarType.from_str(BAR_TYPE), price, price, price, price, instrument.make_qty(1), t.value, t.value + 60_000_000_000)
         for t in opens
     ])
+    _, _, trades, more_trades, depth = day_batches("2026-09-29", 100.0)
+    catalog.write_trade_ticks(trades + more_trades)
+    catalog.write_order_book_depths(depth)
     (tmp_path / "dnse.json").write_text(json.dumps({"catalog_path": str(tmp_path / "catalog")}))
     (tmp_path / "pipeline.json").write_text(json.dumps({"dnse_config": str(tmp_path / "dnse.json")}))
-    env = {**os.environ, "DATA_TELEGRAM_BOT_TOKEN": "", "DATA_TELEGRAM_CHAT_ID": ""}
+    env = {**os.environ, "DATA_DISCORD_WEBHOOK_URL": ""}
     script = Path(__file__).resolve().parents[3] / "apps" / "data" / "daily" / "check_daily_data.py"
     return subprocess.run(
         [sys.executable, str(script), "--config", str(tmp_path / "pipeline.json"), "--date", "2026-09-29"],
@@ -150,7 +159,7 @@ def test_daily_data_check_fails_when_bars_are_missing(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_run_and_alert_success_sends_alert():
+def test_run_and_alert_success_sends_one_green_alert():
     notifier = RecordingNotifier()
     run_and_alert(
         day=DAY,
@@ -158,27 +167,40 @@ def test_run_and_alert_success_sends_alert():
         consolidate=lambda: None,
         run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
         notifier=notifier,
+        attempt=run_attempt(AT_16),
     )
-    assert len(notifier.messages) == 1
-    assert "SUCCESS" in notifier.messages[0]
+    assert [alert.color for alert in notifier.alerts] == [GREEN]
+    assert notifier.alerts[0].summary == f"✅ Data {DAY} ingested"
 
 
-def test_run_and_alert_failure_sends_alert():
+@pytest.mark.parametrize(
+    ("run_dnse", "consolidate", "step"),
+    [
+        (lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")), lambda: None, "Step: DNSE"),
+        (lambda d: dict(FULL_DNSE), lambda: (_ for _ in ()).throw(OSError("disk full")), "Step: Catalog consolidate"),
+    ],
+)
+def test_run_and_alert_failure_names_the_failed_step_and_the_next_retry(run_dnse, consolidate, step):
     notifier = RecordingNotifier()
-    try:
+    with pytest.raises(Exception):
         run_and_alert(
             day=DAY,
-            run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
-            consolidate=lambda: None,
+            run_dnse=run_dnse,
+            consolidate=consolidate,
             run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
             notifier=notifier,
+            attempt=run_attempt(AT_16),
         )
-    except DailyDataPipelineError:
-        pass
-    else:
-        raise AssertionError("expected DailyDataPipelineError")
-    assert len(notifier.messages) == 1
-    assert "FAIL" in notifier.messages[0]
+    [alert] = notifier.alerts
+    assert alert.color == RED
+    assert alert.summary == f"❌ Data {DAY} failed — retry at 17:00"
+    assert any(name == step for name, _, _ in alert.fields)
+
+
+def test_run_attempt_places_a_run_in_the_schedule():
+    assert run_attempt(AT_16) == RunAttempt("1/5 (16:00)", "17:00")
+    assert run_attempt(AT_16.replace(hour=20)) == RunAttempt("5/5 (20:00)", None)
+    assert run_attempt(None) == RunAttempt("manual", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -190,13 +212,10 @@ def test_pipeline_bootstrap_failure_alerts_and_exits_nonzero():
     repo_root = Path(__file__).resolve().parents[3]
     pipeline = repo_root / "apps" / "data" / "daily" / "pipeline.py"
     env = dict(os.environ)
-    # Blank the Telegram vars so the test never touches the network; the
-    # notifier becomes None and the bootstrap alert is a no-op, while the
-    # exit code and stderr still prove the guard fired.
-    env["DATA_TELEGRAM_BOT_TOKEN"] = ""
-    env["DATA_TELEGRAM_CHAT_ID"] = ""
-    env["TRADING_TELEGRAM_BOT_TOKEN"] = ""
-    env["TRADING_TELEGRAM_CHAT_ID"] = ""
+    # Blank the webhook so the test never touches the network; the notifier
+    # becomes None and the startup alert is a no-op, while the exit code and
+    # stderr still prove the guard fired.
+    env["DATA_DISCORD_WEBHOOK_URL"] = ""
     result = subprocess.run(
         [
             sys.executable,
