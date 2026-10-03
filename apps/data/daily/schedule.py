@@ -66,14 +66,10 @@ def _launch_agent(
             "--config",
             str(config_path),
         ],
-        "StartCalendarInterval": {
-            "Hour": RUN_HOUR,
-            "Minute": RUN_MINUTE,
-            # Mon-Fri only (launchd.plist(5): 1=Monday, 0 and 7=Sunday): assumed
-            # that on non-trading days DNSE returns no bars and the Mirae
-            # fallback has no payload, failing the run and alerting.
-            "Weekday": [1, 2, 3, 4, 5],
-        },
+        # launchd.plist(5): Weekday takes one integer (1 = Monday), so each weekday is its own interval
+        "StartCalendarInterval": [
+            {"Hour": RUN_HOUR, "Minute": RUN_MINUTE, "Weekday": weekday} for weekday in range(1, 6)
+        ],
         "WorkingDirectory": str(ROOT),
         "StandardOutPath": str(ROOT / "data" / "logs" / "daily-etl.out.log"),
         "StandardErrorPath": str(ROOT / "data" / "logs" / "daily-etl.err.log"),
