@@ -1,8 +1,8 @@
 """Daily extract, transform, and load (ETL) orchestration for market data.
 
 Runs DNSE first, then uses Mirae candlesticks to backfill days where DNSE
-left bars missing. Final coverage is judged after both sources, and the aggregated
-result or failure is sent through the Telegram notifier.
+left bars missing. Final coverage is judged after both sources, the catalog is then consolidated,
+and the aggregated result or failure is sent through the Telegram notifier.
 
 Source settings are loaded from a JSON object. The DNSE runner reads
 ``API_KEY`` and ``API_SECRET`` from the environment, while the notifier is
@@ -17,6 +17,8 @@ from datetime import date
 from pathlib import Path
 from time import monotonic
 from typing import Any
+
+from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.notify import TelegramNotifier
 from market_data.notify import esc
@@ -54,11 +56,14 @@ def run_daily(
     day: date,
     run_dnse: SourceRunner,
     run_mirae: SourceRunner,
+    consolidate: Callable[[], None],
 ) -> dict[str, object]:
-    """Run DNSE first, then Mirae; judge final coverage after both sources.
+    """Run DNSE first, then Mirae; judge final coverage after both sources,
+    then consolidate the catalog.
 
     Returns the aggregated report. Raises DailyDataPipelineError when DNSE
-    failed outright or when timestamps remain missing after both sources.
+    failed outright or when timestamps remain missing after both sources; an
+    error from ``consolidate`` propagates unchanged.
     """
     dnse_report: dict[str, object] | None = None
     dnse_error: Exception | None = None
@@ -87,6 +92,8 @@ def run_daily(
             f"{len(remaining)} one-minute bars remain missing after both sources",
             source_errors={"DNSE": dnse_error, "Mirae": mirae_error},
         )
+
+    consolidate()
 
     report: dict[str, object] = {
         "day": day.isoformat(),
@@ -173,6 +180,19 @@ def mirae_runner(mirae_config: dict[str, Any], dnse_config: dict[str, Any]) -> S
         )
 
     return run
+
+
+def catalog_consolidator(config: dict[str, Any]) -> Callable[[], None]:
+    """Merge the files of every catalog data directory into one file.
+
+    Daily ingest adds one file per day; a backtest warmup request that spans the
+    time between two files receives no bars.
+    """
+
+    def consolidate() -> None:
+        ParquetDataCatalog(str(_resolve_path(config["catalog_path"]))).consolidate_catalog()
+
+    return consolidate
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -309,6 +329,7 @@ def run_and_alert(
     day: date,
     run_dnse: SourceRunner,
     run_mirae: SourceRunner,
+    consolidate: Callable[[], None],
     notifier: TelegramNotifier | None,
     raise_on_error: bool = False,
 ) -> dict[str, object]:
@@ -319,7 +340,12 @@ def run_and_alert(
     """
     started_at = monotonic()
     try:
-        report = run_daily(day=day, run_dnse=run_dnse, run_mirae=run_mirae)
+        report = run_daily(
+            day=day,
+            run_dnse=run_dnse,
+            run_mirae=run_mirae,
+            consolidate=consolidate,
+        )
     except Exception as error:
         notify_or_log(
             notifier,

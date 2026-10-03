@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from market_data.daily import alert_bootstrap_failure
+from market_data.daily import catalog_consolidator
 from market_data.daily import dnse_runner
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
@@ -78,6 +79,7 @@ def main() -> None:
             day=day,
             run_dnse=dnse_runner(dnse_config),
             run_mirae=mirae_runner(mirae_config, dnse_config),
+            consolidate=catalog_consolidator(dnse_config),
             notifier=notifier,
             raise_on_error=True,
         )

@@ -1,7 +1,8 @@
 """Test DNSE-first fallback, coverage, and alert behavior for daily ETL runs.
 
 Covers Mirae backfills of DNSE gaps, source failures, final coverage checks,
-alert formatting and delivery, and bootstrap configuration failures.
+alert formatting and delivery, bootstrap configuration failures, and catalog
+consolidation.
 """
 
 from __future__ import annotations
@@ -12,16 +13,25 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from nautilus_trader.model import Bar  # noqa: E402
+from nautilus_trader.model import BarType  # noqa: E402
+from nautilus_trader.persistence import ParquetDataCatalog  # noqa: E402
 
 from market_data.daily import DailyDataPipelineError  # noqa: E402
 from market_data.daily import _remaining_missing  # noqa: E402
 from market_data.daily import alert_bootstrap_failure  # noqa: E402
 from market_data.daily import alert_failure  # noqa: E402
 from market_data.daily import alert_success  # noqa: E402
+from market_data.daily import catalog_consolidator  # noqa: E402
 from market_data.daily import format_run_missing  # noqa: E402
 from market_data.daily import run_and_alert  # noqa: E402
 from market_data.daily import run_daily  # noqa: E402
+from market_data.sources.mirae.transform import BAR_TYPE  # noqa: E402
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_continuous_futures_contract  # noqa: E402
 
 
 DAY = date(2026, 8, 30)
@@ -52,6 +62,7 @@ def test_dnse_ok_mirae_ok():
     report = run_daily(
         day=DAY,
         run_dnse=lambda d: dict(FULL_DNSE),
+        consolidate=lambda: None,
         run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
     )
     assert report["day"] == DAY.isoformat()
@@ -62,6 +73,7 @@ def test_mirae_resolves_dnse_gaps_succeeds():
     report = run_daily(
         day=DAY,
         run_dnse=lambda d: dict(DNSE_WITH_GAPS),
+        consolidate=lambda: None,
         run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
     )
     assert report["mirae"]["records"]["Bar"] == 3
@@ -72,6 +84,7 @@ def test_remaining_gaps_after_both_sources_fails():
         run_daily(
             day=DAY,
             run_dnse=lambda d: dict(DNSE_WITH_GAPS),
+            consolidate=lambda: None,
             run_mirae=lambda d: dict(MIRAE_ADDED_PARTIAL),
         )
     except DailyDataPipelineError as error:
@@ -85,6 +98,7 @@ def test_dnse_failed_raises_even_if_mirae_ok():
         run_daily(
             day=DAY,
             run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
+            consolidate=lambda: None,
             run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
         )
     except DailyDataPipelineError as error:
@@ -97,6 +111,7 @@ def test_mirae_failure_covered_by_dnse_is_warning_not_failure():
     report = run_daily(
         day=DAY,
         run_dnse=lambda d: dict(FULL_DNSE),
+        consolidate=lambda: None,
         run_mirae=lambda d: (_ for _ in ()).throw(RuntimeError("mirae down")),
     )
     assert report["mirae_error"] == "mirae down"
@@ -109,6 +124,27 @@ def test_remaining_missing_math():
     assert _remaining_missing(dict(DNSE_WITH_GAPS), dict(MIRAE_ADDED_PARTIAL)) == [101, 102]
     assert _remaining_missing(dict(DNSE_WITH_GAPS), dict(MIRAE_ADDED_NONE)) == [100, 101, 102]
     assert _remaining_missing(None, None) == []
+
+
+def test_consolidation_leaves_one_covered_range_per_directory(tmp_path):
+    instrument = build_continuous_futures_contract()
+    bar_type = BarType.from_str(BAR_TYPE)
+    price = instrument.make_price(100.0)
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_instruments([instrument])
+    for day in ("2026-09-29", "2026-09-30"):  # one write per day, as the daily ingest does
+        opens = pd.date_range(f"{day} 09:00", periods=3, freq="min", tz="Asia/Ho_Chi_Minh")
+        catalog.write_bars([
+            Bar(bar_type, price, price, price, price, instrument.make_qty(1), t.value, t.value + 60_000_000_000)
+            for t in opens
+        ])
+    intervals = catalog.get_intervals("bars", BAR_TYPE)
+    assert len(intervals) == 2
+
+    catalog_consolidator({"catalog_path": str(tmp_path)})()
+
+    assert catalog.get_intervals("bars", BAR_TYPE) == [(intervals[0][0], intervals[-1][1])]
+    assert len(catalog.query_bars([BAR_TYPE])) == 6
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +211,7 @@ def test_run_and_alert_success_sends_alert():
     run_and_alert(
         day=DAY,
         run_dnse=lambda d: dict(FULL_DNSE),
+        consolidate=lambda: None,
         run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
         notifier=notifier,
     )
@@ -188,6 +225,7 @@ def test_run_and_alert_failure_sends_alert():
         run_and_alert(
             day=DAY,
             run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
+            consolidate=lambda: None,
             run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
             notifier=notifier,
         )
@@ -210,6 +248,7 @@ def test_run_and_alert_swallows_notify_error_by_default():
             run_and_alert(
                 day=DAY,
                 run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
+                consolidate=lambda: None,
                 run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
                 notifier=RaisingNotifier(RuntimeError("telegram down")),
             )
@@ -225,6 +264,7 @@ def test_run_and_alert_raise_on_error_propagates_notify_failure():
         run_and_alert(
             day=DAY,
             run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
+            consolidate=lambda: None,
             run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
             notifier=RaisingNotifier(RuntimeError("telegram down")),
             raise_on_error=True,
