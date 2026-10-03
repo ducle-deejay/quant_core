@@ -51,7 +51,7 @@ def extract_day(
     if day.weekday() >= 5:
         return None
 
-    working_dates = _get_working_dates(client_factory)
+    working_dates = get_working_dates(client_factory)
     if not working_dates:
         raise ValueError("DNSE returned no working dates")
     if day == today and day not in working_dates:
@@ -190,7 +190,7 @@ def _source_event_at(value: Any) -> str | None:
     return timestamp.astimezone(UTC).isoformat()
 
 
-def _get_working_dates(client_factory: ClientFactory) -> set[date]:
+def get_working_dates(client_factory: ClientFactory) -> set[date]:
     client, observed = client_factory()
     payload = _decode_response(*client.get_working_dates())[1]
     _ensure_quota(observed[-1] if observed else None)

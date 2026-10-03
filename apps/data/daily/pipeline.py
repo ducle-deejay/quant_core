@@ -17,8 +17,11 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from market_data.daily import alert_bootstrap_failure
+from market_data.daily import alert_failure
 from market_data.daily import catalog_consolidator
+from market_data.daily import days_to_ingest
 from market_data.daily import dnse_runner
+from market_data.daily import dnse_working_dates
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
 from market_data.daily import run_and_alert
@@ -39,8 +42,9 @@ def main() -> None:
       load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero.
     - The success/failure alert is sent with ``raise_on_error=True``: an
       undeliverable alert fails the run loudly instead of pretending success.
-    - Exits non-zero when DNSE failed or bars remain missing after both
-      sources.
+    - Without ``--date``, ingests every recent trading day the catalog does not
+      fully hold, so a later scheduled run retries a failed day.
+    - Exits non-zero when any day failed.
     """
     parser = argparse.ArgumentParser(description="Run the daily DNSE + Mirae data pipelines")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -69,20 +73,41 @@ def main() -> None:
         print(f"STARTUP FAILED: {error}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        report = run_and_alert(
-            day=day,
-            run_dnse=dnse_runner(dnse_config),
-            run_mirae=mirae_runner(mirae_config, dnse_config),
-            consolidate=catalog_consolidator(dnse_config),
-            notifier=notifier,
-            raise_on_error=True,
-        )
-    except Exception as error:
-        print(json.dumps({"day": day.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
-        sys.exit(1)
+    if args.date:
+        days = [args.date]
+    else:
+        try:
+            days = days_to_ingest(
+                catalog_path=_resolve(dnse_config["catalog_path"]),
+                working_dates=dnse_working_dates(),
+                now=datetime.now(LOCAL_TIMEZONE),
+            )
+        except Exception as error:
+            notify_or_log(notifier, alert_failure(day, error, None), raise_on_error=True)
+            print(json.dumps({"day": day.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
+            sys.exit(1)
+        if not days:
+            print(f"{day}: the catalog holds every recent trading day")
+            return
 
-    print(json.dumps(_slim_report(report), indent=2, sort_keys=True))
+    failed = False
+    for day in days:
+        try:
+            report = run_and_alert(
+                day=day,
+                run_dnse=dnse_runner(dnse_config),
+                run_mirae=mirae_runner(mirae_config, dnse_config),
+                consolidate=catalog_consolidator(dnse_config),
+                notifier=notifier,
+                raise_on_error=True,
+            )
+        except Exception as error:
+            print(json.dumps({"day": day.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
+            failed = True
+            continue
+        print(json.dumps(_slim_report(report), indent=2, sort_keys=True))
+    if failed:
+        sys.exit(1)
 
 
 def _slim_report(report: dict[str, object]) -> dict[str, object]:

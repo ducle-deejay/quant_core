@@ -12,13 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from market_data.daily import INGEST_AFTER
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 DEFAULT_CONFIG = HERE / "config" / "pipeline.json"
 LABEL = "io.quant-core.daily-data-etl"
-RUN_HOUR = 16  # after the VN close (14:45, HNX derivatives close) so the day's bars are complete
-RUN_MINUTE = 0
+# Each run ingests only the days the catalog still lacks, so the later runs retry a failed one
+RUN_HOURS = range(INGEST_AFTER.hour, INGEST_AFTER.hour + 5)
 
 
 def main() -> None:
@@ -68,7 +70,9 @@ def _launch_agent(
         ],
         # launchd.plist(5): Weekday takes one integer (1 = Monday), so each weekday is its own interval
         "StartCalendarInterval": [
-            {"Hour": RUN_HOUR, "Minute": RUN_MINUTE, "Weekday": weekday} for weekday in range(1, 6)
+            {"Hour": hour, "Minute": INGEST_AFTER.minute, "Weekday": weekday}
+            for weekday in range(1, 6)
+            for hour in RUN_HOURS
         ],
         "WorkingDirectory": str(ROOT),
         "StandardOutPath": str(ROOT / "data" / "logs" / "daily-etl.out.log"),

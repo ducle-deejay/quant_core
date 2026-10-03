@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from datetime import date
+from datetime import datetime
+from datetime import time
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic
@@ -27,9 +29,11 @@ from market_data.notify import esc
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
 from market_data.sources.dnse.client import create_dnse_rest_client
+from market_data.sources.dnse.extract import get_working_dates
 from market_data.sources.dnse.pipeline import retained_contract_symbol
 from market_data.sources.dnse.pipeline import run_daily as run_dnse_daily
 from market_data.sources.mirae.extract import request_mirae_history
+from market_data.sources.mirae.load import FULL_DAY_BARS
 from market_data.sources.mirae.pipeline import run_daily as run_mirae_daily
 from market_data.sources.mirae.transform import BAR_TYPE
 from market_data.sources.mirae.transform import LOCAL_TIMEZONE
@@ -38,6 +42,8 @@ from market_data.sources.mirae.transform import LOCAL_TIMEZONE
 SourceRunner = Callable[[date], dict[str, object]]
 
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
+CATCH_UP_TRADING_DAYS = 5
+INGEST_AFTER = time(16, 0)
 
 
 class DailyDataPipelineError(RuntimeError):
@@ -140,23 +146,28 @@ def _mirae_added_timestamps(report: dict[str, object] | None) -> set[int]:
     return {int(timestamp) for timestamp in value} if isinstance(value, list) else set()
 
 
+def _dnse_client_factory() -> tuple[Any, list[Any]]:
+    api_key = os.getenv("API_KEY")
+    api_secret = os.getenv("API_SECRET")
+    if not api_key or not api_secret:
+        raise RuntimeError("API_KEY and API_SECRET must be defined in .env")
+    observed: list[Any] = []
+    client = create_dnse_rest_client(
+        api_key=api_key,
+        api_secret=api_secret,
+        rate_limit_observer=observed.append,
+    )
+    return client, observed
+
+
+def dnse_working_dates() -> set[date]:
+    return get_working_dates(_dnse_client_factory)
+
+
 def dnse_runner(config: dict[str, Any]) -> SourceRunner:
     def run(day: date) -> dict[str, object]:
-        def client_factory() -> tuple[Any, list[Any]]:
-            api_key = os.getenv("API_KEY")
-            api_secret = os.getenv("API_SECRET")
-            if not api_key or not api_secret:
-                raise RuntimeError("API_KEY and API_SECRET must be defined in .env")
-            observed: list[Any] = []
-            client = create_dnse_rest_client(
-                api_key=api_key,
-                api_secret=api_secret,
-                rate_limit_observer=observed.append,
-            )
-            return client, observed
-
         return run_dnse_daily(
-            client_factory=client_factory,
+            client_factory=_dnse_client_factory,
             raw_root=_resolve_path(config["raw_root"]),
             catalog_path=_resolve_path(config["catalog_path"]),
             continuous_symbol=str(config["instrument"]),
@@ -206,9 +217,39 @@ def catalog_consolidator(config: dict[str, Any]) -> Callable[[], None]:
 
 def count_day_bars(catalog_path: Path, day: date) -> int:
     """One-minute bars stored for the local trading day ``day``."""
-    start = pd.Timestamp(day, tz=LOCAL_TIMEZONE).value
-    end = pd.Timestamp(day + timedelta(days=1), tz=LOCAL_TIMEZONE).value - 1
+    start, end = _local_day_bounds(day)
     return len(ParquetDataCatalog(str(catalog_path)).query_bars([BAR_TYPE], start=start, end=end))
+
+
+def day_is_complete(catalog_path: Path, day: date) -> bool:
+    """A full session of bars plus trades and order book depth for ``day``."""
+    if count_day_bars(catalog_path, day) < FULL_DAY_BARS:
+        return False
+    catalog = ParquetDataCatalog(str(catalog_path))
+    start, end = _local_day_bounds(day)
+    return bool(catalog.query_trade_ticks(start=start, end=end)) and bool(
+        catalog.query_order_book_depths(start=start, end=end),
+    )
+
+
+def days_to_ingest(
+    *,
+    catalog_path: Path,
+    working_dates: set[date],
+    now: datetime,
+) -> list[date]:
+    """Incomplete days among the latest CATCH_UP_TRADING_DAYS trading days.
+
+    Today counts only from INGEST_AFTER, once the session's data is final.
+    """
+    last = now.date() if now.time() >= INGEST_AFTER else now.date() - timedelta(days=1)
+    recent = sorted(day for day in working_dates if day <= last)[-CATCH_UP_TRADING_DAYS:]
+    return [day for day in recent if not day_is_complete(catalog_path, day)]
+
+
+def _local_day_bounds(day: date) -> tuple[int, int]:
+    start = pd.Timestamp(day, tz=LOCAL_TIMEZONE).value
+    return start, pd.Timestamp(day + timedelta(days=1), tz=LOCAL_TIMEZONE).value - 1
 
 
 ROOT =Path(__file__).resolve().parents[2]
