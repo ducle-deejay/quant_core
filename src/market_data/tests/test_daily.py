@@ -1,11 +1,13 @@
 """Test DNSE-first fallback, coverage, and alert behavior for daily ETL runs.
 
 Covers Mirae backfills of DNSE gaps, source failures, final coverage checks,
-alert delivery, bootstrap configuration failures, and catalog consolidation.
+alert delivery, bootstrap configuration failures, catalog consolidation, and the
+daily data check.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -21,6 +23,7 @@ from market_data.daily import DailyDataPipelineError
 from market_data.daily import catalog_consolidator
 from market_data.daily import run_and_alert
 from market_data.daily import run_daily
+from market_data.sources.mirae.load import FULL_DAY_BARS
 from market_data.sources.mirae.transform import BAR_TYPE
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_continuous_futures_contract
 
@@ -107,6 +110,37 @@ def test_consolidation_leaves_one_covered_range_per_directory(tmp_path):
 
     assert catalog.get_intervals("bars", BAR_TYPE) == [(intervals[0][0], intervals[-1][1])]
     assert len(catalog.query_bars([BAR_TYPE])) == 6
+
+
+def _run_daily_data_check(tmp_path, n_bars):
+    instrument = build_continuous_futures_contract()
+    price = instrument.make_price(100.0)
+    (tmp_path / "catalog").mkdir()
+    catalog = ParquetDataCatalog(str(tmp_path / "catalog"))
+    catalog.write_instruments([instrument])
+    opens = pd.date_range("2026-09-29 09:00", periods=n_bars, freq="min", tz="Asia/Ho_Chi_Minh")
+    catalog.write_bars([
+        Bar(BarType.from_str(BAR_TYPE), price, price, price, price, instrument.make_qty(1), t.value, t.value + 60_000_000_000)
+        for t in opens
+    ])
+    (tmp_path / "dnse.json").write_text(json.dumps({"catalog_path": str(tmp_path / "catalog")}))
+    (tmp_path / "pipeline.json").write_text(json.dumps({"dnse_config": str(tmp_path / "dnse.json")}))
+    env = {**os.environ, "DATA_TELEGRAM_BOT_TOKEN": "", "DATA_TELEGRAM_CHAT_ID": ""}
+    script = Path(__file__).resolve().parents[3] / "apps" / "data" / "daily" / "check_daily_data.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--config", str(tmp_path / "pipeline.json"), "--date", "2026-09-29"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+
+
+def test_daily_data_check_passes_on_a_full_session(tmp_path):
+    assert _run_daily_data_check(tmp_path, FULL_DAY_BARS).returncode == 0
+
+
+def test_daily_data_check_fails_when_bars_are_missing(tmp_path):
+    result = _run_daily_data_check(tmp_path, FULL_DAY_BARS - 1)
+    assert result.returncode == 1
+    assert "DATA MISSING" in result.stderr
 
 
 # --------------------------------------------------------------------------- #

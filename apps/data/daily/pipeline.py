@@ -22,7 +22,6 @@ from market_data.daily import dnse_runner
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
 from market_data.daily import run_and_alert
-from market_data.heartbeat import write_status
 from market_data.notify import data_notifier_from_env
 from market_data.notify import notify_or_log
 
@@ -40,8 +39,7 @@ def main() -> None:
       load, JSON decode, env) sends a STARTUP FAILED alert and exits non-zero.
     - The success/failure alert is sent with ``raise_on_error=True``: an
       undeliverable alert fails the run loudly instead of pretending success.
-    - Every run writes a heartbeat status file (``market_data.heartbeat``);
-      exits non-zero when DNSE failed or bars remain missing after both
+    - Exits non-zero when DNSE failed or bars remain missing after both
       sources.
     """
     parser = argparse.ArgumentParser(description="Run the daily DNSE + Mirae data pipelines")
@@ -69,10 +67,7 @@ def main() -> None:
             raise_on_error=True,
         )
         print(f"STARTUP FAILED: {error}", file=sys.stderr)
-        write_status(day, result=f"failed: {error}")
         sys.exit(1)
-
-    write_status(day, result="running")
 
     try:
         report = run_and_alert(
@@ -85,10 +80,8 @@ def main() -> None:
         )
     except Exception as error:
         print(json.dumps({"day": day.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
-        write_status(day, result=f"failed: {error}")
         sys.exit(1)
 
-    write_status(day, result="ok")
     print(json.dumps(_slim_report(report), indent=2, sort_keys=True))
 
 

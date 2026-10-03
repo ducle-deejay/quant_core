@@ -14,10 +14,12 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from datetime import date
+from datetime import timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
+import pandas as pd
 from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.notify import TelegramNotifier
@@ -29,6 +31,8 @@ from market_data.sources.dnse.pipeline import retained_contract_symbol
 from market_data.sources.dnse.pipeline import run_daily as run_dnse_daily
 from market_data.sources.mirae.extract import request_mirae_history
 from market_data.sources.mirae.pipeline import run_daily as run_mirae_daily
+from market_data.sources.mirae.transform import BAR_TYPE
+from market_data.sources.mirae.transform import LOCAL_TIMEZONE
 
 
 SourceRunner = Callable[[date], dict[str, object]]
@@ -193,7 +197,14 @@ def catalog_consolidator(config: dict[str, Any]) -> Callable[[], None]:
     return consolidate
 
 
-ROOT = Path(__file__).resolve().parents[2]
+def count_day_bars(catalog_path: Path, day: date) -> int:
+    """One-minute bars stored for the local trading day ``day``."""
+    start = pd.Timestamp(day, tz=LOCAL_TIMEZONE).value
+    end = pd.Timestamp(day + timedelta(days=1), tz=LOCAL_TIMEZONE).value - 1
+    return len(ParquetDataCatalog(str(catalog_path)).query_bars([BAR_TYPE], start=start, end=end))
+
+
+ROOT =Path(__file__).resolve().parents[2]
 
 
 def _resolve_path(value: object) -> Path:
