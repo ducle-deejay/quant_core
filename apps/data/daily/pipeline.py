@@ -21,9 +21,9 @@ from market_data.daily import alert_failure
 from market_data.daily import catalog_consolidator
 from market_data.daily import days_to_ingest
 from market_data.daily import dnse_runner
-from market_data.daily import dnse_working_dates
 from market_data.daily import load_json_config
 from market_data.daily import mirae_runner
+from market_data.daily import record_working_dates
 from market_data.daily import run_and_alert
 from market_data.notify import data_notifier_from_env
 from market_data.notify import notify_or_log
@@ -79,7 +79,7 @@ def main() -> None:
         try:
             days = days_to_ingest(
                 catalog_path=_resolve(dnse_config["catalog_path"]),
-                working_dates=dnse_working_dates(),
+                working_dates=record_working_dates(_resolve(dnse_config["raw_root"])),
                 now=datetime.now(LOCAL_TIMEZONE),
             )
         except Exception as error:

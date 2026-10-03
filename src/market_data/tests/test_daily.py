@@ -12,9 +12,12 @@ import os
 import subprocess
 import sys
 from datetime import date
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 from nautilus_trader.model import Bar
 from nautilus_trader.model import BarType
 from nautilus_trader.persistence import ParquetDataCatalog
@@ -22,6 +25,8 @@ from nautilus_trader.persistence import ParquetDataCatalog
 from market_data.daily import DailyDataPipelineError
 from market_data.daily import catalog_consolidator
 from market_data.daily import run_and_alert
+from market_data.daily import recent_trading_days
+from market_data.daily import record_working_dates
 from market_data.daily import run_daily
 from market_data.sources.mirae.load import FULL_DAY_BARS
 from market_data.sources.dnse.load import load_day
@@ -209,3 +214,26 @@ def test_pipeline_bootstrap_failure_alerts_and_exits_nonzero():
     )
     assert result.returncode == 1
     assert "STARTUP FAILED" in result.stderr
+
+
+def test_working_dates_record_grows_and_survives_a_failed_request(tmp_path, monkeypatch):
+    import market_data.daily as daily
+
+    monkeypatch.setattr(daily, "get_working_dates", lambda _: {date(2026, 10, 5), date(2026, 10, 6)})
+    record_working_dates(tmp_path)
+    monkeypatch.setattr(daily, "get_working_dates", lambda _: {date(2026, 10, 6), date(2026, 10, 7)})
+    assert record_working_dates(tmp_path) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
+
+    monkeypatch.setattr(daily, "get_working_dates", lambda _: (_ for _ in ()).throw(ConnectionError("down")))
+    assert record_working_dates(tmp_path) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
+
+
+def test_recent_trading_days_follow_the_record_and_the_ingest_time():
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    working = {date(2026, 8, 28), date(2026, 9, 3), date(2026, 9, 4), date(2026, 9, 7)}  # 31/08-02/09 holiday
+    assert recent_trading_days(working, datetime(2026, 9, 7, 15, 0, tzinfo=tz)) == [
+        date(2026, 8, 28), date(2026, 9, 3), date(2026, 9, 4),
+    ]
+    assert recent_trading_days(working, datetime(2026, 9, 7, 16, 0, tzinfo=tz))[-1] == date(2026, 9, 7)
+    with pytest.raises(ValueError, match="No recorded DNSE working dates"):
+        recent_trading_days(working, datetime(2026, 9, 8, 16, 0, tzinfo=tz))

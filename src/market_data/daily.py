@@ -11,7 +11,9 @@ supplied by the caller.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from collections.abc import Callable
 from datetime import date
 from datetime import datetime
@@ -44,6 +46,7 @@ SourceRunner = Callable[[date], dict[str, object]]
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
 CATCH_UP_TRADING_DAYS = 5
 INGEST_AFTER = time(16, 0)
+WORKING_DATES_FILE = "working_dates.json"
 
 
 class DailyDataPipelineError(RuntimeError):
@@ -160,8 +163,34 @@ def _dnse_client_factory() -> tuple[Any, list[Any]]:
     return client, observed
 
 
-def dnse_working_dates() -> set[date]:
-    return get_working_dates(_dnse_client_factory)
+def record_working_dates(raw_root: Path) -> set[date]:
+    """Merge DNSE's working dates into ``raw_root``'s record and return every recorded date.
+
+    DNSE's working-dates response starts at the current day (observed: requested on a Saturday,
+    it began with the next Monday), so past trading days are known only from earlier runs'
+    records. When the request fails, the record alone is used.
+    """
+    path = raw_root / WORKING_DATES_FILE
+    recorded = read_working_dates(raw_root)
+    try:
+        fetched = get_working_dates(_dnse_client_factory)
+    except Exception as error:
+        print(f"DNSE working dates unavailable, using the record: {_format_exception(error)}", file=sys.stderr)
+        return recorded
+    merged = recorded | fetched
+    if merged != recorded:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(sorted(day.isoformat() for day in merged), indent=0) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    return merged
+
+
+def read_working_dates(raw_root: Path) -> set[date]:
+    path = raw_root / WORKING_DATES_FILE
+    if not path.exists():
+        return set()
+    return {date.fromisoformat(value) for value in json.loads(path.read_text(encoding="utf-8"))}
 
 
 def dnse_runner(config: dict[str, Any]) -> SourceRunner:
@@ -232,19 +261,24 @@ def day_is_complete(catalog_path: Path, day: date) -> bool:
     )
 
 
+def recent_trading_days(working_dates: set[date], now: datetime) -> list[date]:
+    """The latest CATCH_UP_TRADING_DAYS trading days; today counts only from INGEST_AFTER.
+
+    Raises when no recorded working date reaches today, since whether today trades is unknown.
+    """
+    if not working_dates or max(working_dates) < now.date():
+        raise ValueError(f"No recorded DNSE working dates reach {now.date()}")
+    last = now.date() if now.time() >= INGEST_AFTER else now.date() - timedelta(days=1)
+    return sorted(day for day in working_dates if day <= last)[-CATCH_UP_TRADING_DAYS:]
+
+
 def days_to_ingest(
     *,
     catalog_path: Path,
     working_dates: set[date],
     now: datetime,
 ) -> list[date]:
-    """Incomplete days among the latest CATCH_UP_TRADING_DAYS trading days.
-
-    Today counts only from INGEST_AFTER, once the session's data is final.
-    """
-    last = now.date() if now.time() >= INGEST_AFTER else now.date() - timedelta(days=1)
-    recent = sorted(day for day in working_dates if day <= last)[-CATCH_UP_TRADING_DAYS:]
-    return [day for day in recent if not day_is_complete(catalog_path, day)]
+    return [day for day in recent_trading_days(working_dates, now) if not day_is_complete(catalog_path, day)]
 
 
 def _local_day_bounds(day: date) -> tuple[int, int]:
@@ -261,8 +295,6 @@ def _resolve_path(value: object) -> Path:
 
 
 def load_json_config(path: Path) -> dict[str, Any]:
-    import json
-
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object in {path}")
