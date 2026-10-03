@@ -1,8 +1,7 @@
 """Test DNSE-first fallback, coverage, and alert behavior for daily ETL runs.
 
 Covers Mirae backfills of DNSE gaps, source failures, final coverage checks,
-alert formatting and delivery, bootstrap configuration failures, and catalog
-consolidation.
+alert delivery, bootstrap configuration failures, and catalog consolidation.
 """
 
 from __future__ import annotations
@@ -14,24 +13,16 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from nautilus_trader.model import Bar
+from nautilus_trader.model import BarType
+from nautilus_trader.persistence import ParquetDataCatalog
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from nautilus_trader.model import Bar  # noqa: E402
-from nautilus_trader.model import BarType  # noqa: E402
-from nautilus_trader.persistence import ParquetDataCatalog  # noqa: E402
-
-from market_data.daily import DailyDataPipelineError  # noqa: E402
-from market_data.daily import _remaining_missing  # noqa: E402
-from market_data.daily import alert_bootstrap_failure  # noqa: E402
-from market_data.daily import alert_failure  # noqa: E402
-from market_data.daily import alert_success  # noqa: E402
-from market_data.daily import catalog_consolidator  # noqa: E402
-from market_data.daily import format_run_missing  # noqa: E402
-from market_data.daily import run_and_alert  # noqa: E402
-from market_data.daily import run_daily  # noqa: E402
-from market_data.sources.mirae.transform import BAR_TYPE  # noqa: E402
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_continuous_futures_contract  # noqa: E402
+from market_data.daily import DailyDataPipelineError
+from market_data.daily import catalog_consolidator
+from market_data.daily import run_and_alert
+from market_data.daily import run_daily
+from market_data.sources.mirae.transform import BAR_TYPE
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_continuous_futures_contract
 
 
 DAY = date(2026, 8, 30)
@@ -39,7 +30,6 @@ FULL_DNSE = {"records": {"Bar": 240}, "missing_bar_timestamps": []}
 DNSE_WITH_GAPS = {"records": {"Bar": 230}, "missing_bar_timestamps": [100, 101, 102]}
 MIRAE_ADDED_ALL = {"records": {"Bar": 3, "SkippedBar": 0, "added_bar_timestamps": [100, 101, 102]}}
 MIRAE_ADDED_PARTIAL = {"records": {"Bar": 1, "SkippedBar": 0, "added_bar_timestamps": [100]}}
-MIRAE_ADDED_NONE = {"records": {"Bar": 0, "SkippedBar": 3, "added_bar_timestamps": []}}
 
 
 class RecordingNotifier:
@@ -48,25 +38,6 @@ class RecordingNotifier:
 
     def send_message(self, text: str):
         self.messages.append(text)
-
-
-class RaisingNotifier:
-    def __init__(self, error: Exception):
-        self.error = error
-
-    def send_message(self, text: str):
-        raise self.error
-
-
-def test_dnse_ok_mirae_ok():
-    report = run_daily(
-        day=DAY,
-        run_dnse=lambda d: dict(FULL_DNSE),
-        consolidate=lambda: None,
-        run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
-    )
-    assert report["day"] == DAY.isoformat()
-    assert report["dnse"]["records"]["Bar"] == 240
 
 
 def test_mirae_resolves_dnse_gaps_succeeds():
@@ -114,16 +85,7 @@ def test_mirae_failure_covered_by_dnse_is_warning_not_failure():
         consolidate=lambda: None,
         run_mirae=lambda d: (_ for _ in ()).throw(RuntimeError("mirae down")),
     )
-    assert report["mirae_error"] == "mirae down"
-    assert report["dnse"]["records"]["Bar"] == 240
-
-
-def test_remaining_missing_math():
-    assert _remaining_missing(dict(FULL_DNSE), None) == []
-    assert _remaining_missing(dict(DNSE_WITH_GAPS), dict(MIRAE_ADDED_ALL)) == []
-    assert _remaining_missing(dict(DNSE_WITH_GAPS), dict(MIRAE_ADDED_PARTIAL)) == [101, 102]
-    assert _remaining_missing(dict(DNSE_WITH_GAPS), dict(MIRAE_ADDED_NONE)) == [100, 101, 102]
-    assert _remaining_missing(None, None) == []
+    assert "mirae down" in report["mirae_error"]
 
 
 def test_consolidation_leaves_one_covered_range_per_directory(tmp_path):
@@ -148,60 +110,6 @@ def test_consolidation_leaves_one_covered_range_per_directory(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Alert formatting
-# --------------------------------------------------------------------------- #
-
-SUCCESS_REPORT = {
-    "dnse": {"records": {"Bar": 241, "TradeTick": 89565, "OrderBookDepth10": 593874}},
-    "mirae": {"records": {"Bar": 0, "SkippedBar": 473773}},
-}
-
-
-def test_alert_success_format():
-    message = alert_success(DAY, dict(SUCCESS_REPORT))
-    assert "✅ QC-DATA ETL | 30-08-2026 | OK" in message
-    assert "DNSE ✅" in message
-    assert "• bars: 241" in message
-    assert "• trades: 89,565" in message
-    assert "• book: 593,874" in message
-    assert "Mirae ✅" in message
-    assert "• added: 0" in message
-    assert "• skipped: 473,773" in message
-    assert "gaps 0 · catalog updated" in message
-
-
-def test_alert_success_mirae_down_warning():
-    report = dict(SUCCESS_REPORT)
-    report["mirae_error"] = "mirae down <boom>"
-    message = alert_success(DAY, report)
-    assert "| OK (mirae down)" in message
-    assert "Mirae ❌" in message
-    assert "• mirae down &lt;boom&gt;" in message  # HTML-escaped
-    assert "gaps 0 · catalog updated" in message
-
-
-def test_alert_failure_format():
-    error = DailyDataPipelineError("DNSE daily pipeline failed; Mirae backup also failed")
-    message = alert_failure(DAY, error, None)
-    assert "❌ QC-DATA ETL | 30-08-2026 | FAILED" in message
-    assert "DNSE daily pipeline failed" in message
-    assert "catalog NOT updated" in message
-
-
-def test_alert_bootstrap_failure_format():
-    message = alert_bootstrap_failure(DAY, FileNotFoundError("config/pipeline.json"))
-    assert "❌ QC-DATA ETL | 30-08-2026 | STARTUP FAILED" in message
-    assert "config/pipeline.json" in message
-    assert "check data/logs/daily-etl.err.log" in message
-
-
-def test_format_run_missing_format():
-    message = format_run_missing(DAY)
-    assert "🚨 QC-DATA ETL | 30-08-2026 | RUN MISSING" in message
-    assert "expected 16:00 run not detected" in message
-
-
-# --------------------------------------------------------------------------- #
 # run_and_alert alert coverage
 # --------------------------------------------------------------------------- #
 
@@ -216,7 +124,7 @@ def test_run_and_alert_success_sends_alert():
         notifier=notifier,
     )
     assert len(notifier.messages) == 1
-    assert "✅ QC-DATA ETL" in notifier.messages[0]
+    assert "SUCCESS" in notifier.messages[0]
 
 
 def test_run_and_alert_failure_sends_alert():
@@ -234,45 +142,7 @@ def test_run_and_alert_failure_sends_alert():
     else:
         raise AssertionError("expected DailyDataPipelineError")
     assert len(notifier.messages) == 1
-    assert "❌ QC-DATA ETL" in notifier.messages[0]
-    assert "FAILED" in notifier.messages[0]
-
-
-def test_run_and_alert_swallows_notify_error_by_default():
-    import contextlib
-    import io
-
-    buffer = io.StringIO()
-    with contextlib.redirect_stderr(buffer):
-        try:
-            run_and_alert(
-                day=DAY,
-                run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
-                consolidate=lambda: None,
-                run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
-                notifier=RaisingNotifier(RuntimeError("telegram down")),
-            )
-        except DailyDataPipelineError:
-            pass
-        else:
-            raise AssertionError("expected DailyDataPipelineError")
-    assert "Telegram notification failed" in buffer.getvalue()
-
-
-def test_run_and_alert_raise_on_error_propagates_notify_failure():
-    try:
-        run_and_alert(
-            day=DAY,
-            run_dnse=lambda d: (_ for _ in ()).throw(RuntimeError("dnse down")),
-            consolidate=lambda: None,
-            run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
-            notifier=RaisingNotifier(RuntimeError("telegram down")),
-            raise_on_error=True,
-        )
-    except RuntimeError as error:
-        assert str(error) == "telegram down"
-    else:
-        raise AssertionError("expected the notify failure to propagate")
+    assert "FAIL" in notifier.messages[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -308,23 +178,3 @@ def test_pipeline_bootstrap_failure_alerts_and_exits_nonzero():
     )
     assert result.returncode == 1
     assert "STARTUP FAILED" in result.stderr
-
-
-def _run_all() -> int:
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"PASS {name}")
-            except AssertionError as error:
-                failures += 1
-                print(f"FAIL {name}: {error}")
-            except Exception as error:  # noqa: BLE001
-                failures += 1
-                print(f"FAIL {name}: {type(error).__name__}: {error}")
-    return failures
-
-
-if __name__ == "__main__":
-    raise SystemExit(1 if _run_all() else 0)

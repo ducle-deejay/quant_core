@@ -1,27 +1,24 @@
 """Test the Mirae day-level bar backfill and the bar ts_init convention.
 
-Covers filling a DNSE gap inside an already written day (which previously failed
-with a non-disjoint interval), keeping complete DNSE days, merging when neither
-source is complete, and the one-minute ts_init offset with the ATC exception.
+Covers filling a DNSE gap inside an already written day, keeping complete DNSE
+days, merging when neither source is complete, and the one-minute ts_init offset
+with the ATC exception.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from nautilus_trader.model import Bar
+from nautilus_trader.model import BarType
+from nautilus_trader.persistence import ParquetDataCatalog
 
-from nautilus_trader.model import Bar  # noqa: E402
-from nautilus_trader.model import BarType  # noqa: E402
-from nautilus_trader.persistence import ParquetDataCatalog  # noqa: E402
-
-from market_data.sources.mirae.load import load_day  # noqa: E402
-from market_data.sources.mirae.transform import BAR_TYPE  # noqa: E402
-from market_data.sources.mirae.transform import _bar_ts_init  # noqa: E402
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (  # noqa: E402
+from market_data.sources.mirae.load import load_day
+from market_data.sources.mirae.transform import BAR_TYPE
+from market_data.sources.mirae.transform import _bar_ts_init
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     build_continuous_futures_contract,
 )
 
