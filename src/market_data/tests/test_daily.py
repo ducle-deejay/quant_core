@@ -24,7 +24,10 @@ from market_data.daily import catalog_consolidator
 from market_data.daily import run_and_alert
 from market_data.daily import run_daily
 from market_data.sources.mirae.load import FULL_DAY_BARS
+from market_data.sources.dnse.load import load_day
 from market_data.sources.mirae.transform import BAR_TYPE
+from market_data.tests.test_dnse_load import INSTRUMENT
+from market_data.tests.test_dnse_load import day_batches
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_continuous_futures_contract
 
 
@@ -91,25 +94,19 @@ def test_mirae_failure_covered_by_dnse_is_warning_not_failure():
     assert "mirae down" in report["mirae_error"]
 
 
-def test_consolidation_leaves_one_covered_range_per_directory(tmp_path):
-    instrument = build_continuous_futures_contract()
-    bar_type = BarType.from_str(BAR_TYPE)
-    price = instrument.make_price(100.0)
+def test_consolidation_leaves_one_ordered_file_per_directory(tmp_path):
+    for day in ("2026-09-28", "2026-09-30", "2026-10-01"):  # one load per day, as the daily ingest does
+        load_day(catalog_path=tmp_path, transformed=day_batches(day, 100.0))
     catalog = ParquetDataCatalog(str(tmp_path))
-    catalog.write_instruments([instrument])
-    for day in ("2026-09-29", "2026-09-30"):  # one write per day, as the daily ingest does
-        opens = pd.date_range(f"{day} 09:00", periods=3, freq="min", tz="Asia/Ho_Chi_Minh")
-        catalog.write_bars([
-            Bar(bar_type, price, price, price, price, instrument.make_qty(1), t.value, t.value + 60_000_000_000)
-            for t in opens
-        ])
-    intervals = catalog.get_intervals("bars", BAR_TYPE)
-    assert len(intervals) == 2
+    intervals = catalog.get_intervals("trades", str(INSTRUMENT.id))
+    assert len(intervals) > 1
 
     catalog_consolidator({"catalog_path": str(tmp_path)})()
 
-    assert catalog.get_intervals("bars", BAR_TYPE) == [(intervals[0][0], intervals[-1][1])]
-    assert len(catalog.query_bars([BAR_TYPE])) == 6
+    assert catalog.get_intervals("trades", str(INSTRUMENT.id)) == [(intervals[0][0], intervals[-1][1])]
+    for records in (catalog.query_bars([BAR_TYPE]), catalog.query_trade_ticks(), catalog.query_order_book_depths()):
+        ts_init = [record.ts_init for record in records]
+        assert len(ts_init) == 12 and ts_init == sorted(ts_init)
 
 
 def _run_daily_data_check(tmp_path, n_bars):

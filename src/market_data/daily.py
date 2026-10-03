@@ -37,6 +37,8 @@ from market_data.sources.mirae.transform import LOCAL_TIMEZONE
 
 SourceRunner = Callable[[date], dict[str, object]]
 
+CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
+
 
 class DailyDataPipelineError(RuntimeError):
     """DNSE failed, or bars remain missing after the Mirae backfill."""
@@ -185,14 +187,19 @@ def mirae_runner(mirae_config: dict[str, Any], dnse_config: dict[str, Any]) -> S
 
 
 def catalog_consolidator(config: dict[str, Any]) -> Callable[[], None]:
-    """Merge the files of every catalog data directory into one file.
+    """Merge the files of every catalog data directory into one file ordered by ts_init.
 
     Daily ingest adds one file per day; a backtest warmup request that spans the
-    time between two files receives no bars.
+    time between two files receives no bars. ``consolidate_catalog`` keeps rows in
+    file order rather than ts_init order, which breaks later range deletes, so the
+    merge uses one period that spans the whole catalog instead.
     """
 
     def consolidate() -> None:
-        ParquetDataCatalog(str(_resolve_path(config["catalog_path"]))).consolidate_catalog()
+        ParquetDataCatalog(str(_resolve_path(config["catalog_path"]))).consolidate_catalog_by_period(
+            period_nanos=CONSOLIDATION_PERIOD_NS,
+            ensure_contiguous_files=False,
+        )
 
     return consolidate
 
