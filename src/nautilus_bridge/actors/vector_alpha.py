@@ -20,6 +20,7 @@ from nautilus_bridge.alphas.sources import PrecomputedSource
 from nautilus_bridge.alphas.sources import RollingSource
 from nautilus_bridge.data.custom_data import ExposureData
 from nautilus_bridge.data.trading_days import CATALOG_PATH
+from nautilus_bridge.data.trading_days import LOOKBACK_TRADING_DAYS
 from nautilus_bridge.data.trading_days import warmup_start
 
 
@@ -31,9 +32,7 @@ class VectorAlphaActorConfig(DataActorConfig):
         bar_type: BarType,
         timeframe: pd.Timedelta,
         alpha_fn: AlphaFn,
-        window: int,
         precomputed_exposure: pd.Series | None = None,
-        warmup_trading_days: int = 30,
         **_kwargs: object,
     ) -> None:
         super().__init__()
@@ -41,9 +40,7 @@ class VectorAlphaActorConfig(DataActorConfig):
         self.bar_type = bar_type
         self.timeframe = timeframe
         self.alpha_fn = alpha_fn
-        self.window = window
         self.precomputed_exposure = precomputed_exposure
-        self.warmup_trading_days = warmup_trading_days
 
 
 class VectorAlphaActor(DataActor):
@@ -55,7 +52,7 @@ class VectorAlphaActor(DataActor):
         if config.precomputed_exposure is not None:
             self.source = PrecomputedSource(config.precomputed_exposure)
         else:
-            self.source = RollingSource(config.alpha_fn, config.window)
+            self.source = RollingSource(config.alpha_fn, LOOKBACK_TRADING_DAYS)
 
     def on_start(self) -> None:
         if isinstance(self.source, RollingSource):
@@ -67,7 +64,7 @@ class VectorAlphaActor(DataActor):
             CATALOG_PATH,
             self.config.bar_type,
             self.clock.utc_now(),
-            self.config.warmup_trading_days,
+            LOOKBACK_TRADING_DAYS,
         )
         self.request_bars(self.config.bar_type, start=start)
 
@@ -76,10 +73,6 @@ class VectorAlphaActor(DataActor):
         for bar in sorted(bars, key=lambda bar: bar.ts_init):
             bins.extend(self.binner.update(bar_row(bar)))
         self.source.warmup(bins)
-        if len(bins) < self.config.window:
-            self.log.warning(
-                f"Warmup produced {len(bins)} bins, fewer than the window of {self.config.window}",
-            )
 
     def on_bar(self, bar: Bar) -> None:
         for bin_row in self.binner.update(bar_row(bar)):

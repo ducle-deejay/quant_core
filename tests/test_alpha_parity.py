@@ -13,7 +13,8 @@ from nautilus_bridge.alphas.sources import PrecomputedSource
 from nautilus_bridge.alphas.sources import RollingSource
 
 TZ = "Asia/Ho_Chi_Minh"
-WINDOW = 120
+LOOKBACK_DAYS = 10
+BINS_PER_DAY_30M = 9
 
 
 def _local_ns(text: str) -> int:
@@ -104,7 +105,7 @@ def test_session_binner_matches_resample_session(minutes):
 def test_alpha_value_at_each_bin_ignores_later_bins():
     bins = resample_session(_minute_bars(_trading_days(40)), pd.Timedelta(minutes=30))
     full = ema_cross(bins)
-    for k in np.random.default_rng(0).integers(WINDOW, len(bins), 50):
+    for k in np.random.default_rng(0).integers(LOOKBACK_DAYS * BINS_PER_DAY_30M, len(bins), 50):
         truncated = ema_cross(bins.iloc[: k + 1]).iloc[-1]
         assert truncated == full.iloc[k] or (np.isnan(truncated) and np.isnan(full.iloc[k]))
 
@@ -112,7 +113,7 @@ def test_alpha_value_at_each_bin_ignores_later_bins():
 def test_rolling_source_matches_precomputed_source():
     bins = resample_session(_minute_bars(_trading_days(40)), pd.Timedelta(minutes=30))
     precomputed = PrecomputedSource(ema_cross(bins))
-    rolling = RollingSource(ema_cross, WINDOW)
+    rolling = RollingSource(ema_cross, LOOKBACK_DAYS)
 
     compared = 0
     for bin_row in bins.itertuples(name=None):
@@ -122,4 +123,4 @@ def test_rolling_source_matches_precomputed_source():
             continue
         assert actual == expected, f"bin_end={bin_row[0]}"
         compared += 1
-    assert compared == len(bins) - WINDOW + 1
+    assert compared == len(bins) - (LOOKBACK_DAYS - 1) * BINS_PER_DAY_30M

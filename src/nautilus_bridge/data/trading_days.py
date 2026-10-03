@@ -11,6 +11,7 @@ from nautilus_trader.persistence import ParquetDataCatalog
 
 CATALOG_PATH = Path(__file__).resolve().parents[3] / "data" / "catalog"
 VN_TZ = "Asia/Ho_Chi_Minh"
+LOOKBACK_TRADING_DAYS = 30
 
 
 def trading_day(ts: int) -> date:

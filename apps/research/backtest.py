@@ -130,7 +130,6 @@ actor_configs = VectorAlphaActorConfig(
     bar_type=SOURCE_BAR_TYPE,
     timeframe=TIMEFRAME,
     alpha_fn=ema_cross,
-    window=300,
     precomputed_exposure=precomputed_exposure,
 )
 
