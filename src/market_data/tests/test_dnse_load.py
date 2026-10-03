@@ -62,7 +62,7 @@ def test_loading_a_day_again_replaces_it(tmp_path):
 def test_a_missing_day_inside_a_consolidated_catalog_is_backfilled(tmp_path):
     load_day(catalog_path=tmp_path, transformed=day_batches("2026-09-28", 100.0))
     load_day(catalog_path=tmp_path, transformed=day_batches("2026-09-30", 100.0))
-    catalog_consolidator({"catalog_path": str(tmp_path)})()
+    catalog_consolidator(tmp_path)()
 
     load_day(catalog_path=tmp_path, transformed=day_batches("2026-09-29", 200.0))
 

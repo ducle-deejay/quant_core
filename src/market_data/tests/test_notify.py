@@ -1,4 +1,4 @@
-"""Test Discord webhook configuration, payload, delivery failures, and error fencing."""
+"""Test the Discord webhook payload, delivery failures, and error fencing."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from market_data.notify import RED
 from market_data.notify import Alert
 from market_data.notify import DiscordWebhook
 from market_data.notify import code_block
-from market_data.notify import data_notifier_from_env
 from market_data.notify import notify_or_log
 
 
@@ -38,13 +37,6 @@ class RaisingNotifier:
 
 
 ALERT = Alert(summary="❌ Data 2026-10-05 failed — retry at 17:00", color=RED, fields=(("Step: DNSE extract", "x", False),))
-
-
-def test_data_notifier_needs_the_webhook_url(monkeypatch):
-    monkeypatch.delenv("DATA_DISCORD_WEBHOOK_URL", raising=False)
-    assert data_notifier_from_env() is None
-    monkeypatch.setenv("DATA_DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/token")
-    assert isinstance(data_notifier_from_env(), DiscordWebhook)
 
 
 def test_send_posts_the_summary_and_one_colored_embed():

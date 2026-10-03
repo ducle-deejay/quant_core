@@ -29,10 +29,9 @@ from market_data.sources.legacy_boundary import legacy_boundary_record_mask
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
-LOCAL_TIMEZONE = "Asia/Ho_Chi_Minh"
-# External payloads include two session-boundary records at 11:30 and 14:30 local
-# time (verified in data/raw/vietnam/{dnse,mirae}, 2026-09-30); the canonical session
-# grid has 241 bars (verified in data/catalog: 09:00-11:29, 13:00-14:29 and 14:45).
+LOCAL_TIMEZONE = VN30F1M_SESSIONS.timezone
+# Provider payloads include two session-boundary records at 11:30 and 14:30 local
+# time; the canonical session grid has 241 bars (09:00-11:29, 13:00-14:29 and 14:45).
 # Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
 # the interval close, so ts_init = ts_event + 1 minute. The 14:45 bar is the ATC
 # (at-the-close auction) print, a single event known at 14:45 (HNX derivatives

@@ -1,19 +1,15 @@
 """Test DNSE-first fallback, coverage, and alert behavior for daily ETL runs.
 
 Covers Mirae backfills of DNSE gaps, source failures, final coverage checks,
-alert delivery, bootstrap configuration failures, catalog consolidation, and the
-daily data check.
+alert delivery, catalog consolidation, day completeness, the working-dates record
+and day selection.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 from datetime import date
 from datetime import datetime
-from pathlib import Path
+from datetime import time
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -24,6 +20,7 @@ from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.daily import DailyDataPipelineError
 from market_data.daily import catalog_consolidator
+from market_data.daily import day_is_complete
 from market_data.daily import run_and_alert
 from market_data.daily import RunAttempt
 from market_data.daily import run_attempt
@@ -42,6 +39,9 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import build_contin
 
 
 DAY = date(2026, 8, 30)
+RUN_TIMES = tuple(time(hour, 0) for hour in range(16, 21))
+INGEST_AFTER = time(16, 0)
+FACTORY = lambda: (None, [])  # noqa: E731 - never called; get_working_dates is replaced
 AT_16 = datetime(2026, 8, 31, 16, 0, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
 FULL_DNSE = {"records": {"Bar": 240}, "missing_bar_timestamps": []}
 DNSE_WITH_GAPS = {"records": {"Bar": 230}, "missing_bar_timestamps": [100, 101, 102]}
@@ -106,13 +106,13 @@ def test_mirae_failure_covered_by_dnse_is_warning_not_failure():
 
 
 def test_consolidation_leaves_one_ordered_file_per_directory(tmp_path):
-    for day in ("2026-09-28", "2026-09-30", "2026-10-01"):  # one load per day, as the daily ingest does
+    for day in ("2026-09-28", "2026-09-30", "2026-10-01"):  # one load per day leaves one file per day
         load_day(catalog_path=tmp_path, transformed=day_batches(day, 100.0))
     catalog = ParquetDataCatalog(str(tmp_path))
     intervals = catalog.get_intervals("trades", str(INSTRUMENT.id))
     assert len(intervals) > 1
 
-    catalog_consolidator({"catalog_path": str(tmp_path)})()
+    catalog_consolidator(tmp_path)()
 
     assert catalog.get_intervals("trades", str(INSTRUMENT.id)) == [(intervals[0][0], intervals[-1][1])]
     for records in (catalog.query_bars([BAR_TYPE]), catalog.query_trade_ticks(), catalog.query_order_book_depths()):
@@ -120,11 +120,11 @@ def test_consolidation_leaves_one_ordered_file_per_directory(tmp_path):
         assert len(ts_init) == 12 and ts_init == sorted(ts_init)
 
 
-def _run_daily_data_check(tmp_path, n_bars):
+@pytest.mark.parametrize(("n_bars", "complete"), [(FULL_DAY_BARS, True), (FULL_DAY_BARS - 1, False)])
+def test_a_day_is_complete_only_with_a_full_session_of_bars(tmp_path, n_bars, complete):
     instrument = build_continuous_futures_contract()
     price = instrument.make_price(100.0)
-    (tmp_path / "catalog").mkdir()
-    catalog = ParquetDataCatalog(str(tmp_path / "catalog"))
+    catalog = ParquetDataCatalog(str(tmp_path))
     catalog.write_instruments([instrument])
     opens = pd.date_range("2026-09-29 09:00", periods=n_bars, freq="min", tz="Asia/Ho_Chi_Minh")
     catalog.write_bars([
@@ -134,24 +134,7 @@ def _run_daily_data_check(tmp_path, n_bars):
     _, _, trades, more_trades, depth = day_batches("2026-09-29", 100.0)
     catalog.write_trade_ticks(trades + more_trades)
     catalog.write_order_book_depths(depth)
-    (tmp_path / "dnse.json").write_text(json.dumps({"catalog_path": str(tmp_path / "catalog")}))
-    (tmp_path / "pipeline.json").write_text(json.dumps({"dnse_config": str(tmp_path / "dnse.json")}))
-    env = {**os.environ, "DATA_DISCORD_WEBHOOK_URL": ""}
-    script = Path(__file__).resolve().parents[3] / "apps" / "data" / "daily" / "check_daily_data.py"
-    return subprocess.run(
-        [sys.executable, str(script), "--config", str(tmp_path / "pipeline.json"), "--date", "2026-09-29"],
-        capture_output=True, text=True, env=env, timeout=60,
-    )
-
-
-def test_daily_data_check_passes_on_a_full_session(tmp_path):
-    assert _run_daily_data_check(tmp_path, FULL_DAY_BARS).returncode == 0
-
-
-def test_daily_data_check_fails_when_bars_are_missing(tmp_path):
-    result = _run_daily_data_check(tmp_path, FULL_DAY_BARS - 1)
-    assert result.returncode == 1
-    assert "DATA MISSING" in result.stderr
+    assert day_is_complete(tmp_path, date(2026, 9, 29)) is complete
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +150,8 @@ def test_run_and_alert_success_sends_one_green_alert():
         consolidate=lambda: None,
         run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
         notifier=notifier,
-        attempt=run_attempt(AT_16),
+        attempt=run_attempt(AT_16, RUN_TIMES),
+        log_path="daily-etl.err.log",
     )
     assert [alert.color for alert in notifier.alerts] == [GREEN]
     assert notifier.alerts[0].summary == f"✅ Data {DAY} ingested"
@@ -189,7 +173,8 @@ def test_run_and_alert_failure_names_the_failed_step_and_the_next_retry(run_dnse
             consolidate=consolidate,
             run_mirae=lambda d: dict(MIRAE_ADDED_ALL),
             notifier=notifier,
-            attempt=run_attempt(AT_16),
+            attempt=run_attempt(AT_16, RUN_TIMES),
+            log_path="daily-etl.err.log",
         )
     [alert] = notifier.alerts
     assert alert.color == RED
@@ -198,61 +183,29 @@ def test_run_and_alert_failure_names_the_failed_step_and_the_next_retry(run_dnse
 
 
 def test_run_attempt_places_a_run_in_the_schedule():
-    assert run_attempt(AT_16) == RunAttempt("1/5 (16:00)", "17:00")
-    assert run_attempt(AT_16.replace(hour=20)) == RunAttempt("5/5 (20:00)", None)
-    assert run_attempt(None) == RunAttempt("manual", None)
-
-
-# --------------------------------------------------------------------------- #
-# Pipeline bootstrap guard: config failures alert + exit non-zero
-# --------------------------------------------------------------------------- #
-
-
-def test_pipeline_bootstrap_failure_alerts_and_exits_nonzero():
-    repo_root = Path(__file__).resolve().parents[3]
-    pipeline = repo_root / "apps" / "data" / "daily" / "pipeline.py"
-    env = dict(os.environ)
-    # Blank the webhook so the test never touches the network; the notifier
-    # becomes None and the startup alert is a no-op, while the exit code and
-    # stderr still prove the guard fired.
-    env["DATA_DISCORD_WEBHOOK_URL"] = ""
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(pipeline),
-            "--config",
-            "/nonexistent/pipeline.json",
-            "--date",
-            "2026-08-28",
-        ],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=repo_root,
-        timeout=60,
-    )
-    assert result.returncode == 1
-    assert "STARTUP FAILED" in result.stderr
+    assert run_attempt(AT_16, RUN_TIMES) == RunAttempt("1/5 (16:00)", "17:00")
+    assert run_attempt(AT_16.replace(hour=20), RUN_TIMES) == RunAttempt("5/5 (20:00)", None)
+    assert run_attempt(None, RUN_TIMES) == RunAttempt("manual", None)
 
 
 def test_working_dates_record_grows_and_survives_a_failed_request(tmp_path, monkeypatch):
     import market_data.daily as daily
 
     monkeypatch.setattr(daily, "get_working_dates", lambda _: {date(2026, 10, 5), date(2026, 10, 6)})
-    record_working_dates(tmp_path)
+    record_working_dates(tmp_path, FACTORY)
     monkeypatch.setattr(daily, "get_working_dates", lambda _: {date(2026, 10, 6), date(2026, 10, 7)})
-    assert record_working_dates(tmp_path) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
+    assert record_working_dates(tmp_path, FACTORY) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
 
     monkeypatch.setattr(daily, "get_working_dates", lambda _: (_ for _ in ()).throw(ConnectionError("down")))
-    assert record_working_dates(tmp_path) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
+    assert record_working_dates(tmp_path, FACTORY) == {date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)}
 
 
 def test_recent_trading_days_follow_the_record_and_the_ingest_time():
     tz = ZoneInfo("Asia/Ho_Chi_Minh")
     working = {date(2026, 8, 28), date(2026, 9, 3), date(2026, 9, 4), date(2026, 9, 7)}  # 31/08-02/09 holiday
-    assert recent_trading_days(working, datetime(2026, 9, 7, 15, 0, tzinfo=tz)) == [
+    assert recent_trading_days(working, datetime(2026, 9, 7, 15, 0, tzinfo=tz), INGEST_AFTER, 5) == [
         date(2026, 8, 28), date(2026, 9, 3), date(2026, 9, 4),
     ]
-    assert recent_trading_days(working, datetime(2026, 9, 7, 16, 0, tzinfo=tz))[-1] == date(2026, 9, 7)
+    assert recent_trading_days(working, datetime(2026, 9, 7, 16, 0, tzinfo=tz), INGEST_AFTER, 5)[-1] == date(2026, 9, 7)
     with pytest.raises(ValueError, match="No recorded DNSE working dates"):
-        recent_trading_days(working, datetime(2026, 9, 8, 16, 0, tzinfo=tz))
+        recent_trading_days(working, datetime(2026, 9, 8, 16, 0, tzinfo=tz), INGEST_AFTER, 5)

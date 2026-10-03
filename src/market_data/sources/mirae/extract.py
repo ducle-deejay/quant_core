@@ -18,6 +18,7 @@ import truststore
 import urllib3
 
 from market_data.sources.mirae.quality import validate_raw_day
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 
 
 MIRAE_HISTORY_URL = "https://mastrade.masvn.com/api/v1/tradingview/history"
@@ -27,7 +28,7 @@ MIRAE_HEADERS = {
 }
 HISTORY_START = date(2017, 8, 10)
 HISTORY_CHUNK_DAYS = 30
-LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
+LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
 
 HistoryRequest = Callable[[dict[str, int | str]], dict[str, Any]]
 

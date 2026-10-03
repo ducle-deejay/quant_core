@@ -6,7 +6,6 @@ and suppresses them by default, or propagates them when ``raise_on_error=True``.
 
 from __future__ import annotations
 
-import os
 import sys
 from dataclasses import dataclass
 
@@ -66,12 +65,6 @@ class DiscordWebhook:
         response = self._session.post(self._url, json=payload, timeout=self._timeout_seconds)
         if not 200 <= response.status_code < 300:
             raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text[:200]}")
-
-
-def data_notifier_from_env() -> DiscordWebhook | None:
-    """Data-ingest alerts go to DATA_DISCORD_WEBHOOK_URL; None when it is unset."""
-    url = os.getenv("DATA_DISCORD_WEBHOOK_URL", "").strip()
-    return DiscordWebhook(url) if url else None
 
 
 def notify_or_log(

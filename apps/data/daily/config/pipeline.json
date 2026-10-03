@@ -1,4 +1,0 @@
-{
-  "dnse_config": "apps/data/sources/dnse/config/pipeline.json",
-  "mirae_config": "apps/data/sources/mirae/config/pipeline.json"
-}

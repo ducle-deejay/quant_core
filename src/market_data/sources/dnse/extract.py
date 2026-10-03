@@ -15,12 +15,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from market_data.sources.dnse.quality import validate_raw_delivery
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 
 
 PAGE_LIMIT = 1_000
 MAX_SERVER_RETRIES = 6
 MIN_REMAINING = 500
-LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
+LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
 
 ClientFactory = Callable[[], tuple[Any, list[Any]]]
 CONTRACT_DEFINITION_FIELDS = (
