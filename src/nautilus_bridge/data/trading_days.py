@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from datetime import datetime
 from pathlib import Path
 
@@ -12,13 +13,21 @@ CATALOG_PATH = Path(__file__).resolve().parents[3] / "data" / "catalog"
 VN_TZ = "Asia/Ho_Chi_Minh"
 
 
+def trading_day(ts: int) -> date:
+    return pd.Timestamp(ts, tz="UTC").tz_convert(VN_TZ).date()
+
+
 def warmup_start(
     catalog_path: str | Path,
     bar_type: BarType,
     before: datetime,
     trading_days: int,
 ) -> pd.Timestamp:
-    """Start of the earliest of the last `trading_days` days with bars before `before`."""
+    """`ts_init` of the first bar on the earliest of the last `trading_days` days with bars before `before`.
+
+    Starting at a bar instead of midnight keeps the warmup request inside the range the
+    catalog covers.
+    """
     before = pd.Timestamp(before)
     catalog = ParquetDataCatalog(str(catalog_path))
 
@@ -34,7 +43,9 @@ def warmup_start(
         days = _trading_dates(bars)
 
         if len(days) >= trading_days:
-            return pd.Timestamp(days[-trading_days], tz=VN_TZ).tz_convert("UTC")
+            first_day = days[-trading_days]
+            first_ts_init = min(bar.ts_init for bar in bars if trading_day(bar.ts_event) == first_day)
+            return pd.Timestamp(first_ts_init, tz="UTC")
 
         if start == first:
             raise ValueError(
@@ -60,4 +71,4 @@ def _earliest_start(
 
 
 def _trading_dates(bars: list) -> list:
-    return sorted({pd.Timestamp(bar.ts_event, tz="UTC").tz_convert(VN_TZ).date() for bar in bars})
+    return sorted({trading_day(bar.ts_event) for bar in bars})
