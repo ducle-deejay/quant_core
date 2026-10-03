@@ -135,8 +135,6 @@ def _mirae_added_timestamps(report: dict[str, object] | None) -> set[int]:
 
 
 def dnse_runner(config: dict[str, Any]) -> SourceRunner:
-    """DNSE source runner; reports missing timestamps in its report."""
-
     def run(day: date) -> dict[str, object]:
         def client_factory() -> tuple[Any, list[Any]]:
             api_key = os.getenv("API_KEY")
@@ -217,7 +215,7 @@ def alert_success(
     report: dict[str, object],
     run_duration: str | None = None,
 ) -> str:
-    """[QC-DATA] success alert: per-source bullet counts, verdict OK.
+    """[QC-DATA] success alert: DNSE record counts, and Mirae added/skipped counts or its error.
 
     QC-DATA is the job label printed in data ETL alerts.
     """
