@@ -18,6 +18,6 @@ def engine_config(catalog_path: str, log_dir: str) -> BacktestEngineConfig:
             file_config=FileWriterConfig(directory=log_dir, file_name="backtest"),
         ),
         data_engine=DataEngineConfig(time_bars_build_with_no_updates=False),  # No INTERNAL time bars outside trading hours
-        cache=CacheConfig(bar_capacity=10_000),  # Must hold every warmup bar of the target bar type until on_historical_bars reads them
+        cache=CacheConfig(bar_capacity=10_000),
         catalogs=[DataCatalogConfig(catalog_path)],  # Serves the actor's warmup request
     )

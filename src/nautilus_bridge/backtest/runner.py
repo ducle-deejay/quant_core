@@ -15,8 +15,6 @@ from nautilus_bridge.alphas.session_resampling import bar_row
 from nautilus_bridge.alphas.session_resampling import bars_frame
 from nautilus_bridge.alphas.session_resampling import resample_by_session
 from nautilus_bridge.alphas.loader import load_alpha
-# from nautilus_bridge.execution.directional import TWAPModifiedAlgorithm
-# from nautilus_bridge.execution.directional import TWAPModifiedAlgorithmConfig
 from nautilus_bridge.backtest.engine import engine_config
 from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.venue import venue_config
@@ -78,13 +76,6 @@ def run_backtest(
         ),
     )
 
-    # execution = TWAPModifiedAlgorithm(
-    #     config=TWAPModifiedAlgorithmConfig(
-    #         exec_algorithm_id=ExecAlgorithmId("DIRECTIONAL"),
-    #         bar_type=TARGET_BAR_TYPE,
-    #     ),
-    # )
-
     strategy = DirectionalStrategy(
         config=DirectionalStrategyConfig(
             strategy_id=StrategyId(strategy_id),
@@ -99,6 +90,5 @@ def run_backtest(
     node.build()
     node.add_actor(run_config.id, actor)
     node.add_strategy(run_config.id, strategy)
-    # node.add_exec_algorithm(run_config.id, execution)
 
     return node.run(), node, run_config
