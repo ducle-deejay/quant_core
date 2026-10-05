@@ -6,19 +6,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nautilus_bridge.alphas.frame import BAR_COLUMNS
-from nautilus_bridge.alphas.frame import SessionBinner
-from nautilus_bridge.alphas.frame import resample_session
-from nautilus_bridge.alphas.frame import session_bin_end
+from nautilus_bridge.alphas.session_resampling import BAR_COLUMNS
+from nautilus_bridge.alphas.session_resampling import SessionResampler
+from nautilus_bridge.alphas.session_resampling import resample_by_session
+from nautilus_bridge.alphas.session_resampling import session_bar_end
 from nautilus_bridge.alphas.loader import load_alpha
-from nautilus_bridge.alphas.sources import PrecomputedSource
-from nautilus_bridge.alphas.sources import RollingSource
+from nautilus_bridge.alphas.forecast_runtime import PrecomputedForecast
+from nautilus_bridge.alphas.forecast_runtime import RollingForecast
 
 ema_cross = load_alpha(str(Path(__file__).parents[1] / "apps/research/alphas/ema_cross.py"))
 
 TZ = "Asia/Ho_Chi_Minh"
 LOOKBACK_DAYS = 10
-BINS_PER_DAY_30M = 9
+TARGET_BARS_PER_DAY_30M = 9
 
 
 def _local_ns(text: str) -> int:
@@ -73,18 +73,18 @@ def _trading_days(n: int) -> list[str]:
         ("14:01", "1-HOUR", "14:30"),
     ],
 )
-def test_session_bin_end_anchors_bins_at_session_open(ts_init, timeframe, expected):
-    bin_end = session_bin_end(
+def test_session_bar_end_anchors_target_bars_at_session_open(ts_init, timeframe, expected):
+    bar_end = session_bar_end(
         np.array([_local_ns(f"2026-01-05 {ts_init}")]),
         timeframe,
     )
-    assert bin_end[0] == _local_ns(f"2026-01-05 {expected}")
+    assert bar_end[0] == _local_ns(f"2026-01-05 {expected}")
 
 
 @pytest.mark.parametrize("ts_init", ["09:00", "12:00", "14:31", "15:00"])
-def test_session_bin_end_rejects_bars_outside_sessions(ts_init):
+def test_session_bar_end_rejects_bars_outside_sessions(ts_init):
     with pytest.raises(ValueError):
-        session_bin_end(np.array([_local_ns(f"2026-01-05 {ts_init}")]), "30-MINUTE")
+        session_bar_end(np.array([_local_ns(f"2026-01-05 {ts_init}")]), "30-MINUTE")
 
 
 @pytest.mark.parametrize(
@@ -94,42 +94,42 @@ def test_session_bin_end_rejects_bars_outside_sessions(ts_init):
         "30-MINUTE", "1-HOUR", "2-HOUR", "4-HOUR",
     ],
 )
-def test_session_binner_matches_resample_session(timeframe):
+def test_session_resampler_matches_resample_by_session(timeframe):
     days = _trading_days(3)
     drop = {f"{days[0]} 09:30", f"{days[0]} 10:12", f"{days[1]} 11:30", f"{days[2]} 14:30"}
     bars = _minute_bars(days, drop)
 
-    binner = SessionBinner(timeframe)
+    resampler = SessionResampler(timeframe)
     streamed = [
-        bin_row
+        target_bar
         for row in bars.reset_index().itertuples(index=False, name=None)
-        for bin_row in binner.update(row)
+        for target_bar in resampler.update(row)
     ]
-    expected = resample_session(bars, timeframe)
+    expected = resample_by_session(bars, timeframe)
 
     assert [row[0] for row in streamed] == expected.index.tolist()
     assert np.allclose([row[1:] for row in streamed], expected.to_numpy())
 
 
-def test_alpha_value_at_each_bin_ignores_later_bins():
-    bins = resample_session(_minute_bars(_trading_days(40)), "30-MINUTE")
-    full = ema_cross(bins)
-    for k in np.random.default_rng(0).integers(LOOKBACK_DAYS * BINS_PER_DAY_30M, len(bins), 50):
-        truncated = ema_cross(bins.iloc[: k + 1]).iloc[-1]
+def test_alpha_value_at_each_target_bar_ignores_later_target_bars():
+    target_bars = resample_by_session(_minute_bars(_trading_days(40)), "30-MINUTE")
+    full = ema_cross(target_bars)
+    for k in np.random.default_rng(0).integers(LOOKBACK_DAYS * TARGET_BARS_PER_DAY_30M, len(target_bars), 50):
+        truncated = ema_cross(target_bars.iloc[: k + 1]).iloc[-1]
         assert truncated == full.iloc[k] or (np.isnan(truncated) and np.isnan(full.iloc[k]))
 
 
-def test_rolling_source_matches_precomputed_source():
-    bins = resample_session(_minute_bars(_trading_days(40)), "30-MINUTE")
-    precomputed = PrecomputedSource(ema_cross(bins))
-    rolling = RollingSource(ema_cross, LOOKBACK_DAYS)
+def test_rolling_forecast_matches_precomputed_forecast():
+    target_bars = resample_by_session(_minute_bars(_trading_days(40)), "30-MINUTE")
+    precomputed = PrecomputedForecast(ema_cross(target_bars))
+    rolling = RollingForecast(ema_cross, LOOKBACK_DAYS)
 
     compared = 0
-    for bin_row in bins.itertuples(name=None):
-        expected = precomputed.update(bin_row)
-        actual = rolling.update(bin_row)
+    for target_bar in target_bars.itertuples(name=None):
+        expected = precomputed.update(target_bar)
+        actual = rolling.update(target_bar)
         if actual is None or expected is None:
             continue
-        assert actual == expected, f"bin_end={bin_row[0]}"
+        assert actual == expected, f"bar_end={target_bar[0]}"
         compared += 1
-    assert compared == len(bins) - (LOOKBACK_DAYS - 1) * BINS_PER_DAY_30M
+    assert compared == len(target_bars) - (LOOKBACK_DAYS - 1) * TARGET_BARS_PER_DAY_30M

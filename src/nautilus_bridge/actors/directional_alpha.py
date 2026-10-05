@@ -12,7 +12,7 @@ from nautilus_trader.model import BarType
 from nautilus_trader.model import CustomData
 from nautilus_trader.model import InstrumentId
 
-from nautilus_bridge.data.custom_data import ExposureData
+from nautilus_bridge.data.custom_data import ForecastData
 from nautilus_bridge.data.trading_days import CATALOG_PATH
 from nautilus_bridge.data.trading_days import warmup_start
 
@@ -83,25 +83,25 @@ class DirectionalAlphaActor(DataActor):
             return
 
         if self.fast_ema.value >= self.slow_ema.value:
-            target_exposure = 1
+            forecast = 1
         else:
-            target_exposure = -1
+            forecast = -1
 
         self._debug(
             bar,
             fast_ema=self.fast_ema.value,
             slow_ema=self.slow_ema.value,
-            exposure=target_exposure,
+            forecast=forecast,
         )
 
-        target_exposure = ExposureData(
-            target_exposure=target_exposure,
+        forecast_data = ForecastData(
+            forecast=forecast,
             ts_event=bar.ts_event,
             ts_init=self.clock.timestamp_ns(),
         )
 
-        data_type = target_exposure.TYPE
-        data = CustomData(target_exposure.TYPE, target_exposure)
+        data_type = forecast_data.TYPE
+        data = CustomData(forecast_data.TYPE, forecast_data)
         self.publish_data(data_type, data)
 
     def on_stop(self) -> None:

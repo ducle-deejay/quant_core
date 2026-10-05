@@ -4,10 +4,10 @@ from nautilus_trader.model import DataType
 
 
 @dataclass(frozen=True)
-class ExposureData:
-    TYPE = DataType("ExposureData")
+class ForecastData:
+    TYPE = DataType("ForecastData")
 
-    target_exposure: float
+    forecast: float  # In [-1, 1]: +1 is long full book, -1 is short full book
     ts_event: int
     ts_init: int
 

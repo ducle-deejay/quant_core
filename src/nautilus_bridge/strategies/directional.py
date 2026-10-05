@@ -15,7 +15,7 @@ from nautilus_trader.model import Price
 from nautilus_trader.model import TimeInForce
 from nautilus_trader.trading import Strategy
 
-from nautilus_bridge.data.custom_data import ExposureData
+from nautilus_bridge.data.custom_data import ForecastData
 
 
 class DirectionalStrategyConfig(StrategyConfig):
@@ -24,7 +24,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         *,
         instrument_id: InstrumentId,
         bar_type: BarType,
-        trade_size: Decimal | None = None,
+        fixed_contracts: Decimal | None = None,
         limit_offset_ticks: int = 1,
         order_ttl_minutes: int = 3,
         **_kwargs: object,
@@ -32,7 +32,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         super().__init__()
         self.instrument_id = instrument_id
         self.bar_type = bar_type
-        self.trade_size = trade_size
+        self.fixed_contracts = fixed_contracts
         self.limit_offset_ticks = limit_offset_ticks
         self.order_ttl_minutes = order_ttl_minutes
 
@@ -42,19 +42,19 @@ class DirectionalStrategy(Strategy):
     def __init__(self, config: DirectionalStrategyConfig) -> None:
         super().__init__(config)
         self.instrument = None
-        self.last_target_exposure: float | None = None
+        self.last_forecast: float | None = None
         self.target_contracts = 0
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
-        self.subscribe_data(ExposureData.TYPE)
+        self.subscribe_data(ForecastData.TYPE)
 
-    def on_data(self, exposure_data: CustomData) -> None:
-        target_exposure = exposure_data.data.target_exposure
+    def on_data(self, forecast_data: CustomData) -> None:
+        forecast = forecast_data.data.forecast
         # Only a new alpha decision changes the target; repeated values are ignored
-        if target_exposure == self.last_target_exposure:
+        if forecast == self.last_forecast:
             return
-        self.last_target_exposure = target_exposure
+        self.last_forecast = forecast
 
         if self.instrument is None:
             return
@@ -65,11 +65,11 @@ class DirectionalStrategy(Strategy):
 
         # Portfolio.account() clones the account with its full event history, so fetch it once
         account = self.portfolio.account(self.config.instrument_id.venue)
-        if self.config.trade_size is not None:
-            # Fixed size for debugging: exposure +-1 maps to +-trade_size contracts
-            self.target_contracts = int(self.config.trade_size * Decimal(str(target_exposure)))
+        if self.config.fixed_contracts is not None:
+            # Fixed size for debugging: forecast +-1 maps to +-fixed_contracts contracts
+            self.target_contracts = int(self.config.fixed_contracts * Decimal(str(forecast)))
         else:
-            self.target_contracts = self._exposure_to_contracts(target_exposure, bar.close, account)
+            self.target_contracts = self._forecast_to_contracts(forecast, bar.close, account)
         target_contracts = self.target_contracts
         current_contracts = int(self.portfolio.net_position(self.config.instrument_id))
         if target_contracts == current_contracts:
@@ -131,12 +131,12 @@ class DirectionalStrategy(Strategy):
         )
         self.submit_order(order)
 
-    def _exposure_to_contracts(self, exposure: float, price: Price, account: MarginAccount) -> int:
+    def _forecast_to_contracts(self, forecast: float, price: Price, account: MarginAccount) -> int:
         # Size on total (not free), so the result does not shrink with the held position
         total = account.balance_total(self.instrument.settlement_currency).as_decimal()
         margin_per_contract = self._initial_margin_per_contract(price, account)
         # int() truncates toward zero, so |contracts| never exceeds what total can margin
-        return int(Decimal(str(exposure)) * total / margin_per_contract)
+        return int(Decimal(str(forecast)) * total / margin_per_contract)
 
     def _max_openable_contracts(self, price: Price, account: MarginAccount) -> int:
         # Nautilus defines free = total - locked, the amount available for new orders
@@ -163,5 +163,5 @@ class DirectionalStrategy(Strategy):
     def on_stop(self) -> None:
         # Clear the target first so on_position_closed does not reopen
         self.target_contracts = 0
-        self.last_target_exposure = None
+        self.last_forecast = None
         self.close_all_positions(self.config.instrument_id)

@@ -16,7 +16,7 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import TradingSessi
 BAR_COLUMNS = ("open", "high", "low", "close", "volume")
 
 BarRow = tuple[int, int, float, float, float, float, float]
-BinRow = tuple[int, float, float, float, float, float]
+TargetBarRow = tuple[int, float, float, float, float, float]
 
 MINUTE_NS = 60_000_000_000
 
@@ -38,30 +38,30 @@ def bars_frame(rows: Iterable[BarRow]) -> pd.DataFrame:
     return pd.DataFrame(list(rows), columns=columns).set_index("ts_event")
 
 
-def bins_frame(rows: Iterable[BinRow]) -> pd.DataFrame:
-    return pd.DataFrame(list(rows), columns=["bin_end", *BAR_COLUMNS]).set_index("bin_end")
+def target_bars_frame(rows: Iterable[TargetBarRow]) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=["bar_end", *BAR_COLUMNS]).set_index("bar_end")
 
 
-def session_bin_end(
+def session_bar_end(
     ts_init: np.ndarray,
     timeframe: str,
     sessions: TradingSessions = VN30F1M_SESSIONS,
 ) -> np.ndarray:
-    return _session_bin_end(ts_init, _parse_timeframe(timeframe), sessions)
+    return _session_bar_end(ts_init, _parse_timeframe(timeframe), sessions)
 
 
-def resample_session(bars: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+def resample_by_session(bars: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     bars = bars.sort_values("ts_init", kind="stable")
-    bin_end = pd.Index(
-        _session_bin_end(bars["ts_init"].to_numpy(), _parse_timeframe(timeframe), VN30F1M_SESSIONS),
-        name="bin_end",
+    bar_end = pd.Index(
+        _session_bar_end(bars["ts_init"].to_numpy(), _parse_timeframe(timeframe), VN30F1M_SESSIONS),
+        name="bar_end",
     )
-    return bars.groupby(bin_end, sort=True).agg(
+    return bars.groupby(bar_end, sort=True).agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"},
     )
 
 
-class SessionBinner:
+class SessionResampler:
 
     def __init__(
         self,
@@ -70,26 +70,26 @@ class SessionBinner:
     ) -> None:
         self._timeframe = _parse_timeframe(timeframe)
         self._sessions = sessions
-        self._day: tuple[int, int] | None = None
-        self._day_bins: dict[int, int] = {}
+        self._day_bounds: tuple[int, int] | None = None
+        self._day_bar_ends: dict[int, int] = {}
         self._last_ts_init: int | None = None
-        self._bin_end: int | None = None
+        self._bar_end: int | None = None
         self._ohlcv: list[float] | None = None
 
-    def update(self, row: BarRow) -> list[BinRow]:
+    def update(self, row: BarRow) -> list[TargetBarRow]:
         ts_init = row[1]
         if self._last_ts_init is not None and ts_init <= self._last_ts_init:
             return []
         self._last_ts_init = ts_init
 
-        bin_end = self._bin_end_of(ts_init)
+        bar_end = self._bar_end_of(ts_init)
         closed = []
-        if self._bin_end is not None and bin_end != self._bin_end:
+        if self._bar_end is not None and bar_end != self._bar_end:
             closed.append(self._close())
 
         open_, high, low, close, volume = row[2:]
         if self._ohlcv is None:
-            self._bin_end = bin_end
+            self._bar_end = bar_end
             self._ohlcv = [open_, high, low, close, volume]
         else:
             self._ohlcv[1] = max(self._ohlcv[1], high)
@@ -97,34 +97,34 @@ class SessionBinner:
             self._ohlcv[3] = close
             self._ohlcv[4] += volume
 
-        if ts_init == bin_end:
+        if ts_init == bar_end:
             closed.append(self._close())
         return closed
 
-    def _bin_end_of(self, ts_init: int) -> int:
-        if self._day is None or not self._day[0] <= ts_init < self._day[1]:
+    def _bar_end_of(self, ts_init: int) -> int:
+        if self._day_bounds is None or not self._day_bounds[0] <= ts_init < self._day_bounds[1]:
             self._load_day(ts_init)
-        bin_end = self._day_bins.get(ts_init)
-        if bin_end is None:
+        bar_end = self._day_bar_ends.get(ts_init)
+        if bar_end is None:
             ts = np.array([ts_init], dtype=np.int64)
-            day_start = np.array([self._day[0]], dtype=np.int64)
-            bin_end = int(_bin_end(ts, day_start, self._timeframe, self._sessions)[0])
-        return bin_end
+            day_start = np.array([self._day_bounds[0]], dtype=np.int64)
+            bar_end = int(_bar_end(ts, day_start, self._timeframe, self._sessions)[0])
+        return bar_end
 
     def _load_day(self, ts_init: int) -> None:
         day_start = int(_local_day_start(np.array([ts_init]), self._sessions)[0])
         next_day = pd.Timestamp(day_start, tz="UTC").tz_convert(self._sessions.timezone) + pd.Timedelta(days=1)
-        self._day = (day_start, next_day.normalize().value)
+        self._day_bounds = (day_start, next_day.normalize().value)
 
-        minutes = np.arange(day_start + MINUTE_NS, self._day[1] + 1, MINUTE_NS, dtype=np.int64)
+        minutes = np.arange(day_start + MINUTE_NS, self._day_bounds[1] + 1, MINUTE_NS, dtype=np.int64)
         day_starts = np.full(minutes.shape, day_start, dtype=np.int64)
-        bin_ends = _session_bin_end_or_missing(minutes, day_starts, self._timeframe, self._sessions)
-        inside = bin_ends >= 0
-        self._day_bins = dict(zip(minutes[inside].tolist(), bin_ends[inside].tolist()))
+        bar_ends = _session_bar_end_or_missing(minutes, day_starts, self._timeframe, self._sessions)
+        inside = bar_ends >= 0
+        self._day_bar_ends = dict(zip(minutes[inside].tolist(), bar_ends[inside].tolist()))
 
-    def _close(self) -> BinRow:
-        row = (self._bin_end, *self._ohlcv)
-        self._bin_end = None
+    def _close(self) -> TargetBarRow:
+        row = (self._bar_end, *self._ohlcv)
+        self._bar_end = None
         self._ohlcv = None
         return row
 
@@ -132,17 +132,17 @@ class SessionBinner:
 def _parse_timeframe(timeframe: str) -> pd.Timedelta:
     spec = BarSpecification.from_str(f"{timeframe}-LAST")
     if spec.aggregation not in (BarAggregation.MINUTE, BarAggregation.HOUR):
-        raise ValueError(f"Session binning supports MINUTE or HOUR timeframes, got {timeframe}")
+        raise ValueError(f"Session resampling supports MINUTE or HOUR timeframes, got {timeframe}")
     return pd.Timedelta(spec.timedelta)
 
 
-def _session_bin_end(
+def _session_bar_end(
     ts_init: np.ndarray,
     timeframe: pd.Timedelta,
     sessions: TradingSessions,
 ) -> np.ndarray:
     ts_init = np.asarray(ts_init, dtype=np.int64)
-    return _bin_end(ts_init, _local_day_start(ts_init, sessions), timeframe, sessions)
+    return _bar_end(ts_init, _local_day_start(ts_init, sessions), timeframe, sessions)
 
 
 def _local_day_start(ts_init: np.ndarray, sessions: TradingSessions) -> np.ndarray:
@@ -150,21 +150,21 @@ def _local_day_start(ts_init: np.ndarray, sessions: TradingSessions) -> np.ndarr
     return local.normalize().tz_convert("UTC").as_unit("ns").asi8
 
 
-def _bin_end(
+def _bar_end(
     ts_init: np.ndarray,
     day_start: np.ndarray,
     timeframe: pd.Timedelta,
     sessions: TradingSessions,
 ) -> np.ndarray:
-    bin_end = _session_bin_end_or_missing(ts_init, day_start, timeframe, sessions)
-    outside = bin_end < 0
+    bar_end = _session_bar_end_or_missing(ts_init, day_start, timeframe, sessions)
+    outside = bar_end < 0
     if outside.any():
         first = pd.Timestamp(int(ts_init[outside][0]), tz="UTC").tz_convert(sessions.timezone)
         raise ValueError(f"Bar with ts_init {first} is outside the trading sessions")
-    return bin_end
+    return bar_end
 
 
-def _session_bin_end_or_missing(
+def _session_bar_end_or_missing(
     ts_init: np.ndarray,
     day_start: np.ndarray,
     timeframe: pd.Timedelta,
@@ -173,15 +173,15 @@ def _session_bin_end_or_missing(
     since_midnight = ts_init - day_start
     step = timeframe.value
 
-    bin_end = np.full(ts_init.shape, -1, dtype=np.int64)
+    bar_end = np.full(ts_init.shape, -1, dtype=np.int64)
     for start, end in sessions.continuous:
         start_ns, end_ns = _time_ns(start), _time_ns(end)
         inside = (since_midnight > start_ns) & (since_midnight <= end_ns)
         steps = -((start_ns - since_midnight[inside]) // step)
-        bin_end[inside] = day_start[inside] + np.minimum(start_ns + steps * step, end_ns)
+        bar_end[inside] = day_start[inside] + np.minimum(start_ns + steps * step, end_ns)
     auction = since_midnight == _time_ns(sessions.closing_auction)
-    bin_end[auction] = ts_init[auction]
-    return bin_end
+    bar_end[auction] = ts_init[auction]
+    return bar_end
 
 
 def _time_ns(value: time) -> int:

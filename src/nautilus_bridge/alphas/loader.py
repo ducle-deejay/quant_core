@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from nautilus_bridge.alphas.sources import AlphaFn
+from nautilus_bridge.alphas.forecast_runtime import AlphaFn
 
 ALPHA_FUNCTION = "alpha"
 

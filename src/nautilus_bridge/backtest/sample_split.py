@@ -7,27 +7,27 @@ OS_LOOKBACK = pd.DateOffset(months=6)
 
 
 def sample_window(
-    mode: str,
+    sample: str,
     cutoff_day: pd.Timestamp | None = None,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     cutoff_day = cutoff_day or pd.Timestamp.now(tz="UTC").normalize()
     os_start = cutoff_day - OS_LOOKBACK
 
-    if mode == "OS":
+    if sample == "OS":
         return os_start, cutoff_day
 
-    if mode == "IS":
+    if sample == "IS":
         return cutoff_day - IS_LOOKBACK, os_start
 
-    raise ValueError(f"mode must be 'IS' or 'OS', got {mode!r}")
+    raise ValueError(f"sample must be 'IS' or 'OS', got {sample!r}")
 
 
 def backtest_period(
     start: str | None = None,
     end: str | None = None,
-    mode: str = "IS",
+    sample: str = "IS",
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    window_start, window_end = sample_window(mode)
+    window_start, window_end = sample_window(sample)
 
     start_ts = window_start if start is None else pd.Timestamp(start, tz="UTC")
     end_ts = window_end if end is None else pd.Timestamp(end, tz="UTC")
@@ -38,8 +38,8 @@ def backtest_period(
 def period_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
     dates = f"{start.date()} → {end.date()}"
 
-    for mode in ("IS", "OS"):
-        if (start, end) == sample_window(mode):
-            return f"{mode} ({dates})"
+    for sample in ("IS", "OS"):
+        if (start, end) == sample_window(sample):
+            return f"{sample} ({dates})"
 
     return dates

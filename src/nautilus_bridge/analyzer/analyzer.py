@@ -15,7 +15,7 @@ from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.config import TearsheetConfig
 from nautilus_trader.analysis import create_tearsheet
 
-from nautilus_bridge.backtest.run_window import period_label
+from nautilus_bridge.backtest.sample_split import period_label
 
 def render_metrics(
     result: BacktestResult,

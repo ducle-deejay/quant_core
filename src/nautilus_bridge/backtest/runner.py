@@ -9,16 +9,16 @@ from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import StrategyId
 from nautilus_trader.persistence import ParquetDataCatalog
 
-from nautilus_bridge.actors.vector_alpha import VectorAlphaActor
-from nautilus_bridge.actors.vector_alpha import VectorAlphaActorConfig
-from nautilus_bridge.alphas.frame import bar_row
-from nautilus_bridge.alphas.frame import bars_frame
-from nautilus_bridge.alphas.frame import resample_session
+from nautilus_bridge.actors.forecast import ForecastActor
+from nautilus_bridge.actors.forecast import ForecastActorConfig
+from nautilus_bridge.alphas.session_resampling import bar_row
+from nautilus_bridge.alphas.session_resampling import bars_frame
+from nautilus_bridge.alphas.session_resampling import resample_by_session
 from nautilus_bridge.alphas.loader import load_alpha
 # from nautilus_bridge.execution.directional import TWAPModifiedAlgorithm
 # from nautilus_bridge.execution.directional import TWAPModifiedAlgorithmConfig
 from nautilus_bridge.backtest.engine import engine_config
-from nautilus_bridge.backtest.run_window import backtest_period
+from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.venue import venue_config
 from nautilus_bridge.strategies.directional import DirectionalStrategy
 from nautilus_bridge.strategies.directional import DirectionalStrategyConfig
@@ -34,7 +34,7 @@ def run_backtest(
     commission: str,
     alpha: str,
     strategy_id: str,
-    trade_size: int,
+    fixed_contracts: int,
     catalog_path: str,
     output_dir: str,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
@@ -65,15 +65,15 @@ def run_backtest(
             end=end_run.value,
         )
     )
-    precomputed_exposure = alpha_fn(resample_session(source_bars, timeframe))
+    precomputed_forecast = alpha_fn(resample_by_session(source_bars, timeframe))
 
-    actor = VectorAlphaActor(
-        config=VectorAlphaActorConfig(
+    actor = ForecastActor(
+        config=ForecastActorConfig(
             instrument_id=instrument_id,
-            bar_type=source_bar_type,
+            source_bar_type=source_bar_type,
             timeframe=timeframe,
             alpha_fn=alpha_fn,
-            precomputed_exposure=precomputed_exposure,
+            precomputed_forecast=precomputed_forecast,
         ),
     )
 
@@ -90,7 +90,7 @@ def run_backtest(
             instrument_id=instrument_id,
             bar_type=source_bar_type,
             manage_gtd_expiry=True,
-            trade_size=trade_size,
+            fixed_contracts=fixed_contracts,
         ),
     )
 

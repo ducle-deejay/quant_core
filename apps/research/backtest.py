@@ -24,7 +24,7 @@ results, node, run_config = run_backtest(
     commission=commission,
     alpha=alpha,
     strategy_id="VN30F1M-V1",
-    trade_size=1,
+    fixed_contracts=1,
     catalog_path=catalog_path,
     output_dir=output_dir,
 )

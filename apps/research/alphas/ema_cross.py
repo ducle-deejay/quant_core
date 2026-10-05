@@ -12,6 +12,6 @@ def alpha(bars: pd.DataFrame) -> pd.Series:
     fast = close.ewm(span=FAST_PERIOD, adjust=False).mean()
     slow = close.ewm(span=SLOW_PERIOD, adjust=False).mean()
 
-    exposure = pd.Series(np.where(fast >= slow, 1.0, -1.0), index=bars.index)
-    exposure.iloc[: SLOW_PERIOD - 1] = np.nan
-    return exposure
+    forecast = pd.Series(np.where(fast >= slow, 1.0, -1.0), index=bars.index)
+    forecast.iloc[: SLOW_PERIOD - 1] = np.nan
+    return forecast
