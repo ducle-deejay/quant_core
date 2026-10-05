@@ -4,7 +4,7 @@ The node is run by ``runner.run_node``, whose exit codes are described in runner
 failure while building the node raises, which also exits with a non-zero code.
 
 Usage: uv run python -m nautilus_bridge.live.live
-Env (.env at the repository root): API_KEY, API_SECRET, ENTRADE_USERNAME,
+Env (.env at the repository root): DATA_ROOT, API_KEY, API_SECRET, ENTRADE_USERNAME,
 ENTRADE_PASSWORD, optional ENTRADE_INVESTOR_ID.
 """
 
@@ -44,12 +44,14 @@ from nautilus_bridge.adapters.entrade.config import EntradeExecClientConfig
 from nautilus_bridge.adapters.entrade.factories import DnseLiveDataClientFactory
 from nautilus_bridge.adapters.entrade.factories import EntradeLiveExecClientFactory
 from nautilus_bridge.strategies.directional import DirectionalStrategy
-from nautilus_bridge.data.trading_days import CATALOG_PATH
 from nautilus_bridge.live.runner import run_node
 from nautilus_bridge.strategies.directional import DirectionalStrategyConfig
 
 ROOT = Path(__file__).resolve().parents[3]
-LOG_DIRECTORY = ROOT / "data" / "logs" / "live"
+load_dotenv(ROOT / ".env", override=True)
+DATA_ROOT = Path(os.environ["DATA_ROOT"])
+CATALOG_PATH = DATA_ROOT / "catalog"
+LOG_DIRECTORY = DATA_ROOT / "logs" / "live"
 
 NAME = "QUANTCORE-LIVE"
 TRADER_ID = TraderId.from_str("QUANTCORE-001")
@@ -65,7 +67,6 @@ STRATEGY_ID = StrategyId("VN30F1M-V1")
 
 
 def build_node() -> LiveNode:
-    load_dotenv(ROOT / ".env", override=True)
     username = os.environ["ENTRADE_USERNAME"]
     password = os.environ["ENTRADE_PASSWORD"]
     investor_id, account_id = resolve_entrade_account_ids(

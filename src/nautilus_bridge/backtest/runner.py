@@ -20,6 +20,7 @@ from nautilus_bridge.alphas.loader import load_alpha
 from nautilus_bridge.backtest.engine import engine_config
 from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.venue import venue_config
+from nautilus_bridge.data.catalog import catalog_path
 from nautilus_bridge.strategies.directional import DirectionalStrategy
 from nautilus_bridge.strategies.directional import DirectionalStrategyConfig
 
@@ -35,9 +36,9 @@ def run_backtest(
     alpha: str,
     strategy_id: str,
     fixed_contracts: int,
-    catalog_path: str,
     output_dir: str,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
+    catalog = str(catalog_path())
     instrument_id = InstrumentId.from_str(instrument_id)
     source_bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
     start_run, end_run = backtest_period(start=start, end=end)
@@ -48,11 +49,11 @@ def run_backtest(
         data=[
             BacktestDataConfig(
                 data_type="Bar",
-                catalog_path=catalog_path,
+                catalog_path=catalog,
                 bar_types=[str(source_bar_type)],
             ),
         ],
-        engine=engine_config(catalog_path, output_dir),
+        engine=engine_config(catalog, output_dir),
         start=start_run,
         end=end_run,
         dispose_on_completion=False,
@@ -60,7 +61,7 @@ def run_backtest(
 
     source_bars = bars_frame(
         bar_row(bar)
-        for bar in ParquetDataCatalog(catalog_path).query_bars(
+        for bar in ParquetDataCatalog(catalog).query_bars(
             [str(source_bar_type)],
             end=end_run.value,
         )

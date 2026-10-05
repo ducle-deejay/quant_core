@@ -19,7 +19,6 @@ from nautilus_bridge.alphas.forecast_runtime import ForecastRuntime
 from nautilus_bridge.alphas.forecast_runtime import PrecomputedForecast
 from nautilus_bridge.alphas.forecast_runtime import RollingForecast
 from nautilus_bridge.data.custom_data import ForecastData
-from nautilus_bridge.data.trading_days import CATALOG_PATH
 from nautilus_bridge.data.trading_days import LOOKBACK_TRADING_DAYS
 from nautilus_bridge.data.trading_days import warmup_start
 
@@ -61,7 +60,6 @@ class ForecastActor(DataActor):
 
     def _request_warmup(self) -> None:
         start = warmup_start(
-            CATALOG_PATH,
             self.config.source_bar_type,
             self.clock.utc_now(),
             LOOKBACK_TRADING_DAYS,

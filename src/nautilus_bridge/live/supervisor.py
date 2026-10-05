@@ -16,6 +16,7 @@ node the same way.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -26,8 +27,11 @@ from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parents[3]
-LOG_FILE = ROOT / "data" / "logs" / "live" / "supervisor.log"
+load_dotenv(ROOT / ".env")
+LOG_FILE = Path(os.environ["DATA_ROOT"]) / "logs" / "live" / "supervisor.log"
 
 TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 STOP_AT = time(15, 0)

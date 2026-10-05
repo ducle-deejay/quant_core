@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -68,8 +67,6 @@ from .api.dnse_api import close_dnse_rest_client
 from .api.dnse_api import create_dnse_rest_client
 from .providers import DnseInstrumentProvider
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_CATALOG_PATH = REPO_ROOT / "data" / "catalog"
 # Largest gap between the parsed DNSE time field and the local receipt time for which
 # the DNSE time is used as ts_event; beyond it the receipt time is used.
 MAX_EXCHANGE_CLOCK_GAP_NS = 60_000_000_000
@@ -514,12 +511,7 @@ class DnseLiveDataClient(MarketDataClient):
         self._trading_client = trading_client
         self._rest_client = rest_client
         self._catalog: ParquetDataCatalog | None = None
-        catalog_path = (
-            Path(config.catalog_path) if config.catalog_path else DEFAULT_CATALOG_PATH
-        )
-        if not catalog_path.is_absolute():
-            catalog_path = REPO_ROOT / catalog_path
-        self._catalog_path = catalog_path
+        self._catalog_path = config.catalog_path
         self._bar_types_by_key: dict[SubscriptionKey, BarType] = {}
         self._subscribed_keys: set[SubscriptionKey] = set()
         self._last_bar_ts_by_key: dict[SubscriptionKey, int] = {}

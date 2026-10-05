@@ -37,10 +37,12 @@ from market_data.sources.mirae.load import FULL_DAY_BARS
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CATALOG_PATH = ROOT / "data" / "catalog"
-DNSE_RAW_ROOT = ROOT / "data" / "raw" / "vietnam" / "dnse"
-MIRAE_RAW_ROOT = ROOT / "data" / "raw" / "vietnam" / "mirae"
-LOG_DIR = ROOT / "data" / "logs"
+load_dotenv(ROOT / ".env")
+DATA_ROOT = Path(os.environ["DATA_ROOT"])
+CATALOG_PATH = DATA_ROOT / "catalog"
+DNSE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "dnse"
+MIRAE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "mirae"
+LOG_DIR = DATA_ROOT / "logs"
 SYMBOL = "VN30F1M"
 DNSE_REQUEST_DELAY_SECONDS = 0.02
 LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -59,7 +61,6 @@ def main() -> None:
     parser.add_argument("command", choices=("ingest", "check", "schedule"))
     parser.add_argument("--date", type=date.fromisoformat)
     args = parser.parse_args()
-    load_dotenv(ROOT / ".env")
     if args.command == "schedule":
         schedule()
         return

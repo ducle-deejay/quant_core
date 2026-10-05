@@ -10,8 +10,6 @@ from nautilus_trader.model import FuturesContract, PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
 
-CATALOG_PATH = Path(__file__).resolve().parents[3] / "data" / "catalog"
-INSTRUMENTS_PATH = CATALOG_PATH / "data" / "instruments"
 PRESERVED_FIELDS = {"activation_ns", "expiration_ns", "ts_event", "ts_init", "info"}
 
 
@@ -64,7 +62,11 @@ def changed_fields(current: dict, rebuilt_definition: dict) -> dict:
     }
 
 
-def instrument_path(current: dict, output: Path = INSTRUMENTS_PATH) -> Path:
+def instruments_dir(catalog_path: Path) -> Path:
+    return catalog_path / "data" / "instruments"
+
+
+def instrument_path(current: dict, output: Path) -> Path:
     stamp = unix_nanos_to_iso8601(current["ts_init"]).replace(":", "-").replace(".", "-")
     directory = current["id"].replace("/", "").replace("^", "_")
     return output / directory / f"{stamp}_{stamp}.parquet"
@@ -79,11 +81,11 @@ def write_changes(source: Path, output: Path, changes: dict) -> None:
     pq.write_table(pa.Table.from_pylist([row], schema=table.schema), output)
 
 
-def rebuild(spec_filename: str, output: Path, apply: bool) -> None:
+def rebuild(spec_filename: str, catalog_path: Path, output: Path, apply: bool) -> None:
     module = load_spec(spec_filename)
     specification = module.build_continuous_futures_contract()
 
-    catalog = ParquetDataCatalog(str(CATALOG_PATH))
+    catalog = ParquetDataCatalog(str(catalog_path))
     for instrument in catalog.instruments():
         current = instrument.to_dict()
         if not matches(instrument, current, specification):
@@ -94,7 +96,7 @@ def rebuild(spec_filename: str, output: Path, apply: bool) -> None:
         if not changes:
             continue
 
-        source = instrument_path(current)
+        source = instrument_path(current, instruments_dir(catalog_path))
         destination = instrument_path(current, output)
         print(f"{destination}: {', '.join(changes)}")
         if apply:
@@ -104,11 +106,13 @@ def rebuild(spec_filename: str, output: Path, apply: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("spec_filename")
-    parser.add_argument("--output", type=Path, default=INSTRUMENTS_PATH)
+    parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
-    rebuild(args.spec_filename, args.output, args.apply)
+    output = args.output or instruments_dir(args.catalog)
+    rebuild(args.spec_filename, args.catalog, output, args.apply)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 
 from nautilus_trader.model import BarType
 from nautilus_trader.persistence import ParquetDataCatalog
 
-CATALOG_PATH = Path(__file__).resolve().parents[3] / "data" / "catalog"
+from nautilus_bridge.data.catalog import catalog_path
+
 VN_TZ = "Asia/Ho_Chi_Minh"
 LOOKBACK_TRADING_DAYS = 30
 
@@ -19,7 +19,6 @@ def trading_day(ts: int) -> date:
 
 
 def warmup_start(
-    catalog_path: str | Path,
     bar_type: BarType,
     before: datetime,
     trading_days: int,
@@ -30,11 +29,12 @@ def warmup_start(
     catalog covers.
     """
     before = pd.Timestamp(before)
-    catalog = ParquetDataCatalog(str(catalog_path))
+    path = catalog_path()
+    catalog = ParquetDataCatalog(str(path))
 
     first_ts = catalog.query_first_timestamp("bars", str(bar_type))
     if first_ts is None:
-        raise ValueError(f"No {bar_type} bars in the catalog at {catalog_path}")
+        raise ValueError(f"No {bar_type} bars in the catalog at {path}")
     first = pd.Timestamp(first_ts, tz="UTC")
 
     span = pd.Timedelta(days=2 * trading_days)

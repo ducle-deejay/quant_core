@@ -135,6 +135,8 @@ class DnseDataClientConfig(DataClientConfig):
                 f"Invalid historical_source={self.historical_source!r}; "
                 f"expected one of {sorted(ALLOWED_HISTORICAL_SOURCES)}",
             )
+        if self.historical_source == "catalog" and not self.catalog_path:
+            raise ValueError("historical_source='catalog' requires catalog_path")
 
     @property
     def venue(self) -> str:

@@ -13,7 +13,6 @@ from nautilus_trader.model import CustomData
 from nautilus_trader.model import InstrumentId
 
 from nautilus_bridge.data.custom_data import ForecastData
-from nautilus_bridge.data.trading_days import CATALOG_PATH
 from nautilus_bridge.data.trading_days import warmup_start
 
 
@@ -54,7 +53,6 @@ class DirectionalAlphaActor(DataActor):
     def _request_warmup(self) -> None:
         bar_type = self.config.bar_type
         self.warmup_start = warmup_start(
-            CATALOG_PATH,
             bar_type.composite(),
             self.clock.utc_now(),
             self.warmup_trading_days,

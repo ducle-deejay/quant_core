@@ -4,7 +4,6 @@ from nautilus_bridge.analyzer.analyzer import analyze
 from nautilus_bridge.backtest.runner import run_backtest
 
 
-catalog_path = "/Users/ducle/repos/quant_core/data/catalog"
 output_dir = "/Users/ducle/repos/quant_core/tmp/directional"
 alpha = "/Users/ducle/repos/quant_core/apps/research/alphas/ema_cross.py"
 
@@ -25,7 +24,6 @@ results, node, run_config = run_backtest(
     alpha=alpha,
     strategy_id="VN30F1M-V1",
     fixed_contracts=1,
-    catalog_path=catalog_path,
     output_dir=output_dir,
 )
 
