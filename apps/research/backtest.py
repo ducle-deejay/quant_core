@@ -3,9 +3,8 @@ from __future__ import annotations
 from nautilus_bridge.analyzer.analyzer import analyze
 from nautilus_bridge.backtest.runner import run_backtest
 
-
-output_dir = "/Users/ducle/repos/quant_core/tmp/directional"
-alpha = "/Users/ducle/repos/quant_core/apps/research/alphas/ema_cross.py"
+output_dir = "tmp/directional"
+alpha = "apps/research/alphas/ema_cross.py"
 
 instrument_id = "VN30F1M.HNX"
 timeframe = "30-MINUTE"
