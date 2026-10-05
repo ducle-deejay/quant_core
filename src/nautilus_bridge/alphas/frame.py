@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 from nautilus_trader.model import Bar
+from nautilus_trader.model import BarAggregation
+from nautilus_trader.model import BarSpecification
 
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import TradingSessions
@@ -42,16 +44,18 @@ def bins_frame(rows: Iterable[BinRow]) -> pd.DataFrame:
 
 def session_bin_end(
     ts_init: np.ndarray,
-    timeframe: pd.Timedelta,
+    timeframe: str,
     sessions: TradingSessions = VN30F1M_SESSIONS,
 ) -> np.ndarray:
-    ts_init = np.asarray(ts_init, dtype=np.int64)
-    return _bin_end(ts_init, _local_day_start(ts_init, sessions), timeframe, sessions)
+    return _session_bin_end(ts_init, _parse_timeframe(timeframe), sessions)
 
 
-def resample_session(bars: pd.DataFrame, timeframe: pd.Timedelta) -> pd.DataFrame:
+def resample_session(bars: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     bars = bars.sort_values("ts_init", kind="stable")
-    bin_end = pd.Index(session_bin_end(bars["ts_init"].to_numpy(), timeframe), name="bin_end")
+    bin_end = pd.Index(
+        _session_bin_end(bars["ts_init"].to_numpy(), _parse_timeframe(timeframe), VN30F1M_SESSIONS),
+        name="bin_end",
+    )
     return bars.groupby(bin_end, sort=True).agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"},
     )
@@ -61,10 +65,10 @@ class SessionBinner:
 
     def __init__(
         self,
-        timeframe: pd.Timedelta,
+        timeframe: str,
         sessions: TradingSessions = VN30F1M_SESSIONS,
     ) -> None:
-        self._timeframe = timeframe
+        self._timeframe = _parse_timeframe(timeframe)
         self._sessions = sessions
         self._day: tuple[int, int] | None = None
         self._day_bins: dict[int, int] = {}
@@ -123,6 +127,22 @@ class SessionBinner:
         self._bin_end = None
         self._ohlcv = None
         return row
+
+
+def _parse_timeframe(timeframe: str) -> pd.Timedelta:
+    spec = BarSpecification.from_str(f"{timeframe}-LAST")
+    if spec.aggregation not in (BarAggregation.MINUTE, BarAggregation.HOUR):
+        raise ValueError(f"Session binning supports MINUTE or HOUR timeframes, got {timeframe}")
+    return pd.Timedelta(spec.timedelta)
+
+
+def _session_bin_end(
+    ts_init: np.ndarray,
+    timeframe: pd.Timedelta,
+    sessions: TradingSessions,
+) -> np.ndarray:
+    ts_init = np.asarray(ts_init, dtype=np.int64)
+    return _bin_end(ts_init, _local_day_start(ts_init, sessions), timeframe, sessions)
 
 
 def _local_day_start(ts_init: np.ndarray, sessions: TradingSessions) -> np.ndarray:

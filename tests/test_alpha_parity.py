@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from nautilus_bridge.alphas.ema_cross import ema_cross
 from nautilus_bridge.alphas.frame import BAR_COLUMNS
 from nautilus_bridge.alphas.frame import SessionBinner
 from nautilus_bridge.alphas.frame import resample_session
 from nautilus_bridge.alphas.frame import session_bin_end
+from nautilus_bridge.alphas.loader import load_alpha
 from nautilus_bridge.alphas.sources import PrecomputedSource
 from nautilus_bridge.alphas.sources import RollingSource
+
+ema_cross = load_alpha(str(Path(__file__).parents[1] / "apps/research/alphas/ema_cross.py"))
 
 TZ = "Asia/Ho_Chi_Minh"
 LOOKBACK_DAYS = 10
@@ -55,24 +59,24 @@ def _trading_days(n: int) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("ts_init", "minutes", "expected"),
+    ("ts_init", "timeframe", "expected"),
     [
-        ("09:01", 30, "09:30"),
-        ("09:30", 30, "09:30"),
-        ("09:31", 30, "10:00"),
-        ("11:30", 30, "11:30"),
-        ("13:01", 30, "13:30"),
-        ("14:30", 30, "14:30"),
-        ("14:45", 30, "14:45"),
-        ("11:16", 45, "11:30"),
-        ("10:31", 45, "11:15"),
-        ("13:46", 45, "14:30"),
+        ("09:01", "30-MINUTE", "09:30"),
+        ("09:30", "30-MINUTE", "09:30"),
+        ("09:31", "30-MINUTE", "10:00"),
+        ("11:30", "30-MINUTE", "11:30"),
+        ("13:01", "30-MINUTE", "13:30"),
+        ("14:30", "30-MINUTE", "14:30"),
+        ("14:45", "30-MINUTE", "14:45"),
+        ("10:31", "1-HOUR", "11:00"),
+        ("11:16", "1-HOUR", "11:30"),
+        ("14:01", "1-HOUR", "14:30"),
     ],
 )
-def test_session_bin_end_anchors_bins_at_session_open(ts_init, minutes, expected):
+def test_session_bin_end_anchors_bins_at_session_open(ts_init, timeframe, expected):
     bin_end = session_bin_end(
         np.array([_local_ns(f"2026-01-05 {ts_init}")]),
-        pd.Timedelta(minutes=minutes),
+        timeframe,
     )
     assert bin_end[0] == _local_ns(f"2026-01-05 {expected}")
 
@@ -80,15 +84,20 @@ def test_session_bin_end_anchors_bins_at_session_open(ts_init, minutes, expected
 @pytest.mark.parametrize("ts_init", ["09:00", "12:00", "14:31", "15:00"])
 def test_session_bin_end_rejects_bars_outside_sessions(ts_init):
     with pytest.raises(ValueError):
-        session_bin_end(np.array([_local_ns(f"2026-01-05 {ts_init}")]), pd.Timedelta(minutes=30))
+        session_bin_end(np.array([_local_ns(f"2026-01-05 {ts_init}")]), "30-MINUTE")
 
 
-@pytest.mark.parametrize("minutes", [1, 2, 3, 5, 7, 10, 15, 20, 30, 45, 60, 90, 120, 240])
-def test_session_binner_matches_resample_session(minutes):
+@pytest.mark.parametrize(
+    "timeframe",
+    [
+        "1-MINUTE", "2-MINUTE", "3-MINUTE", "5-MINUTE", "10-MINUTE", "15-MINUTE", "20-MINUTE",
+        "30-MINUTE", "1-HOUR", "2-HOUR", "4-HOUR",
+    ],
+)
+def test_session_binner_matches_resample_session(timeframe):
     days = _trading_days(3)
     drop = {f"{days[0]} 09:30", f"{days[0]} 10:12", f"{days[1]} 11:30", f"{days[2]} 14:30"}
     bars = _minute_bars(days, drop)
-    timeframe = pd.Timedelta(minutes=minutes)
 
     binner = SessionBinner(timeframe)
     streamed = [
@@ -103,7 +112,7 @@ def test_session_binner_matches_resample_session(minutes):
 
 
 def test_alpha_value_at_each_bin_ignores_later_bins():
-    bins = resample_session(_minute_bars(_trading_days(40)), pd.Timedelta(minutes=30))
+    bins = resample_session(_minute_bars(_trading_days(40)), "30-MINUTE")
     full = ema_cross(bins)
     for k in np.random.default_rng(0).integers(LOOKBACK_DAYS * BINS_PER_DAY_30M, len(bins), 50):
         truncated = ema_cross(bins.iloc[: k + 1]).iloc[-1]
@@ -111,7 +120,7 @@ def test_alpha_value_at_each_bin_ignores_later_bins():
 
 
 def test_rolling_source_matches_precomputed_source():
-    bins = resample_session(_minute_bars(_trading_days(40)), pd.Timedelta(minutes=30))
+    bins = resample_session(_minute_bars(_trading_days(40)), "30-MINUTE")
     precomputed = PrecomputedSource(ema_cross(bins))
     rolling = RollingSource(ema_cross, LOOKBACK_DAYS)
 

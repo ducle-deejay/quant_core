@@ -7,7 +7,7 @@ FAST_PERIOD = 10
 SLOW_PERIOD = 20
 
 
-def ema_cross(bars: pd.DataFrame) -> pd.Series:
+def alpha(bars: pd.DataFrame) -> pd.Series:
     close = bars["close"]
     fast = close.ewm(span=FAST_PERIOD, adjust=False).mean()
     slow = close.ewm(span=SLOW_PERIOD, adjust=False).mean()

@@ -30,7 +30,7 @@ class VectorAlphaActorConfig(DataActorConfig):
         *,
         instrument_id: InstrumentId,
         bar_type: BarType,
-        timeframe: pd.Timedelta,
+        timeframe: str,
         alpha_fn: AlphaFn,
         precomputed_exposure: pd.Series | None = None,
         **_kwargs: object,
