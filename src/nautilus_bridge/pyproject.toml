@@ -22,10 +22,19 @@ dependencies = [
 package-dir = { nautilus_bridge = "." }
 packages = [
     "nautilus_bridge",
+    "nautilus_bridge.actors",
+    "nautilus_bridge.alphas",
+    "nautilus_bridge.analyzer",
+    "nautilus_bridge.backtest",
+    "nautilus_bridge.data",
+    "nautilus_bridge.execution",
     "nautilus_bridge.instruments",
     "nautilus_bridge.instruments.derivatives",
     "nautilus_bridge.instruments.derivatives.futures",
     "nautilus_bridge.adapters",
     "nautilus_bridge.adapters.entrade",
     "nautilus_bridge.adapters.entrade.api",
+    "nautilus_bridge.adapters.entrade.checks",
+    "nautilus_bridge.live",
+    "nautilus_bridge.strategies",
 ]
