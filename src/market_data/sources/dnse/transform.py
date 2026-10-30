@@ -25,13 +25,13 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
 )
 from market_data.sources.dnse.quality import page_number
 from market_data.sources.dnse.quality import read_json
-from market_data.sources.legacy_boundary import legacy_boundary_record_mask
+from market_data.sources.session_boundary import session_boundary_record_mask
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
 LOCAL_TIMEZONE = VN30F1M_SESSIONS.timezone
-# Provider payloads include two session-boundary records at 11:30 and 14:30 local
-# time; the canonical session grid has 241 bars (09:00-11:29, 13:00-14:29 and 14:45).
+# Provider payloads can include a record at 11:30 or 14:30 local time;
+# the canonical session grid has 241 bars (09:00-11:29, 13:00-14:29 and 14:45).
 # Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
 # the interval close, so ts_init = ts_event + 1 minute. The 14:45 bar is the ATC
 # (at-the-close auction) print, a single event known at 14:45 (HNX derivatives
@@ -207,7 +207,7 @@ def _normalize_boundary_bars(
     if str(bar_type) != BAR_TYPE or frame.empty:
         return frame
 
-    boundary_mask = legacy_boundary_record_mask(frame["timestamp"])
+    boundary_mask = session_boundary_record_mask(frame["timestamp"])
     normalized = frame.copy()
     boundary_indices: list[int] = []
     if boundary_mask.any():

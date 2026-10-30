@@ -10,6 +10,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from market_data.sources.session_boundary import fold_session_boundary_timestamps
+
 
 BAR_FILE = re.compile(r"^(?P<interval>[^_]+)_(?P<start>\d{8})_(?P<end>\d{8})\.json$")
 PAGE_FILE = re.compile(r"^page_(?P<number>\d{5})\.json$")
@@ -112,8 +114,9 @@ def _validate_bars(directory: Path) -> tuple[int, tuple[int, ...]]:
             raise ValueError(f"DNSE contains duplicate bar timestamps under {directory}")
         observed_timestamps.update(timestamps)
         if start == end:
+            timestamps = fold_session_boundary_timestamps(timestamps)
             missing_timestamps.extend(_missing_session_bars(timestamps, start))
-        records += lengths["t"]
+        records += len(timestamps)
     return records, tuple(missing_timestamps)
 
 
