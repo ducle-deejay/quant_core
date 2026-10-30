@@ -39,6 +39,12 @@ LOT_SIZE = Quantity.from_int(1)
 # (design decision).
 MARGIN_INIT = Decimal("0.2")
 MARGIN_MAINT = Decimal("0.12")
+KRX_GO_LIVE = date(2025, 5, 5)
+CONTRACT_CODE_PREFIX = "41I1"
+CONTRACT_CODE_SUFFIX = "000"
+CONTRACT_YEAR_CODES = "0123456789ABCDEFGHJKLMNPQRSTVW"
+CONTRACT_YEAR_CODE_BASE = 2010
+CONTRACT_MONTH_CODES = "123456789ABC"
 
 
 @dataclass(frozen=True)
@@ -171,6 +177,22 @@ def vn30f_expiry_date(
     while not is_trading_day(expiry):
         expiry -= timedelta(days=1)
     return expiry
+
+
+def vn30f1m_contract(day: date, is_trading_day: Callable[[date], bool]) -> tuple[str, date]:
+    """Exchange code and last trading day of the contract VN30F1M follows on ``day``.
+
+    A contract stays front month through its expiry day; the next day rolls to the following month.
+    """
+    if day < KRX_GO_LIVE:
+        raise ValueError(f"VN30 futures codes before {KRX_GO_LIVE} do not use the KRX format: {day}")
+    year, month = day.year, day.month
+    expiry = vn30f_expiry_date(year, month, is_trading_day)
+    if day > expiry:
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+        expiry = vn30f_expiry_date(year, month, is_trading_day)
+    year_code = CONTRACT_YEAR_CODES[(year - CONTRACT_YEAR_CODE_BASE) % len(CONTRACT_YEAR_CODES)]
+    return f"{CONTRACT_CODE_PREFIX}{year_code}{CONTRACT_MONTH_CODES[month - 1]}{CONTRACT_CODE_SUFFIX}", expiry
 
 
 class VN30F1MResolver:

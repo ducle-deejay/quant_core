@@ -31,21 +31,23 @@ from market_data.notify import code_block
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
 from market_data.sources.dnse.client import create_dnse_rest_client
+from market_data.sources.dnse.extract import WORKING_DATES_FILE
 from market_data.sources.dnse.extract import ClientFactory
 from market_data.sources.dnse.extract import get_working_dates
-from market_data.sources.dnse.pipeline import retained_contract_symbol
+from market_data.sources.dnse.extract import read_working_dates
+from market_data.sources.dnse.extract import recorded_trading_day
 from market_data.sources.dnse.pipeline import run_daily as run_dnse_daily
 from market_data.sources.mirae.extract import request_mirae_history
 from market_data.sources.mirae.load import FULL_DAY_BARS
 from market_data.sources.mirae.pipeline import run_daily as run_mirae_daily
 from market_data.sources.mirae.transform import BAR_TYPE
 from market_data.sources.mirae.transform import LOCAL_TIMEZONE
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
 
 
 SourceRunner = Callable[[date], dict[str, object]]
 
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
-WORKING_DATES_FILE = "working_dates.json"
 # Blank inline field (zero-width space as name and value) that ends a row of inline fields early
 EMPTY_INLINE_FIELD = ("\u200b", "\u200b", True)
 
@@ -193,13 +195,6 @@ def record_working_dates(raw_root: Path, client_factory: ClientFactory) -> set[d
     return merged
 
 
-def read_working_dates(raw_root: Path) -> set[date]:
-    path = raw_root / WORKING_DATES_FILE
-    if not path.exists():
-        return set()
-    return {date.fromisoformat(value) for value in json.loads(path.read_text(encoding="utf-8"))}
-
-
 def dnse_runner(
     client_factory: ClientFactory,
     raw_root: Path,
@@ -221,12 +216,14 @@ def dnse_runner(
 
 
 def mirae_runner(raw_root: Path, dnse_raw_root: Path, catalog_path: Path, symbol: str) -> SourceRunner:
-    """Mirae fallback runner; reuses the DNSE-retained monthly contract."""
+    """Mirae fallback runner; a current-day run requests the VN30F1M monthly contract."""
 
     def run(day: date) -> dict[str, object]:
+        today = datetime.now(ZoneInfo(LOCAL_TIMEZONE)).date()
+        active_contract = vn30f1m_contract(day, recorded_trading_day(dnse_raw_root))[0] if day == today else None
         return run_mirae_daily(
             request_history=request_mirae_history,
-            active_contract=retained_contract_symbol(dnse_raw_root, day),
+            active_contract=active_contract,
             raw_root=raw_root,
             catalog_path=catalog_path,
             continuous_symbol=symbol,

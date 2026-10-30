@@ -7,6 +7,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f_expiry_date
 from nautilus_bridge.strategies.rollover import FuturesRollover
 from nautilus_bridge.strategies.rollover import RollAction
@@ -34,6 +35,18 @@ def test_expiry_on_a_holiday_moves_to_the_previous_trading_day() -> None:
     assert vn30f_expiry_date(
         2026, 9, lambda day: day.weekday() < 5 and day not in holidays
     ) == date(2026, 9, 16)
+
+
+@pytest.mark.parametrize(
+    ("day", "contract"),
+    [
+        (date(2026, 10, 15), ("41I1GA000", date(2026, 10, 15))),  # expiry day keeps the expiring contract
+        (date(2026, 10, 16), ("41I1GB000", date(2026, 11, 19))),
+        (date(2026, 12, 18), ("41I1H1000", date(2027, 1, 21))),  # December rolls into the next year's code
+    ],
+)
+def test_vn30f1m_follows_the_contract_until_its_expiry_day(day: date, contract: tuple[str, date]) -> None:
+    assert vn30f1m_contract(day, lambda candidate: candidate.weekday() < 5) == contract
 
 
 def test_roll_closes_at_14_on_expiry_day_and_reopens_on_the_next_session() -> None:

@@ -84,16 +84,6 @@ def run_daily(
     }
 
 
-def retained_contract_symbol(raw_root: str | Path, day: date) -> str | None:
-    trades = Path(raw_root) / day.isoformat() / "hnx" / "futures" / "trades"
-    if not trades.is_dir():
-        return None
-    symbols = sorted(path.name for path in trades.iterdir() if path.is_dir())
-    if len(symbols) > 1:
-        raise ValueError(f"Expected at most one retained DNSE contract for {day}: {symbols}")
-    return symbols[0] if symbols else None
-
-
 def _reconcile_counts(expected: dict[str, int], loaded: dict[str, int]) -> None:
     observed = {
         "bars": loaded.get("Bar", 0),

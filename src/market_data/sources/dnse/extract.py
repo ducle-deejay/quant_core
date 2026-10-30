@@ -16,12 +16,14 @@ from zoneinfo import ZoneInfo
 
 from market_data.sources.dnse.quality import validate_raw_delivery
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
 
 
 PAGE_LIMIT = 1_000
 MAX_SERVER_RETRIES = 6
 MIN_REMAINING = 500
 LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
+WORKING_DATES_FILE = "working_dates.json"
 
 ClientFactory = Callable[[], tuple[Any, list[Any]]]
 CONTRACT_DEFINITION_FIELDS = (
@@ -57,9 +59,11 @@ def extract_day(
         raise ValueError("DNSE returned no working dates")
     if day == today and day not in working_dates:
         return None
-    contract = _front_month_contract(
+    symbol, expiration = vn30f1m_contract(day, recorded_trading_day(root))
+    contract = _contract_definition(
         client_factory=client_factory,
-        continuous_symbol=continuous_symbol,
+        symbol=symbol,
+        expiration=expiration,
     )
 
     root.mkdir(parents=True, exist_ok=True)
@@ -122,30 +126,14 @@ def _retain_contract(directory: Path, contract: dict[str, str | None]) -> None:
     )
 
 
-def _front_month_contract(
+def _contract_definition(
     *,
     client_factory: ClientFactory,
-    continuous_symbol: str,
+    symbol: str,
+    expiration: date,
 ) -> dict[str, str | None]:
+    """DNSE's definition of ``symbol``; a missing finalTradeDate takes ``expiration``."""
     client, observed = client_factory()
-    instruments = _decode_response(
-        *client.get_instruments(market_id="DVX", security_group_id="FU", limit=100),
-    )[1]
-    _ensure_quota(observed[-1] if observed else None)
-    if not isinstance(instruments, dict):
-        raise ValueError("DNSE instruments response is not a JSON object")
-    records = instruments.get("data")
-    if not isinstance(records, list):
-        raise ValueError("DNSE instruments response does not contain a data list")
-    matches = [
-        item
-        for item in records
-        if isinstance(item, dict) and item.get("symbolType") == continuous_symbol
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"Expected one DNSE {continuous_symbol} contract, found {len(matches)}")
-    symbol = str(matches[0]["symbol"])
-
     definition = _decode_response(*client.get_security_definition(symbol, board_id="G1"))[1]
     received_at = datetime.now(UTC)
     _ensure_quota(observed[-1] if observed else None)
@@ -157,9 +145,7 @@ def _front_month_contract(
     listing_date = record.get("listingDate")
     if not listing_date:
         raise ValueError(f"DNSE security definition missing listingDate for {symbol}")
-    final_trade_date = record.get("finalTradeDate")
-    if not final_trade_date:
-        raise ValueError(f"DNSE security definition missing finalTradeDate for {symbol}")
+    final_trade_date = record.get("finalTradeDate") or expiration.isoformat()
     try:
         activation_date = date.fromisoformat(str(listing_date)[:10])
         expiration_date = date.fromisoformat(str(final_trade_date)[:10])
@@ -168,6 +154,8 @@ def _front_month_contract(
             f"Invalid DNSE contract dates for {symbol}: "
             f"listingDate={listing_date}, finalTradeDate={final_trade_date}",
         ) from error
+    if expiration_date != expiration:
+        raise ValueError(f"DNSE finalTradeDate {expiration_date} for {symbol} differs from the expiry rule's {expiration}")
     return {
         "symbol": symbol,
         "isin": str(record["isin"]),
@@ -201,6 +189,31 @@ def get_working_dates(client_factory: ClientFactory) -> set[date]:
     if not isinstance(values, list):
         raise ValueError("DNSE working-dates response does not contain workingDates")
     return {date.fromisoformat(str(value)) for value in values}
+
+
+def read_working_dates(raw_root: Path) -> set[date]:
+    path = raw_root / WORKING_DATES_FILE
+    if not path.exists():
+        return set()
+    return {date.fromisoformat(value) for value in json.loads(path.read_text(encoding="utf-8"))}
+
+
+def recorded_trading_day(raw_root: Path) -> Callable[[date], bool]:
+    """Trading-day check against the working dates recorded under ``raw_root``.
+
+    Raises for a date outside the record, since whether it trades is unknown.
+    """
+    working_dates = read_working_dates(raw_root)
+    if not working_dates:
+        raise ValueError(f"No DNSE working dates are recorded under {raw_root}")
+    first, last = min(working_dates), max(working_dates)
+
+    def is_trading_day(day: date) -> bool:
+        if not first <= day <= last:
+            raise ValueError(f"{day} is outside the recorded DNSE working dates {first} to {last}")
+        return day in working_dates
+
+    return is_trading_day
 
 
 def _download_bars(
