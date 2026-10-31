@@ -23,8 +23,8 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     build_monthly_futures_contract,
 )
-from market_data.sources.dnse.quality import page_number
-from market_data.sources.dnse.quality import read_json
+from market_data.sources.dnse.validate import page_number
+from market_data.sources.dnse.validate import read_json
 from market_data.sources.session_boundary import session_boundary_record_mask
 
 

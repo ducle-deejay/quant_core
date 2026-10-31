@@ -12,7 +12,7 @@ from nautilus_trader.model import FuturesContract
 from nautilus_trader.model import PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
-from market_data.sources.mirae.quality import validate_transformed_bars
+from market_data.sources.mirae.validate import validate_transformed_bars
 from market_data.sources.mirae.transform import BAR_TYPE
 from market_data.sources.mirae.transform import LOCAL_TIMEZONE
 

@@ -10,7 +10,7 @@ from market_data.sources import ETLStageError
 from market_data.sources.dnse.extract import ClientFactory
 from market_data.sources.dnse.extract import extract_day
 from market_data.sources.dnse.load import load_day
-from market_data.sources.dnse.quality import validate_raw_delivery
+from market_data.sources.dnse.validate import validate_raw_delivery
 from market_data.sources.dnse.transform import transform_day
 
 

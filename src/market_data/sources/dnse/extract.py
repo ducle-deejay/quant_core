@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from market_data.sources.dnse.quality import validate_raw_delivery
+from market_data.sources.dnse.validate import validate_raw_delivery
 from market_data.sources.paged_download import PageFetcher
 from market_data.sources.paged_download import RateLimited
 from market_data.sources.paged_download import download_windows

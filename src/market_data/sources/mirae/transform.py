@@ -8,7 +8,7 @@ import pandas as pd
 from nautilus_trader.model import Bar
 from nautilus_trader.model import BarType
 
-from market_data.sources.mirae.quality import read_json
+from market_data.sources.mirae.validate import read_json
 from market_data.sources.session_boundary import session_boundary_record_mask
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (

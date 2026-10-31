@@ -1,4 +1,4 @@
-"""Daily market data pipeline: DNSE ingest with Mirae backfill, a catalog check, and their launchd schedule."""
+"""Daily market data pipeline: DNSE ingest with Mirae backfill, a catalog audit, and their launchd schedule."""
 
 from __future__ import annotations
 
@@ -43,22 +43,23 @@ CATALOG_PATH = DATA_ROOT / "catalog"
 DNSE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "dnse"
 MIRAE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "mirae"
 LOG_DIR = DATA_ROOT / "logs"
+LAUNCHD_LOG_DIR = LOG_DIR / "launchd"
 SYMBOL = "VN30F1M"
 DNSE_REQUEST_DELAY_SECONDS = 0.02
 LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 INGEST_AFTER = time(16, 0)
 RUN_TIMES = tuple(time(hour, 0) for hour in range(16, 21))  # each run ingests only missing days, so later runs retry
-CHECK_AT = time(21, 0)  # after the last run
+AUDIT_AT = time(21, 0)  # after the last run
 CATCH_UP_TRADING_DAYS = 5
-INGEST_LABEL = "io.quant-core.daily-data-etl"
-CHECK_LABEL = "io.quant-core.daily-data-check"
-INGEST_ERROR_LOG = LOG_DIR / "daily-etl.err.log"
+INGEST_LABEL = "io.quant-core.daily-data-ingest"
+AUDIT_LABEL = "io.quant-core.daily-data-audit"
+INGEST_ERROR_LOG = LAUNCHD_LOG_DIR / "ingest.err.log"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("ingest", "check", "schedule"))
+    parser.add_argument("command", choices=("ingest", "audit", "schedule"))
     parser.add_argument("--date", type=date.fromisoformat)
     args = parser.parse_args()
     if args.command == "schedule":
@@ -67,7 +68,7 @@ def main() -> None:
     webhook_url = os.getenv("DATA_DISCORD_WEBHOOK_URL", "").strip()
     notifier = DiscordWebhook(webhook_url) if webhook_url else None
     now = datetime.now(LOCAL_TIMEZONE)
-    command = ingest if args.command == "ingest" else check
+    command = ingest if args.command == "ingest" else audit
     sys.exit(command(notifier, now, args.date))
 
 
@@ -123,15 +124,15 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> 
     return 1 if failed else 0
 
 
-def check(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> int:
+def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> int:
     """Alert for each recent trading day the catalog does not fully hold."""
     try:
         days = [day] if day else recent_trading_days(
             read_working_dates(DNSE_RAW_ROOT), now, INGEST_AFTER, CATCH_UP_TRADING_DAYS,
         )
     except Exception as error:
-        # A check that cannot decide which days to read must still alert
-        print(f"daily data check: {type(error).__name__}: {error}", file=sys.stderr)
+        # An audit that cannot decide which days to read must still alert
+        print(f"daily data audit: {type(error).__name__}: {error}", file=sys.stderr)
         notify_or_log(notifier, _missing_alert(day or now.date(), None, error))
         return 1
 
@@ -142,11 +143,11 @@ def check(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> i
         try:
             counts = count_day_records(CATALOG_PATH, current)
         except Exception as error:
-            print(f"daily data check {current}: {type(error).__name__}: {error}", file=sys.stderr)
+            print(f"daily data audit {current}: {type(error).__name__}: {error}", file=sys.stderr)
             read_error = error
         if counts is not None:
             bars, trades, depth = counts
-            print(f"daily data check {current}: {bars}/{FULL_DAY_BARS} bars, {trades} trades, {depth} depth rows")
+            print(f"daily data audit {current}: {bars}/{FULL_DAY_BARS} bars, {trades} trades, {depth} depth rows")
             if bars >= FULL_DAY_BARS and trades and depth:
                 continue
         notify_or_log(notifier, _missing_alert(current, counts, read_error))
@@ -156,13 +157,13 @@ def check(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> i
 
 
 def schedule() -> None:
-    """Install the ingest and check jobs as macOS LaunchAgents."""
+    """Install the ingest and audit jobs as macOS LaunchAgents."""
     jobs = {
-        INGEST_LABEL: ("ingest", [(at.hour, at.minute) for at in RUN_TIMES], "daily-etl"),
-        CHECK_LABEL: ("check", [(CHECK_AT.hour, CHECK_AT.minute)], "daily-data-check"),
+        INGEST_LABEL: ("ingest", [(at.hour, at.minute) for at in RUN_TIMES]),
+        AUDIT_LABEL: ("audit", [(AUDIT_AT.hour, AUDIT_AT.minute)]),
     }
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    for label, (command, times, log_name) in jobs.items():
+    LAUNCHD_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for label, (command, times) in jobs.items():
         path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
         payload = {
             "Label": label,
@@ -174,8 +175,8 @@ def schedule() -> None:
                 for hour, minute in times
             ],
             "WorkingDirectory": str(ROOT),
-            "StandardOutPath": str(LOG_DIR / f"{log_name}.out.log"),
-            "StandardErrorPath": str(LOG_DIR / f"{log_name}.err.log"),
+            "StandardOutPath": str(LAUNCHD_LOG_DIR / f"{command}.out.log"),
+            "StandardErrorPath": str(LAUNCHD_LOG_DIR / f"{command}.err.log"),
             "EnvironmentVariables": {
                 "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
                 "PYTHONUNBUFFERED": "1",

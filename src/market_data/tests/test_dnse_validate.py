@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from market_data.sources.dnse.quality import validate_raw_delivery
+from market_data.sources.dnse.validate import validate_raw_delivery
 
 
 DAY = "2026-10-22"

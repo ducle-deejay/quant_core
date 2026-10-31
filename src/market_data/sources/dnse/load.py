@@ -10,7 +10,7 @@ from nautilus_trader.model import FuturesContract
 from nautilus_trader.model import PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
-from market_data.sources.dnse.quality import validate_transformed_batch
+from market_data.sources.dnse.validate import validate_transformed_batch
 from market_data.sources.dnse.transform import LOCAL_TIMEZONE
 
 

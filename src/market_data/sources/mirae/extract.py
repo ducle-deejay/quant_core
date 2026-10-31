@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import truststore
 import urllib3
 
-from market_data.sources.mirae.quality import validate_raw_day
+from market_data.sources.mirae.validate import validate_raw_day
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 
 

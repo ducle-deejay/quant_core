@@ -11,7 +11,7 @@ from market_data.sources import ETLStageError
 from market_data.sources.mirae.extract import HistoryRequest
 from market_data.sources.mirae.extract import extract_day
 from market_data.sources.mirae.load import load_day
-from market_data.sources.mirae.quality import validate_raw_day
+from market_data.sources.mirae.validate import validate_raw_day
 from market_data.sources.mirae.transform import transform_day
 
 
