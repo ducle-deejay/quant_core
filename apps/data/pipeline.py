@@ -180,7 +180,7 @@ def schedule() -> None:
                 "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
                 "PYTHONUNBUFFERED": "1",
             },
-            "ProcessType": "Background",
+            "ProcessType": "Standard",
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plistlib.dumps(payload))
