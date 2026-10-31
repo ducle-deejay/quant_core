@@ -27,7 +27,6 @@ packages = [
     "nautilus_bridge.analyzer",
     "nautilus_bridge.backtest",
     "nautilus_bridge.data",
-    "nautilus_bridge.execution",
     "nautilus_bridge.instruments",
     "nautilus_bridge.instruments.derivatives",
     "nautilus_bridge.instruments.derivatives.futures",
