@@ -1,12 +1,8 @@
-"""Send alerts to a Discord channel through an incoming webhook.
-
-``DiscordWebhook.send`` raises on transport and HTTP errors; ``notify_or_log`` logs
-and suppresses them by default, or propagates them when ``raise_on_error=True``.
-"""
+"""Send alerts to a Discord channel through an incoming webhook, and write each alert to the log first."""
 
 from __future__ import annotations
 
-import sys
+import logging
 from dataclasses import dataclass
 
 import requests
@@ -16,6 +12,8 @@ GREEN = 0x2ECC71
 YELLOW = 0xF1C40F
 RED = 0xE74C3C
 FIELD_VALUE_LIMIT = 1024  # Discord docs, docs.discord.com/developers/resources/message, "Embed Limits"
+LOG_LEVELS = {GREEN: logging.INFO, YELLOW: logging.WARNING, RED: logging.ERROR}
+logger = logging.getLogger("Pipeline")
 
 
 @dataclass(frozen=True)
@@ -73,11 +71,24 @@ def notify_or_log(
     *,
     raise_on_error: bool = False,
 ) -> None:
+    """Log the alert before sending it, so the log holds every alert even when Discord delivery fails."""
+    logger.log(LOG_LEVELS.get(alert.color, logging.INFO), "alert %s", alert_text(alert))
     if notifier is None:
+        logger.info("alert not sent: no Discord webhook configured")
         return
     try:
         notifier.send(alert)
     except Exception as error:  # noqa: BLE001 - alerting is best-effort
+        logger.error("alert delivery failed error=%s: %s", type(error).__name__, error)
         if raise_on_error:
             raise
-        print(f"Alert delivery failed: {error}", file=sys.stderr)
+
+
+def alert_text(alert: Alert) -> str:
+    """The alert on one line: summary, then each non-blank field as name=value."""
+    parts = [f'summary="{alert.summary}"']
+    for name, value, _ in alert.fields:
+        if name.strip("\u200b"):
+            text = " ".join(value.replace("```", "").replace("`", "").split())
+            parts.append(f'"{name}"="{text}"')
+    return " ".join(parts)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -15,6 +16,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from market_data.logs import fields
+from market_data.logs import stage
+from market_data.sources import ETLStageError
+from market_data.sources.dnse.validate import RawDayValidation
 from market_data.sources.dnse.validate import validate_raw_delivery
 from market_data.sources.paged_download import PageFetcher
 from market_data.sources.paged_download import RateLimited
@@ -33,6 +38,9 @@ MAX_SERVER_RETRIES = 6
 MIN_REMAINING = 500
 LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
 WORKING_DATES_FILE = "working_dates.json"
+logger = logging.getLogger("DNSE.extract")
+resolve_logger = logging.getLogger("DNSE.resolve")
+validate_logger = logging.getLogger("DNSE.validate")
 
 ClientFactory = Callable[[], tuple[Any, list[Any]]]
 CONTRACT_DEFINITION_FIELDS = (
@@ -50,71 +58,109 @@ def extract_day(
     day: date,
     continuous_symbol: str,
     request_delay_seconds: float = 0.02,
-) -> None:
-    """Extract one DNSE trading day while preserving provider payloads."""
+) -> RawDayValidation | None:
+    """Extract and validate one DNSE day; None on a non-trading day."""
     root = Path(raw_root)
     destination = root / day.isoformat()
     if destination.exists():
-        validate_raw_delivery(destination)
-        return None
+        logger.info("raw already retained, download skipped %s", fields(day=day, raw=destination))
+        with stage("DNSE", "validate", day) as details:
+            return _validate(destination, details)
     today = datetime.now(LOCAL_TIMEZONE).date()
     if day > today:
-        raise ValueError(f"Cannot extract future date: {day}")
+        raise ETLStageError(source="DNSE", stage="resolve", cause=ValueError(f"Cannot extract future date: {day}"))
     if day.weekday() >= 5:
+        logger.info("weekend, nothing to extract %s", fields(day=day))
         return None
 
-    working_dates = get_working_dates(client_factory)
-    if not working_dates:
-        raise ValueError("DNSE returned no working dates")
-    if day == today and day not in working_dates:
-        return None
-    symbol, expiration = vn30f1m_contract(day, recorded_trading_day(root))
-    contract = _contract_definition(
-        client_factory=client_factory,
-        symbol=symbol,
-        expiration=expiration,
-    )
+    with stage("DNSE", "resolve", day) as details:
+        working_dates = get_working_dates(client_factory)
+        if not working_dates:
+            raise ValueError("DNSE returned no working dates")
+        if day == today and day not in working_dates:
+            details["trading_day"] = False
+            return None
+        symbol, expiration = vn30f1m_contract(day, recorded_trading_day(root))
+        contract = _contract_definition(
+            client_factory=client_factory,
+            symbol=symbol,
+            expiration=expiration,
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        _retain_contract(root / "contracts", contract)
+        details.update(contract=contract["symbol"], expiry=contract["final_trade_date"])
 
-    root.mkdir(parents=True, exist_ok=True)
-    _retain_contract(root / "contracts", contract)
     with tempfile.TemporaryDirectory(
         prefix=f".{day.isoformat()}-incomplete-",
         dir=root,
     ) as temporary:
         raw_day = Path(temporary) / day.isoformat()
         futures_root = raw_day / "hnx" / "futures"
-        _download_bars(
-            client_factory=client_factory,
-            destination=futures_root / "bars" / continuous_symbol,
-            symbol=continuous_symbol,
-            day=day,
-        )
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="dnse-extract") as executor:
-            trades = executor.submit(
-                _download_pages,
+        with stage("DNSE", "extract", day) as details:
+            _download_bars(
                 client_factory=client_factory,
-                destination=futures_root / "trades" / contract["symbol"] / day.isoformat(),
-                response_key="trades",
-                method_name="get_trades",
-                symbol=contract["symbol"],
+                destination=futures_root / "bars" / continuous_symbol,
+                symbol=continuous_symbol,
                 day=day,
-                request_delay_seconds=request_delay_seconds,
             )
-            orderbook = executor.submit(
-                _download_pages,
-                client_factory=client_factory,
-                destination=futures_root / "orderbook" / contract["symbol"] / day.isoformat(),
-                response_key="quotes",
-                method_name="get_quotes",
-                symbol=contract["symbol"],
-                day=day,
-                request_delay_seconds=request_delay_seconds,
-            )
-            trades.result()
-            orderbook.result()
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="dnse-extract") as executor:
+                trades = executor.submit(
+                    _download_pages,
+                    client_factory=client_factory,
+                    destination=futures_root / "trades" / contract["symbol"] / day.isoformat(),
+                    response_key="trades",
+                    method_name="get_trades",
+                    symbol=contract["symbol"],
+                    day=day,
+                    request_delay_seconds=request_delay_seconds,
+                )
+                orderbook = executor.submit(
+                    _download_pages,
+                    client_factory=client_factory,
+                    destination=futures_root / "orderbook" / contract["symbol"] / day.isoformat(),
+                    response_key="quotes",
+                    method_name="get_quotes",
+                    symbol=contract["symbol"],
+                    day=day,
+                    request_delay_seconds=request_delay_seconds,
+                )
+                details.update(trade_pages=trades.result(), order_book_pages=orderbook.result())
 
-        validate_raw_delivery(raw_day)
+        with stage("DNSE", "validate", day) as details:
+            validation = _validate(raw_day, details)
         os.replace(raw_day, destination)
+    return validation
+
+
+def _validate(raw_day: Path, details: dict[str, object]) -> RawDayValidation:
+    validation = validate_raw_delivery(raw_day)
+    counts = validation.counts
+    details.update(
+        bars=counts["bars"],
+        missing_bars=len(validation.missing_bar_timestamps),
+        trades=counts["trades"],
+        order_book_rows=counts["orderbook"],
+    )
+    if validation.missing_trades:
+        validate_logger.warning(
+            "trades incomplete %s",
+            fields(
+                day=raw_day.name,
+                missing_contracts=sum(missing.contracts for missing in validation.missing_trades),
+                places=len(validation.missing_trades),
+            ),
+        )
+        for missing in validation.missing_trades:
+            validate_logger.warning(
+                "trades missing %s",
+                fields(
+                    day=raw_day.name,
+                    before=missing.before,
+                    missing_contracts=missing.contracts,
+                    total_volume_traded=f"{missing.previous_total_volume_traded}->{missing.total_volume_traded}",
+                ),
+            )
+    return validation
 
 
 def _retain_contract(directory: Path, contract: dict[str, str | None]) -> None:
@@ -145,6 +191,10 @@ def _contract_definition(
     client, observed = client_factory()
     definition = _decode_response(*client.get_security_definition(symbol, board_id="G1"))[1]
     received_at = datetime.now(UTC)
+    resolve_logger.info(
+        "security definition received %s",
+        fields(contract=symbol, security_definition=json.dumps(definition, ensure_ascii=False, separators=(",", ":"))),
+    )
     _ensure_quota(observed[-1] if observed else None)
     if not isinstance(definition, list) or len(definition) != 1:
         raise ValueError(f"Unexpected DNSE security definition for {symbol}")
@@ -262,7 +312,7 @@ def _download_pages(
     symbol: str,
     day: date,
     request_delay_seconds: float,
-) -> None:
+) -> int:
     """Download one day of pages in parallel time windows; page 1 holds the newest records."""
 
     def make_fetcher() -> PageFetcher:
@@ -309,7 +359,7 @@ def _download_pages(
     ]
     # DNSE returns records newest first, so the latest window takes the first page numbers
     windows = split_range(_timestamp(day), _timestamp(day + timedelta(days=1)), boundaries)[::-1]
-    download_windows(
+    return download_windows(
         make_fetcher=make_fetcher,
         trim_page=trim,
         windows=windows,

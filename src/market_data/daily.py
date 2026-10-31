@@ -8,8 +8,8 @@ and the result or failure is sent as a Discord alert.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -31,6 +31,8 @@ from market_data.notify import YELLOW
 from market_data.notify import Alert
 from market_data.notify import DiscordWebhook
 from market_data.notify import code_block
+from market_data.logs import fields
+from market_data.logs import stage
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
 from market_data.sources.dnse.client import create_dnse_rest_client
@@ -49,6 +51,7 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_cont
 
 
 SourceRunner = Callable[[date], dict[str, object]]
+logger = logging.getLogger("Pipeline")
 
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
 # Blank inline field (zero-width space as name and value) that ends a row of inline fields early
@@ -117,10 +120,8 @@ def run_daily(
             missing_timestamps=remaining,
         )
 
-    try:
+    with stage("Catalog", "consolidate", day):
         consolidate()
-    except Exception as error:
-        raise ETLStageError(source="Catalog", stage="consolidate", cause=error) from error
 
     report: dict[str, object] = {
         "day": day.isoformat(),
@@ -187,7 +188,7 @@ def record_working_dates(raw_root: Path, client_factory: ClientFactory) -> set[d
     try:
         fetched = get_working_dates(client_factory)
     except Exception as error:
-        print(f"DNSE working dates unavailable, using the record: {_format_exception(error)}", file=sys.stderr)
+        logger.warning("DNSE working dates unavailable, using the record %s", fields(error=_format_exception(error)))
         return recorded
     merged = recorded | fetched
     if merged != recorded:
@@ -378,21 +379,26 @@ def alert_ingested(
     dnse = _records(report.get("dnse"))
     mirae_added = _count(_records(report.get("mirae")), "Bar")
     mirae_error = report.get("mirae_error")
+    missing_trades = _missing_trade_contracts(report.get("dnse"))
     bars = f"{FULL_DAY_BARS}/{FULL_DAY_BARS}" + (f" (Mirae added {mirae_added})" if mirae_added else "")
+    trades = f"{_count(dnse, 'TradeTick'):,}"
+    if missing_trades:
+        trades += f"\nINCOMPLETE, {missing_trades:,} contracts missing"
     if mirae_error:
         mirae = code_block(mirae_error)
     else:
         mirae = f"added {mirae_added} bars" if mirae_added else "not needed"
+    warnings = [text for text, present in (("trades incomplete", missing_trades), ("Mirae backup down", mirae_error)) if present]
     return Alert(
-        summary=f"⚠️ Data {day} ingested — Mirae backup down" if mirae_error else f"✅ Data {day} ingested",
-        color=YELLOW if mirae_error else GREEN,
+        summary=f"⚠️ Data {day} ingested — {', '.join(warnings)}" if warnings else f"✅ Data {day} ingested",
+        color=YELLOW if warnings else GREEN,
         fields=(
             ("Day", str(day), True),
             ("Attempt", attempt.label, True),
             EMPTY_INLINE_FIELD,
             *run,
             ("Bars", bars, True),
-            ("Trades", f"{_count(dnse, 'TradeTick'):,}", True),
+            ("Trades", trades, True),
             ("Order book", f"{_count(dnse, 'OrderBookDepth10'):,}", True),
             ("Mirae", mirae, False),
         ),
@@ -496,6 +502,11 @@ def _run_fields(started: datetime, finished: datetime) -> tuple[tuple[str, str, 
         ("Finished", f"{finished:%H:%M:%S}", True),
         ("Duration", f"{minutes}m{seconds:02d}s", True),
     )
+
+
+def _missing_trade_contracts(report: object) -> int:
+    missing = report.get("missing_trades", []) if isinstance(report, dict) else []
+    return sum(int(entry["contracts"]) for entry in missing) if isinstance(missing, list) else 0
 
 
 def _records(report: object) -> dict[str, object]:

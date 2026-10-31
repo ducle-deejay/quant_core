@@ -7,7 +7,7 @@ from typing import Any
 
 from nautilus_trader.model import Bar
 
-from market_data.sources import ETLStageError
+from market_data.logs import stage
 from market_data.sources.mirae.extract import HistoryRequest
 from market_data.sources.mirae.extract import extract_day
 from market_data.sources.mirae.load import load_day
@@ -27,7 +27,7 @@ def run_daily(
     """Run the Mirae candlestick Extract, Transform, and DNSE-first Load workflow."""
     raw = Path(raw_root)
     raw_day = raw / day.isoformat()
-    try:
+    with stage("Mirae", "extract", day):
         extract_day(
             request_history=request_history,
             active_contract=active_contract,
@@ -35,19 +35,11 @@ def run_daily(
             day=day,
             continuous_symbol=continuous_symbol,
         )
-    except Exception as error:
-        raise ETLStageError(source="Mirae", stage="extract", cause=error) from error
-    if not raw_day.is_dir():
-        raise ETLStageError(
-            source="Mirae",
-            stage="extract",
-            cause=RuntimeError(f"Mirae produced no retained candlestick data for {day}"),
-        )
+        if not raw_day.is_dir():
+            raise RuntimeError(f"Mirae produced no retained candlestick data for {day}")
 
-    try:
-        validate_raw_day(raw_day)
-    except Exception as error:
-        raise ETLStageError(source="Mirae", stage="extract", cause=error) from error
+    with stage("Mirae", "validate", day) as details:
+        details["bars"] = validate_raw_day(raw_day)
 
     # Count what Transform emits: it merges 11:30/14:30 records into 11:29/14:29, so the
     # raw record count is not the number of bars Load receives
@@ -55,31 +47,19 @@ def run_daily(
 
     def transformed() -> Iterator[list[Any]]:
         nonlocal transformed_bars
-        try:
-            for batch in transform_day(raw_day=raw_day):
-                if isinstance(batch[0], Bar):
-                    transformed_bars += len(batch)
-                yield batch
-        except ETLStageError:
-            raise
-        except Exception as error:
-            raise ETLStageError(source="Mirae", stage="transform", cause=error) from error
+        for batch in transform_day(raw_day=raw_day):
+            if isinstance(batch[0], Bar):
+                transformed_bars += len(batch)
+            yield batch
 
-    try:
+    with stage("Mirae", "load", day) as details:
         loaded = load_day(
             catalog_path=catalog_path,
             transformed=transformed(),
         )
-    except ETLStageError:
-        raise
-    except Exception as error:
-        raise ETLStageError(source="Mirae", stage="load", cause=error) from error
-    if loaded.get("Bar", 0) + loaded.get("SkippedBar", 0) != transformed_bars:
-        raise ETLStageError(
-            source="Mirae",
-            stage="load",
-            cause=ValueError("Mirae transformed and loaded bar counts differ"),
-        )
+        if loaded.get("Bar", 0) + loaded.get("SkippedBar", 0) != transformed_bars:
+            raise ValueError("Mirae transformed and loaded bar counts differ")
+        details.update(bars_added=loaded.get("Bar", 0), bars_already_in_catalog=loaded.get("SkippedBar", 0))
     return {
         "catalog": str(catalog_path),
         "raw_days": [raw_day.name],

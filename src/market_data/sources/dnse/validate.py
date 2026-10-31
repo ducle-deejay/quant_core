@@ -18,13 +18,22 @@ PAGE_FILE = re.compile(r"^page_(?P<number>\d{5})\.json$")
 
 
 @dataclass(frozen=True)
+class MissingTrades:
+    """Contracts that totalVolumeTraded counts but no retained trade carries."""
+
+    before: str  # DNSE time of the first retained trade after the missing ones
+    contracts: int
+    previous_total_volume_traded: int
+    total_volume_traded: int
+
+
+@dataclass(frozen=True)
 class RawDayValidation:
-    """Describe structurally valid DNSE payloads and any missing session bars."""
+    """Describe structurally valid DNSE payloads, missing session bars and missing trades."""
 
     counts: dict[str, int]
     missing_bar_timestamps: tuple[int, ...]
-    # (provider time of the first trade after a gap, contracts missing before it)
-    trade_volume_gaps: tuple[tuple[str, int], ...] = ()
+    missing_trades: tuple[MissingTrades, ...] = ()
 
 
 def validate_raw_day(raw_day: str | Path) -> dict[str, int]:
@@ -52,10 +61,10 @@ def validate_raw_delivery(raw_day: str | Path) -> RawDayValidation:
     return RawDayValidation(
         counts=counts,
         missing_bar_timestamps=missing_bar_timestamps,
-        trade_volume_gaps=tuple(
-            gap
+        missing_trades=tuple(
+            missing
             for directory in sorted(path for path in (root / "trades").glob("*/*") if path.is_dir())
-            for gap in _trade_volume_gaps(directory)
+            for missing in _missing_trades(directory)
         ),
     )
 
@@ -167,18 +176,19 @@ def _validate_page_directory(directory: Path, response_key: str) -> int:
     return records
 
 
-def _trade_volume_gaps(directory: Path) -> list[tuple[str, int]]:
-    """Points where totalVolumeTraded grows by more than matchQtty, i.e. the provider omitted trades."""
+def _missing_trades(directory: Path) -> list[MissingTrades]:
+    """Places where totalVolumeTraded grows by more than the retained trade's matchQtty."""
     rows = [row for path in sorted(directory.glob("page_*.json")) for row in read_json(path)["trades"]]
     rows.sort(key=lambda row: (str(row["time"]), int(row["totalVolumeTraded"])))
-    gaps = []
+    missing = []
     previous = 0
     for row in rows:
-        missing = int(row["totalVolumeTraded"]) - previous - int(row["matchQtty"])
-        if missing:
-            gaps.append((str(row["time"]), missing))
-        previous = int(row["totalVolumeTraded"])
-    return gaps
+        total = int(row["totalVolumeTraded"])
+        contracts = total - previous - int(row["matchQtty"])
+        if contracts:
+            missing.append(MissingTrades(str(row["time"]), contracts, previous, total))
+        previous = total
+    return missing
 
 
 def _validate_page_rows(

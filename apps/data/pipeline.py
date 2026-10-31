@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import os
 import plistlib
 import subprocess
 import sys
+import time as time_module
 from datetime import date
 from datetime import datetime
 from datetime import time
@@ -30,6 +31,8 @@ from market_data.daily import recent_trading_days
 from market_data.daily import record_working_dates
 from market_data.daily import run_and_alert
 from market_data.daily import run_attempt
+from market_data.logs import configure as configure_logging
+from market_data.logs import fields
 from market_data.notify import DiscordWebhook
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
@@ -54,7 +57,7 @@ AUDIT_AT = time(21, 0)  # after the last run
 CATCH_UP_TRADING_DAYS = 5
 INGEST_LABEL = "io.quant-core.daily-data-ingest"
 AUDIT_LABEL = "io.quant-core.daily-data-audit"
-INGEST_ERROR_LOG = LAUNCHD_LOG_DIR / "ingest.err.log"
+logger = logging.getLogger("Pipeline")
 
 
 def main() -> None:
@@ -65,20 +68,23 @@ def main() -> None:
     if args.command == "schedule":
         schedule()
         return
+    now = datetime.now(LOCAL_TIMEZONE)
+    log_path = configure_logging(LOG_DIR, args.command, now.date())
     webhook_url = os.getenv("DATA_DISCORD_WEBHOOK_URL", "").strip()
     notifier = DiscordWebhook(webhook_url) if webhook_url else None
-    now = datetime.now(LOCAL_TIMEZONE)
     command = ingest if args.command == "ingest" else audit
-    sys.exit(command(notifier, now, args.date))
+    sys.exit(command(notifier, now, args.date, log_path))
 
 
-def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> int:
+def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_path: Path) -> int:
     attempt = run_attempt(None if day else now, RUN_TIMES)
+    started = time_module.monotonic()
+    logger.info("run started %s", fields(attempt=attempt.label, requested_day=day or "auto"))
     api_key, api_secret = os.getenv("API_KEY", ""), os.getenv("API_SECRET", "")
     if not api_key or not api_secret:
         error = RuntimeError("API_KEY and API_SECRET must be defined in .env")
-        notify_or_log(notifier, alert_startup_failed(error, str(INGEST_ERROR_LOG)), raise_on_error=True)
-        print(f"STARTUP FAILED: {error}", file=sys.stderr)
+        logger.error("startup failed %s", fields(error=error))
+        notify_or_log(notifier, alert_startup_failed(error, str(log_path)), raise_on_error=True)
         return 1
     client_factory = dnse_client_factory(api_key, api_secret)
 
@@ -94,65 +100,70 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> 
                 count=CATCH_UP_TRADING_DAYS,
             )
         except Exception as error:
+            logger.exception("day selection failed %s", fields(error=f"{type(error).__name__}: {error}"))
             failure = ETLStageError(source="Pipeline", stage="day selection", cause=error)
-            alert = alert_failed("Data pipeline", failure, attempt, str(INGEST_ERROR_LOG))
-            notify_or_log(notifier, alert, raise_on_error=True)
-            print(json.dumps({"day": now.date().isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
+            notify_or_log(notifier, alert_failed("Data pipeline", failure, attempt, str(log_path)), raise_on_error=True)
             return 1
-        if not days:
-            print(f"{now.date()}: the catalog holds every recent trading day")
-            return 0
+    logger.info("days to ingest %s", fields(days=",".join(str(current) for current in days) or "none"))
 
-    failed = False
+    ingested = failed = 0
     for current in days:
         try:
-            report = run_and_alert(
+            run_and_alert(
                 day=current,
                 run_dnse=dnse_runner(client_factory, DNSE_RAW_ROOT, CATALOG_PATH, SYMBOL, DNSE_REQUEST_DELAY_SECONDS),
                 run_mirae=mirae_runner(MIRAE_RAW_ROOT, DNSE_RAW_ROOT, CATALOG_PATH, SYMBOL),
                 consolidate=catalog_consolidator(CATALOG_PATH),
                 notifier=notifier,
                 attempt=attempt,
-                log_path=str(INGEST_ERROR_LOG),
+                log_path=str(log_path),
                 raise_on_error=True,
             )
-        except Exception as error:
-            print(json.dumps({"day": current.isoformat(), "failed": str(error)}, indent=2, sort_keys=True))
-            failed = True
+        except Exception:
+            failed += 1
             continue
-        print(json.dumps(_slim_report(report), indent=2, sort_keys=True))
+        ingested += 1
+    logger.info(
+        "run finished %s",
+        fields(attempt=attempt.label, duration_min=f"{(time_module.monotonic() - started) / 60:.1f}", ingested=ingested, failed=failed),
+    )
     return 1 if failed else 0
 
 
-def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None) -> int:
+def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_path: Path) -> int:
     """Alert for each recent trading day the catalog does not fully hold."""
+    audit_logger = logging.getLogger("Catalog.audit")
+    logger.info("run started %s", fields(requested_day=day or "auto"))
     try:
         days = [day] if day else recent_trading_days(
             read_working_dates(DNSE_RAW_ROOT), now, INGEST_AFTER, CATCH_UP_TRADING_DAYS,
         )
     except Exception as error:
         # An audit that cannot decide which days to read must still alert
-        print(f"daily data audit: {type(error).__name__}: {error}", file=sys.stderr)
-        notify_or_log(notifier, _missing_alert(day or now.date(), None, error))
+        audit_logger.exception("day selection failed %s", fields(error=f"{type(error).__name__}: {error}"))
+        notify_or_log(notifier, _missing_alert(day or now.date(), None, error, log_path))
         return 1
 
-    missing = False
+    complete = missing = 0
     for current in days:
         counts: tuple[int, int, int] | None = None
         read_error: Exception | None = None
         try:
             counts = count_day_records(CATALOG_PATH, current)
         except Exception as error:
-            print(f"daily data audit {current}: {type(error).__name__}: {error}", file=sys.stderr)
+            audit_logger.exception("catalog read failed %s", fields(day=current, error=f"{type(error).__name__}: {error}"))
             read_error = error
         if counts is not None:
             bars, trades, depth = counts
-            print(f"daily data audit {current}: {bars}/{FULL_DAY_BARS} bars, {trades} trades, {depth} depth rows")
+            values = fields(day=current, bars=f"{bars}/{FULL_DAY_BARS}", trades=trades, order_book_rows=depth)
             if bars >= FULL_DAY_BARS and trades and depth:
+                audit_logger.info("day complete %s", values)
+                complete += 1
                 continue
-        notify_or_log(notifier, _missing_alert(current, counts, read_error))
-        print(f"DATA MISSING for {current}", file=sys.stderr)
-        missing = True
+            audit_logger.error("day incomplete %s", values)
+        notify_or_log(notifier, _missing_alert(current, counts, read_error, log_path))
+        missing += 1
+    logger.info("run finished %s", fields(complete=complete, missing=missing))
     return 1 if missing else 0
 
 
@@ -190,20 +201,9 @@ def schedule() -> None:
         print(f"installed {path}")
 
 
-def _missing_alert(day: date, counts: tuple[int, int, int] | None, error: Exception | None):
+def _missing_alert(day: date, counts: tuple[int, int, int] | None, error: Exception | None, log_path: Path):
     fix = f"`.venv/bin/python3 apps/data/pipeline.py ingest --date {day}`"
-    return alert_data_missing(day, counts, error, len(RUN_TIMES), fix, str(INGEST_ERROR_LOG))
-
-
-def _slim_report(report: dict[str, object]) -> dict[str, object]:
-    """Drop the per-bar timestamp lists from the printed report."""
-    slim = json.loads(json.dumps(report, default=str))
-    for source in ("dnse", "mirae"):
-        section = slim.get(source)
-        if isinstance(section, dict):
-            section.pop("missing_bar_timestamps", None)
-            section.get("records", {}).pop("added_bar_timestamps", None)
-    return slim
+    return alert_data_missing(day, counts, error, len(RUN_TIMES), fix, str(log_path))
 
 
 if __name__ == "__main__":
