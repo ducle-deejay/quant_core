@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -260,6 +262,26 @@ def catalog_consolidator(catalog_path: Path) -> Callable[[], None]:
         )
 
     return consolidate
+
+
+def publish_catalog(catalog_path: Path, published_root: Path) -> None:
+    """Replace published_root/catalog with an APFS clone of catalog_path."""
+    published = published_root / "catalog"
+    staged = published_root / "catalog.new"
+    retired = published_root / "catalog.old"
+    published_root.mkdir(parents=True, exist_ok=True)
+    # Left behind by a publish that was interrupted
+    for leftover in (staged, retired):
+        shutil.rmtree(leftover, ignore_errors=True)
+    # -c clones instead of copying, so publishing does not double the catalog's disk use (man cp)
+    result = subprocess.run(["cp", "-c", "-R", str(catalog_path), str(staged)], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"cp -c failed: {result.stderr.strip()}")
+    if published.exists():
+        published.rename(retired)
+    staged.rename(published)
+    if retired.exists():
+        shutil.rmtree(retired)
 
 
 def _time_ordered_files(directory: Path) -> list[Path] | None:

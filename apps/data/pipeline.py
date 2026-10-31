@@ -26,6 +26,7 @@ from market_data.daily import days_to_ingest
 from market_data.daily import dnse_client_factory
 from market_data.daily import dnse_runner
 from market_data.daily import mirae_runner
+from market_data.daily import publish_catalog
 from market_data.daily import read_working_dates
 from market_data.daily import recent_trading_days
 from market_data.daily import record_working_dates
@@ -33,6 +34,7 @@ from market_data.daily import run_and_alert
 from market_data.daily import run_attempt
 from market_data.logs import configure as configure_logging
 from market_data.logs import fields
+from market_data.logs import stage
 from market_data.notify import DiscordWebhook
 from market_data.notify import notify_or_log
 from market_data.sources import ETLStageError
@@ -43,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env")
 DATA_ROOT = Path(os.environ["DATA_ROOT"])
 CATALOG_PATH = DATA_ROOT / "catalog"
+PUBLISHED_ROOT = DATA_ROOT / "published"
 DNSE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "dnse"
 MIRAE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "mirae"
 LOG_DIR = DATA_ROOT / "logs"
@@ -123,11 +126,26 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
             failed += 1
             continue
         ingested += 1
+
+    published = False
+    if ingested and not failed:
+        try:
+            with stage("Catalog", "publish", now.date()):
+                publish_catalog(CATALOG_PATH, PUBLISHED_ROOT)
+            published = True
+        except ETLStageError as error:
+            notify_or_log(notifier, alert_failed("Catalog publish", error, attempt, str(log_path)), raise_on_error=True)
     logger.info(
         "run finished %s",
-        fields(attempt=attempt.label, duration_min=f"{(time_module.monotonic() - started) / 60:.1f}", ingested=ingested, failed=failed),
+        fields(
+            attempt=attempt.label,
+            duration_min=f"{(time_module.monotonic() - started) / 60:.1f}",
+            ingested=ingested,
+            failed=failed,
+            published=published,
+        ),
     )
-    return 1 if failed else 0
+    return 1 if failed or (ingested and not published) else 0
 
 
 def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_path: Path) -> int:
