@@ -9,17 +9,26 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC
 from datetime import date
 from datetime import datetime
+from datetime import time as time_of_day
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from market_data.sources.dnse.quality import validate_raw_delivery
+from market_data.sources.paged_download import PageFetcher
+from market_data.sources.paged_download import RateLimited
+from market_data.sources.paged_download import download_windows
+from market_data.sources.paged_download import split_range
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
 
 
 PAGE_LIMIT = 1_000
+PAGE_WORKERS = 6
+PAGE_WINDOW_BOUNDARIES = tuple(time_of_day(hour, minute) for hour in range(9, 15) for minute in (0, 30))
+# DNSE hourly rate limit exceeded (https://developers.dnse.com.vn/docs/guide/ratelimits/)
+TOO_MANY_REQUESTS = 429
 MAX_SERVER_RETRIES = 6
 MIN_REMAINING = 500
 LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
@@ -254,44 +263,59 @@ def _download_pages(
     day: date,
     request_delay_seconds: float,
 ) -> None:
-    client, observed = client_factory()
-    method = getattr(client, method_name)
-    next_token: str | None = None
-    seen_tokens: set[str] = set()
-    page_number = 1
+    """Download one day of pages in parallel time windows; page 1 holds the newest records."""
 
-    while True:
-        observed.clear()
+    def make_fetcher() -> PageFetcher:
+        client, observed = client_factory()
+        method = getattr(client, method_name)
 
-        def request(token: str | None = next_token) -> tuple[int, Any]:
-            return method(
-                symbol,
-                board_id="G1",
-                from_date=_timestamp(day),
-                to_date=_timestamp(day + timedelta(days=1)),
-                limit=PAGE_LIMIT,
-                next_page_token=token,
+        def fetch(start: int, end: int, token: str | None) -> tuple[str, Any, str | None]:
+            observed.clear()
+            raw, payload = _request_with_retries(
+                lambda: method(
+                    symbol,
+                    board_id="G1",
+                    from_date=start,
+                    to_date=end,
+                    limit=PAGE_LIMIT,
+                    next_page_token=token,
+                ),
             )
+            if not isinstance(payload, dict):
+                raise ValueError(f"DNSE {response_key} response is not a JSON object")
+            if not isinstance(payload.get(response_key), list):
+                raise ValueError(f"DNSE response does not contain a {response_key} list")
+            _ensure_quota(observed[-1] if observed else None)
+            if request_delay_seconds > 0:
+                time.sleep(request_delay_seconds)
+            next_token = payload.get("nextPageToken")
+            return raw, payload, str(next_token) if next_token else None
 
-        raw, payload = _request_with_retries(request)
-        if not isinstance(payload, dict):
-            raise ValueError(f"DNSE {response_key} response is not a JSON object")
-        if not isinstance(payload.get(response_key), list):
-            raise ValueError(f"DNSE response does not contain a {response_key} list")
-        _write_payload(destination / f"page_{page_number:05d}.json", raw)
-        _ensure_quota(observed[-1] if observed else None)
+        return fetch
 
-        token = payload.get("nextPageToken")
-        if not token:
-            return
-        token = str(token)
-        if token in seen_tokens:
-            raise ValueError(f"DNSE repeated pagination token for {response_key}/{day}")
-        seen_tokens.add(token)
-        next_token = token
-        page_number += 1
-        if request_delay_seconds > 0:
-            time.sleep(request_delay_seconds)
+    def trim(payload: dict[str, Any], start: int, end: int) -> str | None:
+        # DNSE record times are local wall-clock strings such as 2026-10-27 10:30:00.000
+        low = datetime.fromtimestamp(start, LOCAL_TIMEZONE).replace(tzinfo=None)
+        high = datetime.fromtimestamp(end, LOCAL_TIMEZONE).replace(tzinfo=None)
+        rows = payload[response_key]
+        kept = [row for row in rows if low <= datetime.fromisoformat(str(row["time"])) < high]
+        if len(kept) == len(rows):
+            return None
+        return json.dumps({**payload, response_key: kept}, ensure_ascii=False)
+
+    boundaries = [
+        int(datetime.combine(day, boundary, tzinfo=LOCAL_TIMEZONE).timestamp())
+        for boundary in PAGE_WINDOW_BOUNDARIES
+    ]
+    # DNSE returns records newest first, so the latest window takes the first page numbers
+    windows = split_range(_timestamp(day), _timestamp(day + timedelta(days=1)), boundaries)[::-1]
+    download_windows(
+        make_fetcher=make_fetcher,
+        trim_page=trim,
+        windows=windows,
+        destination=destination,
+        max_workers=PAGE_WORKERS,
+    )
 
 
 def _request_with_retries(request: Callable[[], tuple[int, Any]]) -> tuple[str, Any]:
@@ -303,6 +327,8 @@ def _request_with_retries(request: Callable[[], tuple[int, Any]]) -> tuple[str, 
                 raise
             time.sleep(min(30.0, 2.0 ** (attempt + 1)))
             continue
+        if status == TOO_MANY_REQUESTS:
+            raise RateLimited(f"DNSE rate limit exceeded: {body}")
         if status == 200 or status < 500 or attempt == MAX_SERVER_RETRIES - 1:
             return _decode_response(status, body)
         time.sleep(min(30.0, 2.0 ** (attempt + 1)))

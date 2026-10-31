@@ -152,7 +152,8 @@ def _validate_page_directory(directory: Path, response_key: str) -> int:
         rows = payload.get(response_key)
         if not isinstance(rows, list):
             raise ValueError(f"DNSE payload does not contain {response_key}: {path}")
-        if bool(payload.get("nextPageToken")) != (index < len(paths) - 1):
+        # One token chain per time window, so only the day's last page must end its chain
+        if index == len(paths) - 1 and payload.get("nextPageToken"):
             raise ValueError(f"DNSE pagination terminates incorrectly at {path}")
         _validate_page_rows(rows, symbol=symbol, data_date=data_date, path=path)
         records += len(rows)
