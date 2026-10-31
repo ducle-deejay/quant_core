@@ -8,6 +8,7 @@ and the result or failure is sent as a Discord alert.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from nautilus_trader.persistence import ParquetDataCatalog
 
 from market_data.notify import GREEN
@@ -234,20 +237,75 @@ def mirae_runner(raw_root: Path, dnse_raw_root: Path, catalog_path: Path, symbol
 
 
 def catalog_consolidator(catalog_path: Path) -> Callable[[], None]:
-    """Merge the files of every catalog data directory into one file ordered by ts_init.
-
-    A backtest request spanning a range that no file covers returns no data, and
-    ``consolidate_catalog`` keeps rows in file order, which ``delete_data_range`` then
-    rejects. One period spanning the whole catalog leaves one ordered file per directory.
-    """
+    """Merge each data directory into one ts_init-ordered file; a catalog-served warmup returns no bars across several files."""
 
     def consolidate() -> None:
+        directories = sorted(
+            {
+                path.parent
+                for path in (catalog_path / "data").glob("*/*/*.parquet")
+                if path.parent.parent.name != "instruments"
+            },
+        )
+        appends = {directory: _time_ordered_files(directory) for directory in directories}
+        appends = {directory: files for directory, files in appends.items() if files is None or len(files) > 1}
+        if all(files is not None for files in appends.values()):
+            for directory, files in appends.items():
+                _append_files(directory, files)
+            return
         ParquetDataCatalog(str(catalog_path)).consolidate_catalog_by_period(
             period_nanos=CONSOLIDATION_PERIOD_NS,
             ensure_contiguous_files=False,
         )
 
     return consolidate
+
+
+def _time_ordered_files(directory: Path) -> list[Path] | None:
+    """Files sorted by time, or None when they cannot be joined without re-sorting."""
+    files = sorted(directory.glob("*.parquet"), key=lambda path: _file_interval(path)[0])
+    intervals = [_file_interval(path) for path in files]
+    if any(previous[1] >= current[0] for previous, current in zip(intervals, intervals[1:])):
+        return None
+    schema = pq.read_schema(files[0])
+    if any(not pq.read_schema(path).equals(schema, check_metadata=True) for path in files[1:]):
+        return None
+    return files
+
+
+def _append_files(directory: Path, files: list[Path]) -> None:
+    """Join time-ordered files into one; the first file's rows are copied without re-sorting."""
+    first = pq.ParquetFile(files[0])
+    target = directory / f"{_file_timestamp(_file_interval(files[0])[0])}_{_file_timestamp(_file_interval(files[-1])[1])}.parquet"
+    temporary = directory / f".{target.name}.tmp"
+    compression = first.metadata.row_group(0).column(0).compression.lower()
+    with pq.ParquetWriter(temporary, first.schema_arrow, compression=compression) as writer:
+        for index in range(first.num_row_groups):
+            row_group = first.read_row_group(index)
+            writer.write_table(row_group, row_group_size=row_group.num_rows)
+        appended = pa.concat_tables(pq.read_table(path, schema=first.schema_arrow) for path in files[1:])
+        writer.write_table(appended, row_group_size=appended.num_rows)
+    # Rename before deleting: a failure in between leaves duplicate rows, not missing ones
+    os.replace(temporary, target)
+    for path in files:
+        if path != target:
+            path.unlink()
+
+
+def _file_interval(path: Path) -> tuple[int, int]:
+    """First and last ts_init from a file name such as 2026-10-16T01-45-00-683000000Z_2026-10-30T07-45-00-750000000Z.parquet."""
+    start, end = path.stem.split("_")
+    return _parse_file_timestamp(start), _parse_file_timestamp(end)
+
+
+def _parse_file_timestamp(value: str) -> int:
+    day, clock = value.rstrip("Z").split("T")
+    hour, minute, second, nanosecond = clock.split("-")
+    return pd.Timestamp(f"{day}T{hour}:{minute}:{second}", tz="UTC").value + int(nanosecond)
+
+
+def _file_timestamp(value: int) -> str:
+    return f"{pd.Timestamp(value, tz='UTC'):%Y-%m-%dT%H-%M-%S}-{value % 1_000_000_000:09d}Z"
 
 
 def count_day_records(catalog_path: Path, day: date) -> tuple[int, int, int]:
