@@ -23,6 +23,8 @@ class RawDayValidation:
 
     counts: dict[str, int]
     missing_bar_timestamps: tuple[int, ...]
+    # (provider time of the first trade after a gap, contracts missing before it)
+    trade_volume_gaps: tuple[tuple[str, int], ...] = ()
 
 
 def validate_raw_day(raw_day: str | Path) -> dict[str, int]:
@@ -50,6 +52,11 @@ def validate_raw_delivery(raw_day: str | Path) -> RawDayValidation:
     return RawDayValidation(
         counts=counts,
         missing_bar_timestamps=missing_bar_timestamps,
+        trade_volume_gaps=tuple(
+            gap
+            for directory in sorted(path for path in (root / "trades").glob("*/*") if path.is_dir())
+            for gap in _trade_volume_gaps(directory)
+        ),
     )
 
 
@@ -158,6 +165,20 @@ def _validate_page_directory(directory: Path, response_key: str) -> int:
         _validate_page_rows(rows, symbol=symbol, data_date=data_date, path=path)
         records += len(rows)
     return records
+
+
+def _trade_volume_gaps(directory: Path) -> list[tuple[str, int]]:
+    """Points where totalVolumeTraded grows by more than matchQtty, i.e. the provider omitted trades."""
+    rows = [row for path in sorted(directory.glob("page_*.json")) for row in read_json(path)["trades"]]
+    rows.sort(key=lambda row: (str(row["time"]), int(row["totalVolumeTraded"])))
+    gaps = []
+    previous = 0
+    for row in rows:
+        missing = int(row["totalVolumeTraded"]) - previous - int(row["matchQtty"])
+        if missing:
+            gaps.append((str(row["time"]), missing))
+        previous = int(row["totalVolumeTraded"])
+    return gaps
 
 
 def _validate_page_rows(
