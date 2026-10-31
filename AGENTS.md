@@ -30,6 +30,10 @@ outside fact it depends on.
    and labels that carry no information.
 6. **Framework terms keep their meaning.** Do not reuse a term the framework
    defines for a different concept.
+7. **Complement the code, do not replace it.** A docstring is one line on what
+   the function does or returns, plus a condition only when the code does not
+   show it. A comment is one line on why. No version numbers, commit references
+   or dates; they go stale.
 
 ## Communication style
 
