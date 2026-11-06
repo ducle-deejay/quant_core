@@ -23,13 +23,13 @@ from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import (
     build_monthly_futures_contract,
 )
+from market_data import LOCAL_TIMEZONE
 from market_data.sources.dnse.validate import page_number
 from market_data.sources.dnse.validate import read_json
-from market_data.sources.session_boundary import session_boundary_record_mask
+from market_data.sources.session_boundary import normalize_boundary_bars
 
 
 BAR_TYPE = "VN30F1M.HNX-1-MINUTE-LAST-EXTERNAL"
-LOCAL_TIMEZONE = VN30F1M_SESSIONS.timezone
 # Provider payloads can include a record at 11:30 or 14:30 local time;
 # the canonical session grid has 241 bars (09:00-11:29, 13:00-14:29 and 14:45).
 # Bars are labelled at the minute open. Nautilus releases a bar at ts_init, which must be
@@ -162,7 +162,7 @@ def _transform_bars(path: Path, instrument: Any) -> list[Any]:
         },
     ).sort_values("timestamp", kind="stable")
     bar_type = BarType.from_str(BAR_TYPE)
-    frame = _normalize_boundary_bars(frame, bar_type=bar_type)
+    frame = normalize_boundary_bars(frame, VN30F1M_SESSIONS)
     _validate_prices(frame[["open", "high", "low", "close"]].to_numpy(dtype=float), "bar")
     _validate_sizes(frame["volume"].to_numpy(dtype=float), "bar", allow_zero=True)
     bars: list[Bar] = []
@@ -195,57 +195,6 @@ def _bar_ts_init(timestamp: pd.Timestamp, ts_event: int) -> int:
     if VN30F1M_SESSIONS.is_closing_auction(pd.Timestamp(timestamp)):
         return ts_event
     return ts_event + ONE_MINUTE_NS
-
-
-def _normalize_boundary_bars(
-    frame: pd.DataFrame,
-    *,
-    bar_type: object,
-) -> pd.DataFrame:
-    """Merge 11:30/14:30 boundary rows into the preceding minute and keep only
-    canonical session minutes; no-op for other bar types."""
-    if str(bar_type) != BAR_TYPE or frame.empty:
-        return frame
-
-    boundary_mask = session_boundary_record_mask(frame["timestamp"])
-    normalized = frame.copy()
-    boundary_indices: list[int] = []
-    if boundary_mask.any():
-        timestamp_indices = normalized.groupby("timestamp", sort=False).groups
-        for index, row in normalized.loc[boundary_mask].iterrows():
-            timestamp = pd.Timestamp(row["timestamp"])
-            predecessor_timestamp = timestamp - pd.Timedelta(minutes=1)
-            predecessor_indices = timestamp_indices.get(predecessor_timestamp, ())
-            if len(predecessor_indices) == 0:
-                normalized.at[index, "timestamp"] = predecessor_timestamp
-                continue
-            if len(predecessor_indices) != 1:
-                expected_minute = predecessor_timestamp.tz_convert(
-                    VN30F1M_SESSIONS.timezone,
-                ).strftime("%H:%M")
-                raise ValueError(
-                    "Cannot normalize VN30F1M.HNX one-minute bar at "
-                    f"{timestamp}: expected exactly one {expected_minute} predecessor",
-                )
-
-            predecessor_index = predecessor_indices[0]
-            normalized.at[predecessor_index, "high"] = max(
-                normalized.at[predecessor_index, "high"],
-                row["high"],
-            )
-            normalized.at[predecessor_index, "low"] = min(
-                normalized.at[predecessor_index, "low"],
-                row["low"],
-            )
-            normalized.at[predecessor_index, "close"] = row["close"]
-            normalized.at[predecessor_index, "volume"] += row["volume"]
-            boundary_indices.append(index)
-
-        if boundary_indices:
-            normalized = normalized.drop(index=boundary_indices)
-
-    canonical_mask = VN30F1M_SESSIONS.session_minute_mask(normalized["timestamp"])
-    return normalized.loc[canonical_mask].reset_index(drop=True)
 
 
 def _transform_trades(directory: Path, instrument: Any) -> Iterator[list[TradeTick]]:

@@ -12,7 +12,7 @@ from market_data.notify import RED
 from market_data.notify import Alert
 from market_data.notify import DiscordWebhook
 from market_data.notify import code_block
-from market_data.notify import notify_or_log
+from market_data.notify import send_alert
 
 
 class FakeResponse:
@@ -56,20 +56,20 @@ def test_send_raises_when_discord_rejects_the_message():
         DiscordWebhook("https://hook", session=FakeSession(429)).send(ALERT)
 
 
-def test_notify_or_log_swallows_errors():
+def test_send_alert_swallows_errors():
     buffer = io.StringIO()
     with contextlib.redirect_stderr(buffer):
-        notify_or_log(RaisingNotifier(), ALERT)
+        send_alert(RaisingNotifier(), ALERT)
     assert "Alert delivery failed" in buffer.getvalue()
 
 
-def test_notify_or_log_raises_when_requested():
+def test_send_alert_raises_when_requested():
     with pytest.raises(RuntimeError):
-        notify_or_log(RaisingNotifier(), ALERT, raise_on_error=True)
+        send_alert(RaisingNotifier(), ALERT, raise_on_error=True)
 
 
-def test_notify_or_log_none_is_noop():
-    notify_or_log(None, ALERT)
+def test_send_alert_none_is_noop():
+    send_alert(None, ALERT)
 
 
 def test_code_block_keeps_the_end_of_a_long_error():

@@ -1,4 +1,4 @@
-"""Daily market data pipeline: DNSE ingest with Mirae backfill, a catalog audit, and their launchd schedule."""
+"""Daily market data pipeline: DNSE ingest cleaned against the reference brokers, a catalog audit against the exchange, and their launchd schedule."""
 
 from __future__ import annotations
 
@@ -13,19 +13,27 @@ from datetime import date
 from datetime import datetime
 from datetime import time
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from market_data import LOCAL_TIMEZONE
+from market_data.daily import FULL_DAY_BARS
+from market_data.daily import alert_brokers_differ
 from market_data.daily import alert_data_missing
+from market_data.daily import alert_exchange_mismatch
+from market_data.daily import alert_exchange_unchecked
 from market_data.daily import alert_failed
 from market_data.daily import alert_startup_failed
+from market_data.daily import broker_exchange_gaps
+from market_data.daily import broker_runner
 from market_data.daily import catalog_consolidator
+from market_data.daily import catalog_day_summary
 from market_data.daily import count_day_records
+from market_data.daily import day_is_complete
 from market_data.daily import days_to_ingest
 from market_data.daily import dnse_client_factory
 from market_data.daily import dnse_runner
-from market_data.daily import mirae_runner
+from market_data.daily import exchange_gaps
 from market_data.daily import publish_catalog
 from market_data.daily import read_working_dates
 from market_data.daily import recent_trading_days
@@ -36,9 +44,10 @@ from market_data.logs import configure as configure_logging
 from market_data.logs import fields
 from market_data.logs import stage
 from market_data.notify import DiscordWebhook
-from market_data.notify import notify_or_log
+from market_data.notify import send_alert
 from market_data.sources import ETLStageError
-from market_data.sources.mirae.load import FULL_DAY_BARS
+from market_data.sources.hnx.extract import extract_day as extract_exchange_day
+from market_data.sources.hnx.extract import front_contract
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,12 +56,12 @@ DATA_ROOT = Path(os.environ["DATA_ROOT"])
 CATALOG_PATH = DATA_ROOT / "catalog"
 PUBLISHED_ROOT = DATA_ROOT / "published"
 DNSE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "dnse"
-MIRAE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "mirae"
+BROKER_RAW_ROOT = DATA_ROOT / "raw" / "vietnam"
+HNX_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "hnx"
 LOG_DIR = DATA_ROOT / "logs"
 LAUNCHD_LOG_DIR = LOG_DIR / "launchd"
 SYMBOL = "VN30F1M"
 DNSE_REQUEST_DELAY_SECONDS = 0.02
-LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 INGEST_AFTER = time(16, 0)
 RUN_TIMES = tuple(time(hour, 0) for hour in range(16, 21))  # each run ingests only missing days, so later runs retry
@@ -87,7 +96,7 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
     if not api_key or not api_secret:
         error = RuntimeError("API_KEY and API_SECRET must be defined in .env")
         logger.error("startup failed %s", fields(error=error))
-        notify_or_log(notifier, alert_startup_failed(error, str(log_path)), raise_on_error=True)
+        send_alert(notifier, alert_startup_failed(error, str(log_path)), raise_on_error=True)
         return 1
     client_factory = dnse_client_factory(api_key, api_secret)
 
@@ -105,7 +114,7 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
         except Exception as error:
             logger.exception("day selection failed %s", fields(error=f"{type(error).__name__}: {error}"))
             failure = ETLStageError(source="Pipeline", stage="day selection", cause=error)
-            notify_or_log(notifier, alert_failed("Data pipeline", failure, attempt, str(log_path)), raise_on_error=True)
+            send_alert(notifier, alert_failed("Data pipeline", failure, attempt, str(log_path)), raise_on_error=True)
             return 1
     logger.info("days to ingest %s", fields(days=",".join(str(current) for current in days) or "none"))
 
@@ -114,8 +123,8 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
         try:
             run_and_alert(
                 day=current,
+                run_brokers=broker_runner(BROKER_RAW_ROOT),
                 run_dnse=dnse_runner(client_factory, DNSE_RAW_ROOT, CATALOG_PATH, SYMBOL, DNSE_REQUEST_DELAY_SECONDS),
-                run_mirae=mirae_runner(MIRAE_RAW_ROOT, DNSE_RAW_ROOT, CATALOG_PATH, SYMBOL),
                 consolidate=catalog_consolidator(CATALOG_PATH),
                 notifier=notifier,
                 attempt=attempt,
@@ -134,7 +143,7 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
                 publish_catalog(CATALOG_PATH, PUBLISHED_ROOT)
             published = True
         except ETLStageError as error:
-            notify_or_log(notifier, alert_failed("Catalog publish", error, attempt, str(log_path)), raise_on_error=True)
+            send_alert(notifier, alert_failed("Catalog publish", error, attempt, str(log_path)), raise_on_error=True)
     logger.info(
         "run finished %s",
         fields(
@@ -149,7 +158,10 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
 
 
 def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_path: Path) -> int:
-    """Alert for each recent trading day the catalog does not fully hold."""
+    """Alert for each recent trading day the catalog does not hold, or that differs from the HNX daily results.
+
+    A day is compared with the exchange once, when its HNX results are first retained; ``--date`` compares again.
+    """
     audit_logger = logging.getLogger("Catalog.audit")
     logger.info("run started %s", fields(requested_day=day or "auto"))
     try:
@@ -159,10 +171,10 @@ def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_
     except Exception as error:
         # An audit that cannot decide which days to read must still alert
         audit_logger.exception("day selection failed %s", fields(error=f"{type(error).__name__}: {error}"))
-        notify_or_log(notifier, _missing_alert(day or now.date(), None, error, log_path))
+        send_alert(notifier, _missing_alert(day or now.date(), None, error, log_path))
         return 1
 
-    complete = missing = 0
+    matched = missing = differs = unchecked = 0
     for current in days:
         counts: tuple[int, int, int] | None = None
         read_error: Exception | None = None
@@ -171,17 +183,52 @@ def audit(notifier: DiscordWebhook | None, now: datetime, day: date | None, log_
         except Exception as error:
             audit_logger.exception("catalog read failed %s", fields(day=current, error=f"{type(error).__name__}: {error}"))
             read_error = error
-        if counts is not None:
-            bars, trades, depth = counts
-            values = fields(day=current, bars=f"{bars}/{FULL_DAY_BARS}", trades=trades, order_book_rows=depth)
-            if bars >= FULL_DAY_BARS and trades and depth:
-                audit_logger.info("day complete %s", values)
-                complete += 1
+        if counts is None or not day_is_complete(CATALOG_PATH, current):
+            if counts is not None:
+                bars, trades, depth = counts
+                audit_logger.error("day not ingested %s", fields(day=current, bars=f"{bars}/{FULL_DAY_BARS}", trades=trades, order_book_rows=depth))
+            send_alert(notifier, _missing_alert(current, counts, read_error, log_path))
+            missing += 1
+            if counts is None or counts[0] == 0:
                 continue
-            audit_logger.error("day incomplete %s", values)
-        notify_or_log(notifier, _missing_alert(current, counts, read_error, log_path))
-        missing += 1
-    logger.info("run finished %s", fields(complete=complete, missing=missing))
+        if day is None and (HNX_RAW_ROOT / f"{current.isoformat()}.html").exists():
+            continue
+        try:
+            raw = extract_exchange_day(raw_root=HNX_RAW_ROOT, day=current)
+            if raw is None:
+                reason = "HNX has not published the day"
+            else:
+                exchange = front_contract(raw)
+                reason = None if exchange.has_values else "HNX results are incomplete"
+        except Exception as error:
+            audit_logger.exception("exchange read failed %s", fields(day=current, error=f"{type(error).__name__}: {error}"))
+            reason = f"{type(error).__name__}: {error}"
+        if reason:
+            audit_logger.warning("day not checked %s", fields(day=current, reason=reason))
+            send_alert(notifier, alert_exchange_unchecked(current, reason, str(log_path)))
+            unchecked += 1
+            continue
+        catalog = catalog_day_summary(CATALOG_PATH, current)
+        gaps = exchange_gaps(catalog, exchange)
+        values = fields(day=current, bars=f"{int(catalog['bars'])}/{FULL_DAY_BARS}", contract=exchange.symbol, **{f"{key}_gap": value for key, value in gaps.items()})
+        if gaps:
+            audit_logger.warning("day differs from the exchange %s", values)
+            send_alert(notifier, alert_exchange_mismatch(current, catalog, exchange, gaps, str(log_path)))
+            differs += 1
+        else:
+            audit_logger.info("day matches the exchange %s", values)
+            matched += 1
+        try:
+            brokers = broker_exchange_gaps(BROKER_RAW_ROOT, current, exchange)
+        except Exception as error:
+            audit_logger.exception("broker read failed %s", fields(day=current, error=f"{type(error).__name__}: {error}"))
+            brokers = {"brokers": f"{type(error).__name__}: {error}"}
+        for name, value in brokers.items():
+            detail = {"reason": value} if isinstance(value, str) else {f"{field}_gap": gap for field, gap in value.items()}
+            audit_logger.warning("broker differs from the exchange %s", fields(day=current, broker=name, **detail))
+        if brokers:
+            send_alert(notifier, alert_brokers_differ(current, brokers, str(log_path)))
+    logger.info("run finished %s", fields(matched=matched, differs=differs, unchecked=unchecked, missing=missing))
     return 1 if missing else 0
 
 

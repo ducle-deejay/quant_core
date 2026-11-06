@@ -65,7 +65,7 @@ class DiscordWebhook:
             raise RuntimeError(f"Discord returned HTTP {response.status_code}: {response.text[:200]}")
 
 
-def notify_or_log(
+def send_alert(
     notifier: DiscordWebhook | None,
     alert: Alert,
     *,

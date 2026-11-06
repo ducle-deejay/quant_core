@@ -1,8 +1,7 @@
 """Daily extract, transform, and load (ETL) orchestration for market data.
 
-Runs DNSE first, then uses Mirae candlesticks to backfill days where DNSE
-left bars missing. Final coverage is judged after both sources, the catalog is then consolidated,
-and the result or failure is sent as a Discord alert.
+Retains the reference brokers' one-minute bars, loads DNSE into the catalog with its bars cleaned
+against them, consolidates the catalog, and sends the result or failure as a Discord alert.
 """
 
 from __future__ import annotations
@@ -20,13 +19,17 @@ from datetime import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from nautilus_trader.persistence import ParquetDataCatalog
 
+from market_data import LOCAL_TIMEZONE
+from market_data.clean import FIELDS
+from market_data.clean import FULL_DAY_BARS
+from market_data.clean import summary_gaps
+from market_data.clean import day_summary
 from market_data.notify import GREEN
 from market_data.notify import RED
 from market_data.notify import YELLOW
@@ -35,133 +38,83 @@ from market_data.notify import DiscordWebhook
 from market_data.notify import code_block
 from market_data.logs import fields
 from market_data.logs import stage
-from market_data.notify import notify_or_log
+from market_data.notify import send_alert
 from market_data.sources import ETLStageError
 from market_data.sources.dnse.client import create_dnse_rest_client
 from market_data.sources.dnse.extract import WORKING_DATES_FILE
 from market_data.sources.dnse.extract import ClientFactory
 from market_data.sources.dnse.extract import get_working_dates
 from market_data.sources.dnse.extract import read_working_dates
-from market_data.sources.dnse.extract import recorded_trading_day
 from market_data.sources.dnse.pipeline import run_daily as run_dnse_daily
-from market_data.sources.mirae.extract import request_mirae_history
-from market_data.sources.mirae.load import FULL_DAY_BARS
-from market_data.sources.mirae.pipeline import run_daily as run_mirae_daily
-from market_data.sources.mirae.transform import BAR_TYPE
-from market_data.sources.mirae.transform import LOCAL_TIMEZONE
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
+from market_data.sources.dnse.transform import BAR_TYPE
+from market_data.sources.hnx.extract import ExchangeDay
+from market_data.sources import bar_download
+from market_data.sources.hsc import extract as hsc
+from market_data.sources.vietcap import extract as vietcap
+from market_data.sources.vps import extract as vps
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import CONTINUOUS_SYMBOL
+from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 
 
-SourceRunner = Callable[[date], dict[str, object]]
+DnseRunner = Callable[[date, list[pd.DataFrame]], dict[str, object]]
+BrokerRunner = Callable[[date], dict[str, pd.DataFrame | Exception]]
 logger = logging.getLogger("Pipeline")
 
+BROKERS = {"Vietcap": vietcap, "HSC": hsc, "VPS": vps}
 CONSOLIDATION_PERIOD_NS = 100 * 365 * 86_400_000_000_000  # longer than any catalog's history
 # Blank inline field (zero-width space as name and value) that ends a row of inline fields early
 EMPTY_INLINE_FIELD = ("\u200b", "\u200b", True)
 
 
 class DailyDataPipelineError(RuntimeError):
-    """DNSE failed, or bars remain missing after the Mirae backfill."""
+    """DNSE failed."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        source_errors: dict[str, Exception | None] | None = None,
-        missing_timestamps: list[int] | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, source_errors: dict[str, Exception | None] | None = None) -> None:
         self.source_errors = {
             source: error
             for source, error in (source_errors or {}).items()
             if error is not None
         }
-        self.missing_timestamps = missing_timestamps or []
         super().__init__(message)
 
 
 def run_daily(
     *,
     day: date,
-    run_dnse: SourceRunner,
-    run_mirae: SourceRunner,
+    run_brokers: BrokerRunner,
+    run_dnse: DnseRunner,
     consolidate: Callable[[], None],
 ) -> dict[str, object]:
-    """Run DNSE first, then Mirae; judge final coverage after both sources,
-    then consolidate the catalog.
+    """Retain the brokers' bars, run DNSE cleaned against them, then consolidate the catalog; return the aggregated report.
 
-    Returns the aggregated report. Raises DailyDataPipelineError when DNSE
-    failed outright or when timestamps remain missing after both sources, and
-    ETLStageError when consolidation fails.
+    Raises DailyDataPipelineError when DNSE fails, and ETLStageError when consolidation fails.
     """
-    dnse_report: dict[str, object] | None = None
-    dnse_error: Exception | None = None
+    brokers = run_brokers(day)
+    broker_bars = [bars for bars in brokers.values() if isinstance(bars, pd.DataFrame)]
     try:
-        dnse_report = run_dnse(day)
+        dnse_report = run_dnse(day, broker_bars)
     except Exception as error:
-        dnse_error = error
-
-    mirae_report: dict[str, object] | None = None
-    mirae_error: Exception | None = None
-    try:
-        mirae_report = run_mirae(day)
-    except Exception as error:
-        mirae_error = error
-
-    if dnse_error is not None:
         raise DailyDataPipelineError(
-            "DNSE daily pipeline failed; Mirae backup "
-            f"{'also failed' if mirae_error is not None else 'attempted'}",
-            source_errors={"DNSE": dnse_error, "Mirae": mirae_error},
-        ) from dnse_error
+            "DNSE daily pipeline failed",
+            source_errors={"DNSE": error},
+        ) from error
 
-    remaining = _remaining_missing(dnse_report, mirae_report)
-    if remaining:
-        raise DailyDataPipelineError(
-            f"{len(remaining)} one-minute bars remain missing after both sources",
-            source_errors={"DNSE": dnse_error, "Mirae": mirae_error},
-            missing_timestamps=remaining,
-        )
+    missing_minutes = _missing_minutes(dnse_report)
+    if missing_minutes:
+        logger.info("minutes without a bar %s", fields(day=day, count=len(missing_minutes), minutes=",".join(missing_minutes)))
 
     with stage("Catalog", "consolidate", day):
         consolidate()
 
-    report: dict[str, object] = {
+    return {
         "day": day.isoformat(),
         "dnse": dnse_report,
-        "mirae": mirae_report,
+        # A broker failure is a warning: the clean step needs only a majority of the brokers
+        "brokers": {
+            name: _format_exception(bars) if isinstance(bars, Exception) else len(bars)
+            for name, bars in brokers.items()
+        },
     }
-    if mirae_error is not None:
-        # DNSE fully covered the day; a broken fallback is a warning, not a
-        # failed run - surface it in the report/alert instead of failing.
-        report["mirae_error"] = _format_exception(mirae_error)
-    return report
-
-
-def _remaining_missing(
-    dnse_report: dict[str, object] | None,
-    mirae_report: dict[str, object] | None,
-) -> list[int]:
-    """Timestamps DNSE missed that Mirae did not add."""
-    missing = _missing_timestamps(dnse_report)
-    if not missing:
-        return []
-    added = _mirae_added_timestamps(mirae_report)
-    return [timestamp for timestamp in missing if timestamp not in added]
-
-
-def _missing_timestamps(report: dict[str, object] | None) -> list[int]:
-    if report is None:
-        return []
-    value = report.get("missing_bar_timestamps", [])
-    return [int(timestamp) for timestamp in value] if isinstance(value, list) else []
-
-
-def _mirae_added_timestamps(report: dict[str, object] | None) -> set[int]:
-    if report is None:
-        return set()
-    records = report.get("records")
-    value = records.get("added_bar_timestamps") if isinstance(records, dict) else None
-    return {int(timestamp) for timestamp in value} if isinstance(value, list) else set()
 
 
 def dnse_client_factory(api_key: str, api_secret: str) -> ClientFactory:
@@ -207,34 +160,44 @@ def dnse_runner(
     catalog_path: Path,
     symbol: str,
     request_delay_seconds: float,
-) -> SourceRunner:
-    def run(day: date) -> dict[str, object]:
+) -> DnseRunner:
+    def run(day: date, broker_bars: list[pd.DataFrame]) -> dict[str, object]:
         return run_dnse_daily(
             client_factory=client_factory,
             raw_root=raw_root,
             catalog_path=catalog_path,
             continuous_symbol=symbol,
             day=day,
+            broker_bars=broker_bars,
             request_delay_seconds=request_delay_seconds,
         )
 
     return run
 
 
-def mirae_runner(raw_root: Path, dnse_raw_root: Path, catalog_path: Path, symbol: str) -> SourceRunner:
-    """Mirae fallback runner; a current-day run requests the VN30F1M monthly contract."""
+def broker_runner(raw_root: Path) -> BrokerRunner:
+    """Each broker's VN30F1M bars for the day, retained under ``raw_root/<broker>/VN30F1M``, or the error that prevented them."""
 
-    def run(day: date) -> dict[str, object]:
-        today = datetime.now(ZoneInfo(LOCAL_TIMEZONE)).date()
-        active_contract = vn30f1m_contract(day, recorded_trading_day(dnse_raw_root))[0] if day == today else None
-        return run_mirae_daily(
-            request_history=request_mirae_history,
-            active_contract=active_contract,
-            raw_root=raw_root,
-            catalog_path=catalog_path,
-            continuous_symbol=symbol,
-            day=day,
-        )
+    def run(day: date) -> dict[str, pd.DataFrame | Exception]:
+        result: dict[str, pd.DataFrame | Exception] = {}
+        for name, source in BROKERS.items():
+            try:
+                with stage(name, "extract", day) as details:
+                    path = bar_download.extract_day(
+                        raw_root=raw_root / name.lower(),
+                        symbol=CONTINUOUS_SYMBOL.value,
+                        day=day,
+                        sessions=VN30F1M_SESSIONS,
+                        request=source.request_bars,
+                        frame=source.bars_frame,
+                    )
+                    if path is None:
+                        raise ValueError(f"{name} has no bar for {day}")
+                    result[name] = bar_download.read_day(path, day, VN30F1M_SESSIONS, source.bars_frame)
+                    details["bars"] = len(result[name])
+            except ETLStageError as error:
+                result[name] = error.cause
+        return result
 
     return run
 
@@ -342,10 +305,48 @@ def count_day_records(catalog_path: Path, day: date) -> tuple[int, int, int]:
     )
 
 
+def catalog_day_summary(catalog_path: Path, day: date) -> dict[str, float]:
+    """Daily open, high, low, close and volume aggregated from the catalog's one-minute bars."""
+    start, end = _local_day_bounds(day)
+    bars = sorted(ParquetDataCatalog(str(catalog_path)).query_bars([BAR_TYPE], start=start, end=end), key=lambda bar: bar.ts_event)
+    if not bars:
+        raise ValueError(f"No bars in the catalog for {day}")
+    return {
+        "bars": len(bars),
+        "open": bars[0].open.as_double(),
+        "high": max(bar.high.as_double() for bar in bars),
+        "low": min(bar.low.as_double() for bar in bars),
+        "close": bars[-1].close.as_double(),
+        "volume": sum(bar.volume.as_double() for bar in bars),
+    }
+
+
+def exchange_gaps(catalog: dict[str, float], exchange: ExchangeDay) -> dict[str, float]:
+    """Catalog minus exchange for each field beyond its tolerance."""
+    return summary_gaps(catalog, {name: getattr(exchange, name) for name in FIELDS})
+
+
+def broker_exchange_gaps(raw_root: Path, day: date, exchange: ExchangeDay) -> dict[str, dict[str, float] | str]:
+    """Each broker's daily summary minus the exchange beyond tolerance, or why it could not be compared; brokers that match are omitted."""
+    result: dict[str, dict[str, float] | str] = {}
+    for name, source in BROKERS.items():
+        path = bar_download.raw_path(raw_root / name.lower(), CONTINUOUS_SYMBOL.value, day)
+        if not path.exists():
+            result[name] = "no raw data"
+            continue
+        bars = bar_download.read_day(path, day, VN30F1M_SESSIONS, source.bars_frame)
+        gaps = exchange_gaps(day_summary(bars), exchange) if not bars.empty else {}
+        if bars.empty:
+            result[name] = "no bar"
+        elif gaps:
+            result[name] = gaps
+    return result
+
+
 def day_is_complete(catalog_path: Path, day: date) -> bool:
-    """A full session of bars plus trades and order book depth for ``day``."""
+    """DNSE bars, trades and order book depth are loaded for ``day``; a minute without a trade has no bar."""
     bars, trades, depth = count_day_records(catalog_path, day)
-    return bars >= FULL_DAY_BARS and trades > 0 and depth > 0
+    return bars > 0 and trades > 0 and depth > 0
 
 
 def recent_trading_days(working_dates: set[date], now: datetime, ingest_after: time, count: int) -> list[date]:
@@ -397,34 +398,70 @@ def alert_ingested(
     report: dict[str, object],
     run: tuple[tuple[str, str, bool], ...],
     attempt: RunAttempt,
+    log_path: str,
 ) -> Alert:
+    """A normal day shows the run and its counts; cleaned bars, unresolved bars and failed brokers add their own fields."""
     dnse = _records(report.get("dnse"))
-    mirae_added = _count(_records(report.get("mirae")), "Bar")
-    mirae_error = report.get("mirae_error")
     missing_trades = _missing_trade_contracts(report.get("dnse"))
-    bars = f"{FULL_DAY_BARS}/{FULL_DAY_BARS}" + (f" (Mirae added {mirae_added})" if mirae_added else "")
+    cleaned = report["dnse"].get("clean") if isinstance(report.get("dnse"), dict) else None
+    outcome = cleaned.get("outcome") if isinstance(cleaned, dict) else None
+    brokers = report.get("brokers") if isinstance(report.get("brokers"), dict) else {}
+    down = {name: value for name, value in brokers.items() if not isinstance(value, int)}
     trades = f"{_count(dnse, 'TradeTick'):,}"
     if missing_trades:
         trades += f"\nINCOMPLETE, {missing_trades:,} contracts missing"
-    if mirae_error:
-        mirae = code_block(mirae_error)
-    else:
-        mirae = f"added {mirae_added} bars" if mirae_added else "not needed"
-    warnings = [text for text, present in (("trades incomplete", missing_trades), ("Mirae backup down", mirae_error)) if present]
+    warnings = [
+        text
+        for text, present in (
+            ("trades incomplete", missing_trades),
+            ("bars not cleaned", outcome == "unresolved"),
+            (f"{', '.join(down)} down", down),
+        )
+        if present
+    ]
+    notes = warnings or (["bars cleaned"] if outcome in ("gaps_filled", "corrected") else [])
+    details: list[tuple[str, str, bool]] = []
+    if outcome in ("gaps_filled", "corrected"):
+        details.append(("Clean", f"{len(cleaned['filled'])} filled, {len(cleaned['corrected'])} corrected", False))
+    elif outcome == "unresolved":
+        details.append(("Clean", _clean_gap_table(cleaned), False))
+    if down:
+        details.append(("Brokers", "\n".join(f"{name}\n{code_block(str(error))}" for name, error in down.items()), False))
+    if details or missing_trades:
+        details.append(("Log", f"`{log_path}`", False))
     return Alert(
-        summary=f"⚠️ Data {day} ingested — {', '.join(warnings)}" if warnings else f"✅ Data {day} ingested",
+        summary=f"{'⚠️' if warnings else '✅'} Data {day} ingested" + (f" — {', '.join(notes)}" if notes else ""),
         color=YELLOW if warnings else GREEN,
         fields=(
             ("Day", str(day), True),
             ("Attempt", attempt.label, True),
             EMPTY_INLINE_FIELD,
             *run,
-            ("Bars", bars, True),
+            ("Bars", f"{_count(dnse, 'Bar')}/{FULL_DAY_BARS}", True),
             ("Trades", trades, True),
             ("Order book", f"{_count(dnse, 'OrderBookDepth10'):,}", True),
-            ("Mirae", mirae, False),
+            *details,
         ),
     )
+
+
+def _clean_gap_table(cleaned: dict[str, Any]) -> str:
+    """DNSE against the brokers' daily summary for each field beyond tolerance."""
+    gaps = cleaned.get("gaps") or {}
+    dnse = cleaned.get("dnse") or {}
+    broker_summary = cleaned.get("broker_summary") or {}
+    if not gaps:
+        return str(cleaned.get("reason"))
+    rows = [
+        f"{name:<7}{_format_number(name, dnse[name]):>12}{_format_number(name, broker_summary[name]):>12}{_format_number(name, gap, sign=True):>10}"
+        for name, gap in gaps.items()
+    ]
+    return code_block("\n".join([f"{'':<7}{'DNSE':>12}{'brokers':>12}{'gap':>10}", *rows]))
+
+
+def _format_number(name: str, value: float, *, sign: bool = False) -> str:
+    """Volume as whole contracts, prices with one decimal."""
+    return format(value, ("+" if sign else "") + (",.0f" if name == "volume" else ",.1f"))
 
 
 def alert_failed(
@@ -448,6 +485,52 @@ def alert_failed(
     fields += [(f"Step: {step}", code_block(detail), False) for step, detail in _failed_steps(error)]
     fields.append(("Log", f"`{log_path}`", False))
     return Alert(summary=f"❌ {subject} failed — {outlook}", color=RED, fields=tuple(fields))
+
+
+def alert_exchange_mismatch(
+    day: date,
+    catalog: dict[str, float],
+    exchange: ExchangeDay,
+    gaps: dict[str, float],
+    log_path: str,
+) -> Alert:
+    rows = [
+        f"{field:<7}{catalog[field]:>12,.1f}{getattr(exchange, field):>12,.1f}{gaps[field]:>+12,.1f}"
+        for field in ("open", "high", "low", "close", "volume")
+        if field in gaps
+    ]
+    table = code_block("\n".join([f"{'':<7}{'catalog':>12}{'exchange':>12}{'gap':>12}", *rows]))
+    return Alert(
+        summary=f"⚠️ Data {day} differs from the exchange — {', '.join(gaps)}",
+        color=YELLOW,
+        fields=(
+            ("Day", str(day), True),
+            ("Contract", exchange.symbol, True),
+            ("Bars", f"{int(catalog['bars'])}/{FULL_DAY_BARS}", True),
+            ("Gap", table, False),
+            ("Log", f"`{log_path}`", False),
+        ),
+    )
+
+
+def alert_brokers_differ(day: date, brokers: dict[str, dict[str, float] | str], log_path: str) -> Alert:
+    lines = [
+        f"{name}: {value if isinstance(value, str) else ', '.join(f'{field} {_format_number(field, gap, sign=True)}' for field, gap in value.items())}"
+        for name, value in brokers.items()
+    ]
+    return Alert(
+        summary=f"⚠️ Data {day}: reference brokers differ from the exchange — {', '.join(brokers)}",
+        color=YELLOW,
+        fields=(("Day", str(day), True), ("Brokers", "\n".join(lines), False), ("Log", f"`{log_path}`", False)),
+    )
+
+
+def alert_exchange_unchecked(day: date, reason: str, log_path: str) -> Alert:
+    return Alert(
+        summary=f"⚠️ Data {day} not checked against the exchange — {reason}",
+        color=YELLOW,
+        fields=(("Day", str(day), True), ("Log", f"`{log_path}`", False)),
+    )
 
 
 def alert_startup_failed(error: Exception, log_path: str) -> Alert:
@@ -501,13 +584,6 @@ def _failed_steps(error: Exception) -> list[tuple[str, str]]:
             else (source, _format_exception(source_error))
             for source, source_error in error.source_errors.items()
         ]
-        if error.missing_timestamps:
-            minutes = [
-                pd.Timestamp(ts, tz="UTC").tz_convert(LOCAL_TIMEZONE).strftime("%H:%M")
-                for ts in sorted(error.missing_timestamps)
-            ]
-            shown = ", ".join(minutes[:20]) + (" …" if len(minutes) > 20 else "")
-            steps.append(("coverage check", f"{len(minutes)} bars missing after both sources: {shown}"))
         return steps or [("unknown", _format_exception(error))]
     return [("unknown", _format_exception(error))]
 
@@ -531,6 +607,14 @@ def _missing_trade_contracts(report: object) -> int:
     return sum(int(entry["contracts"]) for entry in missing) if isinstance(missing, list) else 0
 
 
+def _missing_minutes(report: object) -> list[str]:
+    """Local HH:MM of the session minutes without a DNSE bar; DNSE reports them in epoch seconds."""
+    value = report.get("missing_bar_timestamps", []) if isinstance(report, dict) else []
+    if not isinstance(value, list):
+        return []
+    return [pd.Timestamp(int(ts), unit="s", tz="UTC").tz_convert(LOCAL_TIMEZONE).strftime("%H:%M") for ts in sorted(value)]
+
+
 def _records(report: object) -> dict[str, object]:
     if not isinstance(report, dict):
         return {}
@@ -546,8 +630,8 @@ def _count(records: dict[str, object], key: str) -> int:
 def run_and_alert(
     *,
     day: date,
-    run_dnse: SourceRunner,
-    run_mirae: SourceRunner,
+    run_brokers: BrokerRunner,
+    run_dnse: DnseRunner,
     consolidate: Callable[[], None],
     notifier: DiscordWebhook | None,
     attempt: RunAttempt,
@@ -559,24 +643,24 @@ def run_and_alert(
     ``raise_on_error=True`` propagates alert delivery errors instead of
     logging and suppressing them.
     """
-    started = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+    started = datetime.now(LOCAL_TIMEZONE)
     try:
         report = run_daily(
             day=day,
+            run_brokers=run_brokers,
             run_dnse=run_dnse,
-            run_mirae=run_mirae,
             consolidate=consolidate,
         )
     except Exception as error:
-        notify_or_log(
+        send_alert(
             notifier,
             alert_failed(f"Data {day}", error, attempt, log_path, _run_fields(started, datetime.now(started.tzinfo)), day),
             raise_on_error=raise_on_error,
         )
         raise
-    notify_or_log(
+    send_alert(
         notifier,
-        alert_ingested(day, report, _run_fields(started, datetime.now(started.tzinfo)), attempt),
+        alert_ingested(day, report, _run_fields(started, datetime.now(started.tzinfo)), attempt, log_path),
         raise_on_error=raise_on_error,
     )
     return report

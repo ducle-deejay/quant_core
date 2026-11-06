@@ -14,8 +14,8 @@ from datetime import time as time_of_day
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from market_data import LOCAL_TIMEZONE
 from market_data.logs import fields
 from market_data.logs import stage
 from market_data.sources import ETLStageError
@@ -25,7 +25,6 @@ from market_data.sources.paged_download import PageFetcher
 from market_data.sources.paged_download import RateLimited
 from market_data.sources.paged_download import download_windows
 from market_data.sources.paged_download import split_range
-from nautilus_bridge.instruments.derivatives.futures.vn30f1m import VN30F1M_SESSIONS
 from nautilus_bridge.instruments.derivatives.futures.vn30f1m import vn30f1m_contract
 
 
@@ -36,7 +35,6 @@ PAGE_WINDOW_BOUNDARIES = tuple(time_of_day(hour, minute) for hour in range(9, 15
 TOO_MANY_REQUESTS = 429
 MAX_SERVER_RETRIES = 6
 MIN_REMAINING = 500
-LOCAL_TIMEZONE = ZoneInfo(VN30F1M_SESSIONS.timezone)
 WORKING_DATES_FILE = "working_dates.json"
 logger = logging.getLogger("DNSE.extract")
 resolve_logger = logging.getLogger("DNSE.resolve")

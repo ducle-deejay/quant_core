@@ -10,8 +10,8 @@ from nautilus_trader.model import FuturesContract
 from nautilus_trader.model import PerpetualContract
 from nautilus_trader.persistence import ParquetDataCatalog
 
+from market_data import LOCAL_TIMEZONE
 from market_data.sources.dnse.validate import validate_transformed_batch
-from market_data.sources.dnse.transform import LOCAL_TIMEZONE
 
 
 REQUIRED_CATALOG_TYPES = {"bars", "instruments", "order_book_depths", "trades"}

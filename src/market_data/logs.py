@@ -11,12 +11,11 @@ from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from market_data import LOCAL_TIMEZONE
 from market_data.sources import ETLStageError
 
 
-LOCAL_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 TRACEBACK_INDENT = "    "
 
 
