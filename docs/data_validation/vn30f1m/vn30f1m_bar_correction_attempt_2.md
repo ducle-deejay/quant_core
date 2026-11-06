@@ -576,8 +576,12 @@ The dataset starts on **2018-09-25**, the first day with Mirae data. Before
 it DNSE has no source to compare with (2018-09-10, for example, is 2.03%
 above the exchange with no way to check).
 
+## Catalog snapshot
+
+- **Snapshot:** `$DATA_ROOT/catalog_snapshots/20261106T1213/`, a read-only APFS clone (`cp -c -R`) of `$DATA_ROOT/catalog`; `SNAPSHOT.json` in it records the time, reason and correction commit.
+- **Applied:** the VN30F1M bars were then replaced with `attempt_2/VN30F1M_corrected.csv` (2018-09-25 to 2026-10-30) plus the catalog's own bars from 2026-11-02 to 2026-11-05; trades, order book depth and instruments are unchanged.
+- **Rollback:** with no ingest or audit job running, clone the snapshot back to `$DATA_ROOT/catalog` (`cp -c -R`), make it writable (`chmod -R u+w`), then publish it with `market_data.daily.publish_catalog($DATA_ROOT/catalog, $DATA_ROOT/published)`.
+
 ## Open
 
-- Apply `VN30F1M_missing.csv` and `VN30F1M_wrong.csv` to the data
-  researchers use, from 2018-09-25.
 - The two pipeline changes in "Why a second attempt".
