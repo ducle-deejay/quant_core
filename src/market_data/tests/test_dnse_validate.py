@@ -33,10 +33,11 @@ def write_raw_day(root, opens: list[int]) -> None:
     bars.parent.mkdir(parents=True)
     bars.write_text(json.dumps({key: opens if key == "t" else [1] * len(opens) for key in "tohlcv"}))
     row = {"symbol": SYMBOL, "marketId": "DVX", "boardId": "G1", "isin": "VN41I1GB0001", "time": f"{DAY} 09:00:01"}
-    for category, key in (("trades", "trades"), ("orderbook", "quotes")):
+    trade = {**row, "matchQtty": 1, "totalVolumeTraded": 1}
+    for category, key, record in (("trades", "trades", trade), ("orderbook", "quotes", row)):
         page = futures / category / SYMBOL / DAY / "page_00001.json"
         page.parent.mkdir(parents=True)
-        page.write_text(json.dumps({key: [row]}))
+        page.write_text(json.dumps({key: [record]}))
 
 
 def test_a_session_boundary_bar_is_counted_with_the_preceding_minute(tmp_path):

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
-
 import pytest
 
 from market_data.notify import FIELD_VALUE_LIMIT
@@ -56,11 +53,9 @@ def test_send_raises_when_discord_rejects_the_message():
         DiscordWebhook("https://hook", session=FakeSession(429)).send(ALERT)
 
 
-def test_send_alert_swallows_errors():
-    buffer = io.StringIO()
-    with contextlib.redirect_stderr(buffer):
-        send_alert(RaisingNotifier(), ALERT)
-    assert "Alert delivery failed" in buffer.getvalue()
+def test_send_alert_swallows_errors(caplog):
+    send_alert(RaisingNotifier(), ALERT)
+    assert "alert delivery failed" in caplog.text
 
 
 def test_send_alert_raises_when_requested():
