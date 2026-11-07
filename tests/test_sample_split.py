@@ -4,6 +4,18 @@ import pandas as pd
 import pytest
 
 from nautilus_bridge.backtest.sample_split import backtest_period
+from nautilus_bridge.backtest.sample_split import sample_window
+
+
+def test_backtest_period_without_end_stops_at_the_is_window_end() -> None:
+    _, is_end = sample_window("IS")
+    period = backtest_period(
+        start="2020-01-01",
+        sample="IS",
+        data_start=pd.Timestamp("2020-01-01", tz="UTC"),
+        data_end=is_end + pd.DateOffset(years=1),
+    )
+    assert period == (pd.Timestamp("2020-01-01", tz="UTC"), is_end)
 
 
 def test_backtest_period_keeps_bounds_inside_the_data() -> None:

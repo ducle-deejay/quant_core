@@ -30,14 +30,15 @@ def run_backtest(
     *,
     instrument_id: str,
     timeframe: str,
-    start: str | None,
-    end: str | None,
+    start: str | None = None,
+    end: str | None = None,
     book_size: str,
     commission: str,
     alpha: str,
     strategy_id: str,
     fixed_contracts: int,
     output_dir: str,
+    sample: str = "IS",
     analyze_results: bool = True,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
     catalog = str(catalog_path())
@@ -52,6 +53,7 @@ def run_backtest(
     start_run, end_run = backtest_period(
         start=start,
         end=end,
+        sample=sample,
         data_start=pd.Timestamp(source_bars["ts_init"].min(), tz="UTC"),
         data_end=pd.Timestamp(source_bars["ts_init"].max(), tz="UTC"),
     )
