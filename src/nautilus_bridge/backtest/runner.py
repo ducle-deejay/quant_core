@@ -15,6 +15,7 @@ from nautilus_bridge.alphas.session_resampling import bar_row
 from nautilus_bridge.alphas.session_resampling import bars_frame
 from nautilus_bridge.alphas.session_resampling import resample_by_session
 from nautilus_bridge.alphas.loader import load_alpha
+from nautilus_bridge.analyzer.analyzer import analyze
 from nautilus_bridge.backtest.engine import engine_config
 from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.venue import venue_config
@@ -35,6 +36,7 @@ def run_backtest(
     strategy_id: str,
     fixed_contracts: int,
     output_dir: str,
+    analyze_results: bool = True,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
     catalog = str(catalog_path())
     instrument_id = InstrumentId.from_str(instrument_id)
@@ -91,4 +93,8 @@ def run_backtest(
     node.add_actor(run_config.id, actor)
     node.add_strategy(run_config.id, strategy)
 
-    return node.run(), node, run_config
+    results = node.run()
+    if analyze_results:
+        analyze(results, node, run_config, pos_dir=output_dir)
+
+    return results, node, run_config
