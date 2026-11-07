@@ -33,15 +33,25 @@ def backtest_period(
     """Return the requested period narrowed to the first and last bar of the data."""
     window_start, window_end = sample_window(sample)
 
-    start_ts = window_start if start is None else pd.Timestamp(start, tz="UTC")
-    end_ts = window_end if end is None else pd.Timestamp(end, tz="UTC")
+    start_ts, start_source = (
+        (window_start, f"{sample} window start") if start is None
+        else (pd.Timestamp(start, tz="UTC"), "given")
+    )
+    end_ts, end_source = (
+        (window_end, f"{sample} window end") if end is None
+        else (pd.Timestamp(end, tz="UTC"), "given")
+    )
     # The engine runs to the period end even without bars and closes positions there
-    start_ts = max(start_ts, data_start)
-    end_ts = min(end_ts, data_end)
+    if start_ts < data_start:
+        start_ts, start_source = data_start, "first bar"
+    if end_ts > data_end:
+        end_ts, end_source = data_end, "last bar"
 
     # A year-only end such as "2026" parses to 2026-01-01 00:00, which can collapse the period
     if end_ts <= start_ts:
-        raise ValueError(f"backtest end {end_ts} must be after start {start_ts}")
+        raise ValueError(
+            f"backtest end {end_ts} ({end_source}) must be after start {start_ts} ({start_source})"
+        )
 
     return start_ts, end_ts
 
