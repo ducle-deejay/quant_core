@@ -32,6 +32,10 @@ def backtest_period(
     start_ts = window_start if start is None else pd.Timestamp(start, tz="UTC")
     end_ts = window_end if end is None else pd.Timestamp(end, tz="UTC")
 
+    # A year-only end such as "2026" parses to 2026-01-01 00:00, which can collapse the period
+    if end_ts <= start_ts:
+        raise ValueError(f"backtest end {end_ts} must be after start {start_ts}")
+
     return start_ts, end_ts
 
 
