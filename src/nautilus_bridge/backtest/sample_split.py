@@ -23,14 +23,21 @@ def sample_window(
 
 
 def backtest_period(
+    *,
+    data_start: pd.Timestamp,
+    data_end: pd.Timestamp,
     start: str | None = None,
     end: str | None = None,
     sample: str = "IS",
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the requested period narrowed to the first and last bar of the data."""
     window_start, window_end = sample_window(sample)
 
     start_ts = window_start if start is None else pd.Timestamp(start, tz="UTC")
     end_ts = window_end if end is None else pd.Timestamp(end, tz="UTC")
+    # The engine runs to the period end even without bars and closes positions there
+    start_ts = max(start_ts, data_start)
+    end_ts = min(end_ts, data_end)
 
     # A year-only end such as "2026" parses to 2026-01-01 00:00, which can collapse the period
     if end_ts <= start_ts:

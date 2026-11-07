@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from nautilus_trader.backtest import BacktestNode
 from nautilus_trader.backtest import BacktestResult
 from nautilus_trader.config import BacktestDataConfig
@@ -41,8 +43,18 @@ def run_backtest(
     catalog = str(catalog_path())
     instrument_id = InstrumentId.from_str(instrument_id)
     source_bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
-    start_run, end_run = backtest_period(start=start, end=end)
     alpha_fn = load_alpha(alpha)
+
+    source_bars = bars_frame(
+        bar_row(bar)
+        for bar in ParquetDataCatalog(catalog).query_bars([str(source_bar_type)])
+    )
+    start_run, end_run = backtest_period(
+        start=start,
+        end=end,
+        data_start=pd.Timestamp(source_bars["ts_init"].min(), tz="UTC"),
+        data_end=pd.Timestamp(source_bars["ts_init"].max(), tz="UTC"),
+    )
 
     run_config = BacktestRunConfig(
         venues=[venue_config(instrument_id, book_size, commission)],
@@ -59,13 +71,6 @@ def run_backtest(
         dispose_on_completion=False,
     )
 
-    source_bars = bars_frame(
-        bar_row(bar)
-        for bar in ParquetDataCatalog(catalog).query_bars(
-            [str(source_bar_type)],
-            end=end_run.value,
-        )
-    )
     precomputed_forecast = alpha_fn(resample_by_session(source_bars, timeframe))
 
     actor = ForecastActor(
