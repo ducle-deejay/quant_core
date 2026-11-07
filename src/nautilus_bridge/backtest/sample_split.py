@@ -41,13 +41,13 @@ def backtest_period(
         (window_end, f"{sample} window end") if end is None
         else (pd.Timestamp(end, tz="UTC"), "given")
     )
-    # The engine runs to the period end even without bars and closes positions there
+    # Days without bars would otherwise enter the statistics as zero returns
     if start_ts < data_start:
         start_ts, start_source = data_start, "first bar"
     if end_ts > data_end:
         end_ts, end_source = data_end, "last bar"
 
-    # A year-only end such as "2026" parses to 2026-01-01 00:00, which can collapse the period
+    # pd.Timestamp reads "2026" as 2026-01-01 00:00, so a year-only end can collapse the period
     if end_ts <= start_ts:
         raise ValueError(
             f"backtest end {end_ts} ({end_source}) must be after start {start_ts} ({start_source})"
