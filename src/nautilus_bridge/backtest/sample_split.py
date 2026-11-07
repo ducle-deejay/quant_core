@@ -50,7 +50,8 @@ def period_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
     dates = f"{start.date()} → {end.date()}"
 
     for sample in ("IS", "OS"):
-        if (start, end) == sample_window(sample):
+        window_start, window_end = sample_window(sample)
+        if window_start <= start and end <= window_end:
             return f"{sample} ({dates})"
 
     return dates
