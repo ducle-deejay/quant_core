@@ -18,6 +18,7 @@ from nautilus_bridge.alphas.session_resampling import bars_frame
 from nautilus_bridge.alphas.session_resampling import resample_by_session
 from nautilus_bridge.alphas.loader import load_alpha
 from nautilus_bridge.analyzer.analyzer import analyze
+from nautilus_bridge.analyzer.statistics import register_statistics
 from nautilus_bridge.backtest.engine import engine_config
 from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.venue import venue_config
@@ -97,6 +98,7 @@ def run_backtest(
 
     node = BacktestNode(configs=[run_config])
     node.build()
+    register_statistics(node.get_engine_portfolio(run_config.id), start_run, end_run)
     node.add_actor(run_config.id, actor)
     node.add_strategy(run_config.id, strategy)
 
