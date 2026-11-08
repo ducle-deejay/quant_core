@@ -50,6 +50,17 @@ def session_bar_end(
     return _session_bar_end(ts_init, _parse_timeframe(timeframe), sessions)
 
 
+def bars_per_day(timeframe: str, sessions: TradingSessions = VN30F1M_SESSIONS) -> int:
+    day_start = pd.Timestamp("2000-01-01", tz=sessions.timezone).value  # Any day: bar ends depend only on the time of day
+    minute_closes = [
+        day_start + _time_ns(start) + step * MINUTE_NS
+        for start, end in sessions.continuous
+        for step in range(1, (_time_ns(end) - _time_ns(start)) // MINUTE_NS + 1)
+    ]
+    minute_closes.append(day_start + _time_ns(sessions.closing_auction))
+    return len(np.unique(session_bar_end(np.array(minute_closes), timeframe, sessions)))
+
+
 def resample_by_session(bars: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     bars = bars.sort_values("ts_init", kind="stable")
     bar_end = pd.Index(

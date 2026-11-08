@@ -18,13 +18,17 @@ from nautilus_trader.analysis import TearsheetCustomChart
 from nautilus_trader.analysis import TearsheetStatsTableChart
 from nautilus_trader.analysis import create_tearsheet
 from nautilus_trader.analysis import register_tearsheet_chart
+from nautilus_trader.model import InstrumentId
+from nautilus_trader.model import Money
 
+from nautilus_bridge.alphas.session_resampling import bars_per_day
+from nautilus_bridge.analyzer.forecast_statistics import forecast_statistics
 from nautilus_bridge.analyzer.statistics import HoldingPeriod
 from nautilus_bridge.analyzer.statistics import Turnover
 from nautilus_bridge.backtest.sample_split import period_label
 
 STATS_ORDER = [
-    "Sharpe Ratio (252 days)",
+    "Sharpe Ratio (Realized, 252 days)",
     "Sortino Ratio (252 days)",
     "Average (Return)",
     "Returns Volatility (252 days)",
@@ -42,10 +46,17 @@ STATS_ORDER = [
 ORDERED_STATS_CHART = "ordered_stats"
 
 
-def ordered_stats(stats_returns: dict[str, Any], stats_general: dict[str, Any]) -> dict[str, Any]:
-    """Statistics in STATS_ORDER, then any others in the order given."""
-    stats = {**stats_returns, **stats_general}
-    ordered = {name: stats.pop(name) for name in STATS_ORDER if name in stats}
+def ordered_stats(
+    stats_returns: dict[str, Any],
+    stats_general: dict[str, Any],
+    forecast_stats: dict[str, float],
+) -> dict[str, Any]:
+    """Statistics in STATS_ORDER with forecast_stats after the realized Sharpe, then any others."""
+    stats = {**stats_returns, **stats_general, **forecast_stats}
+    if "Sharpe Ratio (252 days)" in stats:
+        stats[STATS_ORDER[0]] = stats.pop("Sharpe Ratio (252 days)")
+    order = [STATS_ORDER[0], *forecast_stats, *STATS_ORDER[1:]]
+    ordered = {name: stats.pop(name) for name in order if name in stats}
     return {**ordered, **stats}
 
 
@@ -70,9 +81,10 @@ def _render_ordered_stats_table(
     stats_returns: dict[str, Any],
     stats_general: dict[str, Any],
     theme_config: dict[str, Any],
+    forecast_stats: dict[str, float],
     **_kwargs: Any,
 ) -> None:
-    stats = ordered_stats(stats_returns, stats_general)
+    stats = ordered_stats(stats_returns, stats_general, forecast_stats)
     colors = theme_config["colors"]
     row_colors = [
         colors["table_row_even"] if i % 2 == 0 else colors["table_row_odd"]
@@ -105,12 +117,14 @@ register_tearsheet_chart(
     renderer=_render_ordered_stats_table,
 )
 
-TEARSHEET_CHARTS = [
-    TearsheetCustomChart(chart=ORDERED_STATS_CHART)
-    if isinstance(chart, TearsheetStatsTableChart)
-    else chart
-    for chart in TearsheetConfig().charts
-]
+
+def tearsheet_charts(forecast_stats: dict[str, float]) -> list:
+    return [
+        TearsheetCustomChart(chart=ORDERED_STATS_CHART, args={"forecast_stats": forecast_stats})
+        if isinstance(chart, TearsheetStatsTableChart)
+        else chart
+        for chart in TearsheetConfig().charts
+    ]
 
 
 def render_tearsheet(html: str) -> None:
@@ -132,23 +146,40 @@ def render_tearsheet(html: str) -> None:
     server.handle_request()
     server.server_close()
 
+
 def analyze(
     results: list[BacktestResult],
     node: BacktestNode,
     run_configs: BacktestRunConfig,
+    *,
+    forecast: pd.Series,
+    close: pd.Series,
+    instrument_id: InstrumentId,
+    timeframe: str,
+    commission: str,
     pos_dir: str = None,
 ) -> None:
 
-    tearsheet_config = TearsheetConfig(
-        theme="nautilus_dark",
-        charts=TEARSHEET_CHARTS,
-    )
-
     start = pd.Timestamp(run_configs.start, tz="UTC")
     end = pd.Timestamp(run_configs.end, tz="UTC")
+
+    in_period = (close.index >= start.value) & (close.index <= end.value)
+    forecast_stats = forecast_statistics(
+        forecast[in_period],
+        close[in_period],
+        bars_per_day(timeframe),
+        node.get_engine_cache(run_configs.id).instrument(instrument_id).multiplier.as_double(),
+        Money.from_str(commission).as_double(),
+    )
+
+    tearsheet_config = TearsheetConfig(
+        theme="nautilus_dark",
+        charts=tearsheet_charts(forecast_stats),
+    )
+
     print(f"Period: {period_label(start, end)}")
     result = results[0]
-    render_metrics(ordered_stats(result.stats_returns, result.stats_general))
+    render_metrics(ordered_stats(result.stats_returns, result.stats_general, forecast_stats))
 
     tearsheet = create_tearsheet(
         engine=result,

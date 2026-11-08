@@ -74,7 +74,8 @@ def run_backtest(
         dispose_on_completion=False,
     )
 
-    precomputed_forecast = alpha_fn(resample_by_session(source_bars, timeframe))
+    target_bars = resample_by_session(source_bars, timeframe)
+    precomputed_forecast = alpha_fn(target_bars)
 
     actor = ForecastActor(
         config=ForecastActorConfig(
@@ -104,6 +105,16 @@ def run_backtest(
 
     results = node.run()
     if analyze_results:
-        analyze(results, node, run_config, pos_dir=output_dir)
+        analyze(
+            results,
+            node,
+            run_config,
+            forecast=precomputed_forecast,
+            close=target_bars["close"],
+            instrument_id=instrument_id,
+            timeframe=timeframe,
+            commission=commission,
+            pos_dir=output_dir,
+        )
 
     return results, node, run_config
