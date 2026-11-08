@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import webbrowser
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
@@ -15,9 +16,11 @@ from nautilus_trader.backtest import BacktestResult
 from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.config import TearsheetConfig
 from nautilus_trader.analysis import TearsheetCustomChart
+from nautilus_trader.analysis import TearsheetRunInfoChart
 from nautilus_trader.analysis import TearsheetStatsTableChart
 from nautilus_trader.analysis import create_tearsheet
 from nautilus_trader.analysis import register_tearsheet_chart
+from nautilus_trader.analysis.tearsheet import _render_run_info
 from nautilus_trader.model import InstrumentId
 from nautilus_trader.model import Money
 
@@ -44,6 +47,8 @@ STATS_ORDER = [
     "Risk Return Ratio",
 ]
 ORDERED_STATS_CHART = "ordered_stats"
+RUN_INFO_CHART = "run_info_with_alpha"
+TABLE_STYLE = {"header_font_size": 15, "header_height": 30, "cells_font_size": 14, "cells_height": 26}
 
 
 def ordered_stats(
@@ -95,19 +100,42 @@ def _render_ordered_stats_table(
             header={
                 "values": ["<b>Metric</b>", "<b>Value</b>"],
                 "fill_color": colors["primary"],
-                "font": {"color": "white", "size": 12},
+                "font": {"color": "white"},
                 "align": "left",
             },
             cells={
                 "values": [list(stats), [f"{value:.4f}" for value in stats.values()]],
                 "fill_color": [row_colors, row_colors],
                 "align": "left",
-                "font": {"size": 11, "color": colors["table_text"]},
+                "font": {"color": colors["table_text"]},
             },
+            **TABLE_STYLE,
         ),
         row=row,
         col=col,
     )
+
+
+def _render_run_info_with_alpha(
+    fig: go.Figure,
+    row: int,
+    col: int,
+    theme_config: dict[str, Any],
+    alpha_name: str,
+    run_info: dict[str, Any],
+    account_info: dict[str, Any],
+    **kwargs: Any,
+) -> None:
+    _render_run_info(
+        fig=fig,
+        row=row,
+        col=col,
+        theme_config=theme_config,
+        run_info={"Alpha": alpha_name, **{name: value.replace("_", ",") for name, value in run_info.items()}},
+        account_info={name: f"{Decimal(value):,}" for name, value in account_info.items()},
+        **kwargs,
+    )
+    fig.data[-1].update(**TABLE_STYLE)
 
 
 register_tearsheet_chart(
@@ -116,15 +144,22 @@ register_tearsheet_chart(
     title="Performance Statistics",
     renderer=_render_ordered_stats_table,
 )
+register_tearsheet_chart(
+    name=RUN_INFO_CHART,
+    subplot_type="table",
+    title="Run Information",
+    renderer=_render_run_info_with_alpha,
+)
 
 
-def tearsheet_charts(forecast_stats: dict[str, float]) -> list:
-    return [
-        TearsheetCustomChart(chart=ORDERED_STATS_CHART, args={"forecast_stats": forecast_stats})
-        if isinstance(chart, TearsheetStatsTableChart)
-        else chart
-        for chart in TearsheetConfig().charts
-    ]
+def tearsheet_charts(forecast_stats: dict[str, float], alpha_name: str) -> list:
+    custom_charts = {
+        TearsheetStatsTableChart: TearsheetCustomChart(
+            chart=ORDERED_STATS_CHART, args={"forecast_stats": forecast_stats}
+        ),
+        TearsheetRunInfoChart: TearsheetCustomChart(chart=RUN_INFO_CHART, args={"alpha_name": alpha_name}),
+    }
+    return [custom_charts.get(type(chart), chart) for chart in TearsheetConfig().charts]
 
 
 def render_tearsheet(html: str) -> None:
@@ -157,6 +192,7 @@ def analyze(
     instrument_id: InstrumentId,
     timeframe: str,
     commission: str,
+    alpha: str,
     pos_dir: str = None,
 ) -> None:
 
@@ -174,7 +210,7 @@ def analyze(
 
     tearsheet_config = TearsheetConfig(
         theme="nautilus_dark",
-        charts=tearsheet_charts(forecast_stats),
+        charts=tearsheet_charts(forecast_stats, Path(alpha).stem),
     )
 
     print(f"Period: {period_label(start, end)}")

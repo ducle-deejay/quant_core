@@ -114,6 +114,7 @@ def run_backtest(
             instrument_id=instrument_id,
             timeframe=timeframe,
             commission=commission,
+            alpha=alpha,
             pos_dir=output_dir,
         )
 
