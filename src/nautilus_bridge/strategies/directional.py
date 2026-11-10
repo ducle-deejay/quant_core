@@ -25,6 +25,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         instrument_id: InstrumentId,
         bar_type: BarType,
         fixed_contracts: Decimal | None = None,
+        book_size: Decimal | None = None,  # Fixed capital to size on; None sizes on the account's total balance
         limit_offset_ticks: int = 1,
         order_ttl_minutes: int = 3,
         **_kwargs: object,
@@ -33,6 +34,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         self.instrument_id = instrument_id
         self.bar_type = bar_type
         self.fixed_contracts = fixed_contracts
+        self.book_size = book_size
         self.limit_offset_ticks = limit_offset_ticks
         self.order_ttl_minutes = order_ttl_minutes
 
@@ -133,7 +135,11 @@ class DirectionalStrategy(Strategy):
 
     def _forecast_to_contracts(self, forecast: float, price: Price, account: MarginAccount) -> int:
         # Size on total (not free), so the result does not shrink with the held position
-        total = account.balance_total(self.instrument.settlement_currency).as_decimal()
+        total = (
+            self.config.book_size
+            if self.config.book_size is not None
+            else account.balance_total(self.instrument.settlement_currency).as_decimal()
+        )
         margin_per_contract = self._initial_margin_per_contract(price, account)
         # int() truncates toward zero, so |contracts| never exceeds what total can margin
         return int(Decimal(str(forecast)) * total / margin_per_contract)

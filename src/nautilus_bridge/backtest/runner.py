@@ -8,6 +8,7 @@ from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.model import BarType
 from nautilus_trader.model import InstrumentId
+from nautilus_trader.model import Money
 from nautilus_trader.model import StrategyId
 from nautilus_trader.persistence import ParquetDataCatalog
 
@@ -94,6 +95,7 @@ def run_backtest(
             bar_type=source_bar_type,
             manage_gtd_expiry=True,
             fixed_contracts=fixed_contracts,
+            book_size=Money.from_str(book_size).as_decimal(),
         ),
     )
 
