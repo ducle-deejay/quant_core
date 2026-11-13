@@ -46,6 +46,7 @@ class DirectionalStrategy(Strategy):
         self.instrument = None
         self.last_forecast: float | None = None
         self.target_contracts = 0
+        self.margin_account: MarginAccount | None = None
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -65,13 +66,11 @@ class DirectionalStrategy(Strategy):
         if bar is None:
             return
 
-        # Portfolio.account() clones the account with its full event history, so fetch it once
-        account = self.portfolio.account(self.config.instrument_id.venue)
         if self.config.fixed_contracts is not None:
             # Fixed size for debugging: forecast +-1 maps to +-fixed_contracts contracts
             self.target_contracts = int(self.config.fixed_contracts * Decimal(str(forecast)))
         else:
-            self.target_contracts = self._forecast_to_contracts(forecast, bar.close, account)
+            self.target_contracts = self._forecast_to_contracts(forecast, bar.close)
         target_contracts = self.target_contracts
         current_contracts = int(self.portfolio.net_position(self.config.instrument_id))
         if target_contracts == current_contracts:
@@ -84,7 +83,7 @@ class DirectionalStrategy(Strategy):
         )
         if is_increasing_position:
             qty_to_target = abs(target_contracts) - abs(current_contracts)
-            self._submit_opening_order(qty_to_target, bar, account)
+            self._submit_opening_order(qty_to_target, bar)
             return
 
         # (b) reduce, (c) go flat, (d) reverse: submit a reduce-only order; (d) opens the
@@ -106,10 +105,11 @@ class DirectionalStrategy(Strategy):
         bar = self.cache.bar(self.config.bar_type.standard())
         if bar is None:
             return
-        account = self.portfolio.account(self.config.instrument_id.venue)
-        self._submit_opening_order(abs(self.target_contracts), bar, account)
+        self._submit_opening_order(abs(self.target_contracts), bar)
 
-    def _submit_opening_order(self, qty_to_target: int, bar: Bar, account: MarginAccount) -> None:
+    def _submit_opening_order(self, qty_to_target: int, bar: Bar) -> None:
+        # A fresh copy, since the free balance changes with every fill
+        account = self.portfolio.account(self.config.instrument_id.venue)
         side = OrderSide.BUY if self.target_contracts > 0 else OrderSide.SELL
         # Check margin at the order's own limit price, as the risk engine does
         price = self._marketable_price(side, bar)
@@ -133,14 +133,14 @@ class DirectionalStrategy(Strategy):
         )
         self.submit_order(order)
 
-    def _forecast_to_contracts(self, forecast: float, price: Price, account: MarginAccount) -> int:
+    def _forecast_to_contracts(self, forecast: float, price: Price) -> int:
         # Size on total (not free), so the result does not shrink with the held position
-        total = (
-            self.config.book_size
-            if self.config.book_size is not None
-            else account.balance_total(self.instrument.settlement_currency).as_decimal()
-        )
-        margin_per_contract = self._initial_margin_per_contract(price, account)
+        if self.config.book_size is not None:
+            total = self.config.book_size
+        else:
+            account = self.portfolio.account(self.config.instrument_id.venue)
+            total = account.balance_total(self.instrument.settlement_currency).as_decimal()
+        margin_per_contract = self._initial_margin_per_contract(price, self._margin_account())
         # int() truncates toward zero, so |contracts| never exceeds what total can margin
         return int(Decimal(str(forecast)) * total / margin_per_contract)
 
@@ -150,6 +150,13 @@ class DirectionalStrategy(Strategy):
         margin_per_contract = self._initial_margin_per_contract(price, account)
         # A negative free balance opens nothing
         return max(int(free // margin_per_contract), 0)
+
+    def _margin_account(self) -> MarginAccount:
+        # Portfolio.account() copies the account's whole event history, so its cost grows with the
+        # run; initial margin depends only on the margin model and leverage, so one copy serves sizing
+        if self.margin_account is None:
+            self.margin_account = self.portfolio.account(self.config.instrument_id.venue)
+        return self.margin_account
 
     def _initial_margin_per_contract(self, price: Price, account: MarginAccount) -> Decimal:
         # Delegates to the venue's configured margin model
