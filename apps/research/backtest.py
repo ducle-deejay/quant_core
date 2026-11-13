@@ -21,6 +21,6 @@ run_backtest(
     commission=commission,
     alpha=alpha,
     strategy_id="VN30F1M-V1",
-    fixed_contracts=1,
+    single_contract_sizing=True,
     output_dir=output_dir,
 )

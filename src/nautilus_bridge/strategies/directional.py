@@ -24,7 +24,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         *,
         instrument_id: InstrumentId,
         bar_type: BarType,
-        fixed_contracts: Decimal | None = None,
+        single_contract_sizing: bool = False,
         book_size: Decimal | None = None,  # Fixed capital to size on; None sizes on the account's total balance
         limit_offset_ticks: int = 1,
         order_ttl_minutes: int = 3,
@@ -33,7 +33,7 @@ class DirectionalStrategyConfig(StrategyConfig):
         super().__init__()
         self.instrument_id = instrument_id
         self.bar_type = bar_type
-        self.fixed_contracts = fixed_contracts
+        self.single_contract_sizing = single_contract_sizing
         self.book_size = book_size
         self.limit_offset_ticks = limit_offset_ticks
         self.order_ttl_minutes = order_ttl_minutes
@@ -66,9 +66,9 @@ class DirectionalStrategy(Strategy):
         if bar is None:
             return
 
-        if self.config.fixed_contracts is not None:
-            # Fixed size for debugging: forecast +-1 maps to +-fixed_contracts contracts
-            self.target_contracts = int(self.config.fixed_contracts * Decimal(str(forecast)))
+        if self.config.single_contract_sizing:
+            # Sizing for debugging: forecast +-1 maps to +-1 contract, independent of the book
+            self.target_contracts = int(Decimal(str(forecast)))
         else:
             self.target_contracts = self._forecast_to_contracts(forecast, bar.close)
         target_contracts = self.target_contracts

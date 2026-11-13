@@ -40,10 +40,10 @@ def run_backtest(
     commission: str,
     alpha: str,
     strategy_id: str,
-    fixed_contracts: int,
     output_dir: str | None = None,
     sample: str = "IS",
     show_tearsheet: bool = False,
+    single_contract_sizing: bool = False,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
     catalog = str(catalog_path())
     instrument_id = InstrumentId.from_str(instrument_id)
@@ -96,7 +96,7 @@ def run_backtest(
             instrument_id=instrument_id,
             bar_type=source_bar_type,
             manage_gtd_expiry=True,
-            fixed_contracts=fixed_contracts,
+            single_contract_sizing=single_contract_sizing,
             book_size=Money.from_str(book_size).as_decimal(),
         ),
     )
