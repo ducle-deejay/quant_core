@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nautilus-bridge"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.14"
 dependencies = [
     "nautilus-trader[visualization]==2.0.0rc5",
