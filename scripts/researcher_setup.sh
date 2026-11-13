@@ -3,7 +3,7 @@
 set -eu
 
 SERVER_HOST="${1:?usage: sh researcher_setup.sh <server-host>}"
-VERSION="0.4.0"
+VERSION="0.5.0"
 MOUNT_POINT="/mnt/published"
 
 read_credentials() {
