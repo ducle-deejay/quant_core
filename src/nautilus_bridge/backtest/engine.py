@@ -9,14 +9,19 @@ from nautilus_trader.config import LoggerConfig
 from nautilus_trader.persistence import DataCatalogConfig
 
 
-def engine_config(catalog_path: str, log_dir: str) -> BacktestEngineConfig:
-    return BacktestEngineConfig(
-        logging=LoggerConfig(
+def engine_config(catalog_path: str, log_dir: str | None) -> BacktestEngineConfig:
+    if log_dir is None:
+        logging = LoggerConfig(stdout_level=LogLevel.OFF)
+    else:
+        logging = LoggerConfig(
             clear_log_file=True,
             stdout_level=LogLevel.OFF,
             fileout_level=LogLevel.INFO,
             file_config=FileWriterConfig(directory=log_dir, file_name="backtest"),
-        ),
+        )
+
+    return BacktestEngineConfig(
+        logging=logging,
         data_engine=DataEngineConfig(time_bars_build_with_no_updates=False),  # No INTERNAL time bars outside trading hours
         cache=CacheConfig(bar_capacity=10_000),
         catalogs=[DataCatalogConfig(catalog_path)],  # Serves the actor's warmup request

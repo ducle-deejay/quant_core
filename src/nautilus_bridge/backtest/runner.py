@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from nautilus_trader.backtest import BacktestNode
@@ -39,9 +41,9 @@ def run_backtest(
     alpha: str,
     strategy_id: str,
     fixed_contracts: int,
-    output_dir: str,
+    output_dir: str | None = None,
     sample: str = "IS",
-    analyze_results: bool = True,
+    show_tearsheet: bool = False,
 ) -> tuple[list[BacktestResult], BacktestNode, BacktestRunConfig]:
     catalog = str(catalog_path())
     instrument_id = InstrumentId.from_str(instrument_id)
@@ -106,18 +108,20 @@ def run_backtest(
     node.add_strategy(run_config.id, strategy)
 
     results = node.run()
-    if analyze_results:
-        analyze(
-            results,
-            node,
-            run_config,
-            forecast=precomputed_forecast,
-            close=target_bars["close"],
-            instrument_id=instrument_id,
-            timeframe=timeframe,
-            commission=commission,
-            alpha=alpha,
-            pos_dir=output_dir,
-        )
+    analyze(
+        results,
+        node,
+        run_config,
+        forecast=precomputed_forecast,
+        close=target_bars["close"],
+        instrument_id=instrument_id,
+        timeframe=timeframe,
+        commission=commission,
+        alpha=alpha,
+        show_tearsheet=show_tearsheet,
+    )
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        node.generate_positions_report(run_config.id).to_csv(Path(output_dir) / "positions.csv", index=True)
 
     return results, node, run_config

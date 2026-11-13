@@ -193,7 +193,7 @@ def analyze(
     timeframe: str,
     commission: str,
     alpha: str,
-    pos_dir: str = None,
+    show_tearsheet: bool = False,
 ) -> None:
 
     start = pd.Timestamp(run_configs.start, tz="UTC")
@@ -217,15 +217,11 @@ def analyze(
     result = results[0]
     render_metrics(ordered_stats(result.stats_returns, result.stats_general, forecast_stats))
 
-    tearsheet = create_tearsheet(
-        engine=result,
-        node=node,
-        output_path=None,
-        config=tearsheet_config
-    )
-
-    render_tearsheet(tearsheet)
-
-    report = node.generate_positions_report(run_configs.id)
-    if pos_dir is not None:
-        report.to_csv(Path(pos_dir) / "positions.csv", index=True)
+    if show_tearsheet:
+        tearsheet = create_tearsheet(
+            engine=result,
+            node=node,
+            output_path=None,
+            config=tearsheet_config
+        )
+        render_tearsheet(tearsheet)

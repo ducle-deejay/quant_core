@@ -23,5 +23,4 @@ run_backtest(
     strategy_id="VN30F1M-V1",
     fixed_contracts=1,
     output_dir=output_dir,
-    analyze_results=True,
 )
