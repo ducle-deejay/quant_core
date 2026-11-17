@@ -11,6 +11,7 @@ resolution-markers = [
 members = [
     "alpha-core",
     "market-data",
+    "methodica",
     "nautilus-bridge",
 ]
 
@@ -289,6 +290,17 @@ requires-dist = [
     { name = "truststore", specifier = ">=0.10.4" },
     { name = "websockets", specifier = ">=16.0" },
 ]
+
+[[package]]
+name = "methodica"
+version = "0.1.0"
+source = { editable = "src/methodica" }
+dependencies = [
+    { name = "pandas" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pandas", specifier = ">=2.3.3" }]
 
 [[package]]
 name = "msgpack"
