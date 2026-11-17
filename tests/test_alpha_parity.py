@@ -14,7 +14,7 @@ from nautilus_bridge.alphas.loader import load_alpha
 from nautilus_bridge.alphas.forecast_runtime import PrecomputedForecast
 from nautilus_bridge.alphas.forecast_runtime import RollingForecast
 
-ema_cross = load_alpha(str(Path(__file__).parents[1] / "apps/research/alphas/ema_cross.py"))
+ema_cross = load_alpha(str(Path(__file__).parents[1] / "apps/research/alphas/rule_based/ema_cross.py"))
 
 TZ = "Asia/Ho_Chi_Minh"
 LOOKBACK_DAYS = 10
