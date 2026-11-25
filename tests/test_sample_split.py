@@ -7,6 +7,15 @@ from nautilus_bridge.backtest.sample_split import backtest_period
 from nautilus_bridge.backtest.sample_split import sample_window
 
 
+def test_samples_are_contiguous_and_do_not_overlap() -> None:
+    cutoff_day = pd.Timestamp("2026-11-24", tz="UTC")
+    fit_start, fit_end = sample_window("FIT", cutoff_day)
+    is_start, is_end = sample_window("IS", cutoff_day)
+    os_start, os_end = sample_window("OS", cutoff_day)
+
+    assert fit_start < fit_end == is_start < is_end == os_start < os_end == cutoff_day
+
+
 def test_backtest_period_without_end_stops_at_the_is_window_end() -> None:
     _, is_end = sample_window("IS")
     period = backtest_period(

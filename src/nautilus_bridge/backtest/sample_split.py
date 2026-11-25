@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+FIT_START = pd.Timestamp("2020-01-01", tz="UTC")
 IS_LOOKBACK = pd.DateOffset(years=2)
 OS_LOOKBACK = pd.DateOffset(months=6)
 
@@ -12,14 +13,18 @@ def sample_window(
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     cutoff_day = cutoff_day or pd.Timestamp.now(tz="UTC").normalize()
     os_start = cutoff_day - OS_LOOKBACK
+    is_start = cutoff_day - IS_LOOKBACK
 
     if sample == "OS":
         return os_start, cutoff_day
 
     if sample == "IS":
-        return cutoff_day - IS_LOOKBACK, os_start
+        return is_start, os_start
 
-    raise ValueError(f"sample must be 'IS' or 'OS', got {sample!r}")
+    if sample == "FIT":
+        return FIT_START, is_start
+
+    raise ValueError(f"sample must be 'FIT', 'IS' or 'OS', got {sample!r}")
 
 
 def backtest_period(
