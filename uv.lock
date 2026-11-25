@@ -296,11 +296,15 @@ name = "methodica"
 version = "0.1.0"
 source = { editable = "src/methodica" }
 dependencies = [
+    { name = "nautilus-bridge" },
     { name = "pandas" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pandas", specifier = ">=2.3.3" }]
+requires-dist = [
+    { name = "nautilus-bridge", editable = "src/nautilus_bridge" },
+    { name = "pandas", specifier = ">=2.3.3" },
+]
 
 [[package]]
 name = "msgpack"
