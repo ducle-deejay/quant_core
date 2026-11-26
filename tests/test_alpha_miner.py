@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from methodica.alpha_miner import canonical_form, evolve, negate, random_expression, tree_depth
+from methodica.alpha_miner.genetic import evolve, random_expression
+from methodica.dsl.algebra import canonical_form, negate, tree_depth
 from methodica.dsl import compute
 
 

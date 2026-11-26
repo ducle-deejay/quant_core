@@ -15,5 +15,8 @@ dependencies = [
 package-dir = { methodica = "." }
 packages = [
     "methodica",
+    "methodica.alpha_miner",
+    "methodica.backtest",
+    "methodica.common",
     "methodica.dsl",
 ]
