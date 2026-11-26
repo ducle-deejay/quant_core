@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "methodica"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.14"
 dependencies = [
-    "nautilus-bridge",
+    "nautilus-bridge>=0.6.0",
     "pandas>=2.3.3",
 ]
 
