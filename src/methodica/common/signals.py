@@ -14,3 +14,10 @@ def raw_signals(alphas, src, index):
     minute_bars = session_bars(src, "1-MINUTE")
     signals = pd.DataFrame({name: raw_signal(expression, minute_bars) for name, expression in alphas.items()})
     return signals.reindex(index, method="ffill")
+
+
+def orthogonalize(signal, pool):
+    rows = signal.notna() & pool.notna().all(axis=1)
+    X = np.column_stack([np.ones(rows.sum()), pool[rows]])
+    beta = np.linalg.lstsq(X, signal[rows], rcond=None)[0]
+    return signal[rows] - X @ beta
