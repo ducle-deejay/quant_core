@@ -261,6 +261,7 @@ def schedule() -> None:
                 "PYTHONUNBUFFERED": "1",
             },
             "ProcessType": "Standard",
+            "Umask": 0o027,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plistlib.dumps(payload))
