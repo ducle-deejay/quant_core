@@ -1,9 +1,10 @@
 #!/bin/sh
-# Installs nautilus-bridge and mounts the published catalog for a Linux researcher.
+# Installs nautilus-bridge and methodica and mounts the published catalog for a Linux researcher.
 set -eu
 
 SERVER_HOST="${1:?usage: sh researcher_setup.sh <server-host>}"
-VERSION="0.6.0"
+NAUTILUS_BRIDGE_VERSION="0.6.0"
+METHODICA_VERSION="0.2.0"
 MOUNT_POINT="/mnt/published"
 
 read_credentials() {
@@ -21,8 +22,9 @@ install_env() {
     ~/nautilus-env/bin/pip install \
         --index-url "http://${INDEX_USER}:${INDEX_PASSWORD}@${SERVER_HOST}:8080/simple/" \
         --trusted-host "$SERVER_HOST" \
-        "nautilus-bridge==$VERSION"
-    ~/nautilus-env/bin/python -c "import nautilus_bridge.backtest.runner; print('ok')"
+        "nautilus-bridge==$NAUTILUS_BRIDGE_VERSION" \
+        "methodica==$METHODICA_VERSION"
+    ~/nautilus-env/bin/python -c "import nautilus_bridge.backtest.runner, methodica.alpha_evaluator.runner; print('ok')"
 }
 
 mount_catalog() {
