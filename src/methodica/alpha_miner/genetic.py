@@ -6,7 +6,7 @@ import pandas as pd
 
 from methodica.common.dataset import forward_return
 from methodica.common.metrics import ic
-from methodica.dsl import compute
+from methodica.common.signals import raw_signal
 from methodica.dsl.algebra import OPERATOR_ARG_KINDS, canonical_form, negate, tree_depth
 
 WINDOW_LENGTHS = (5, 10, 20, 40, 60)
@@ -99,15 +99,14 @@ def crossover(receiver, donor, max_depth, rng):
     return _limit_depth(child, receiver, max_depth)
 
 
-def expression_ic(tree, data, fwd_ret):
+def expression_ic(tree, data, fwd_ret, in_fit):
     with np.errstate(all="ignore"):
-        signal = compute(ast.unparse(tree), data).replace([np.inf, -np.inf], np.nan)
-        value = ic(signal, fwd_ret)
+        value = ic(raw_signal(ast.unparse(tree), data)[in_fit], fwd_ret)
     return float(value) if np.isfinite(value) else 0.0
 
 
-def fitness(tree, data, fwd_ret):
-    return abs(expression_ic(tree, data, fwd_ret))
+def fitness(tree, data, fwd_ret, in_fit):
+    return abs(expression_ic(tree, data, fwd_ret, in_fit))
 
 
 def has_converged(previous_parents, parents):
@@ -117,17 +116,18 @@ def has_converged(previous_parents, parents):
     return no_new_parent
 
 
-def evolve(data, seeds=(), horizon=10, population=100, top_k=10, max_depth=3, seed=0):
+def evolve(data, seeds=(), horizon=10, population=100, top_k=10, max_depth=3, seed=0, in_fit=None):
     rng = np.random.default_rng(seed)
     fields = list(data.columns)
-    fwd_ret = forward_return(data.close, horizon)
+    in_fit = np.ones(len(data), dtype=bool) if in_fit is None else in_fit
+    fwd_ret = forward_return(data.close, horizon)[in_fit]
     n_parents = max(2, population // 4)
     fitness_by_expression = {}
 
     def fitness_of(tree):
         expression = ast.unparse(tree)
         if expression not in fitness_by_expression:
-            fitness_by_expression[expression] = fitness(tree, data, fwd_ret)
+            fitness_by_expression[expression] = fitness(tree, data, fwd_ret, in_fit)
         return fitness_by_expression[expression]
 
     def rank_by_fitness(trees):
@@ -159,6 +159,6 @@ def evolve(data, seeds=(), horizon=10, population=100, top_k=10, max_depth=3, se
 
     rows = []
     for tree in rank_by_fitness(trees)[:top_k]:
-        oriented = tree if expression_ic(tree, data, fwd_ret) >= 0 else negate(tree)
+        oriented = tree if expression_ic(tree, data, fwd_ret, in_fit) >= 0 else negate(tree)
         rows.append({"expression": ast.unparse(oriented), "ic": fitness_of(tree)})
     return pd.DataFrame(rows, columns=["expression", "ic"])
