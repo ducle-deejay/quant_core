@@ -369,7 +369,7 @@ wheels = [
 
 [[package]]
 name = "nautilus-bridge"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "src/nautilus_bridge" }
 dependencies = [
     { name = "dnse-sdk-openapi" },
