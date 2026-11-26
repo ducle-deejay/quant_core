@@ -227,8 +227,8 @@ def catalog_consolidator(catalog_path: Path) -> Callable[[], None]:
     return consolidate
 
 
-def publish_catalog(catalog_path: Path, published_root: Path) -> None:
-    """Replace published_root/catalog with an APFS clone of catalog_path."""
+def publish_catalog(catalog_path: Path, published_root: Path, end: pd.Timestamp | None = None) -> None:
+    """Replace published_root/catalog with an APFS clone of catalog_path, without its bars from end onward."""
     published = published_root / "catalog"
     staged = published_root / "catalog.new"
     retired = published_root / "catalog.old"
@@ -236,10 +236,17 @@ def publish_catalog(catalog_path: Path, published_root: Path) -> None:
     # Left behind by a publish that was interrupted
     for leftover in (staged, retired):
         shutil.rmtree(leftover, ignore_errors=True)
-    # -c clones instead of copying, so publishing does not double the catalog's disk use (man cp)
-    result = subprocess.run(["cp", "-c", "-R", str(catalog_path), str(staged)], capture_output=True, text=True)
+    # -c clones so publishing does not double disk use; -p keeps per-directory access (man cp)
+    result = subprocess.run(["cp", "-c", "-R", "-p", str(catalog_path), str(staged)], capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"cp -c failed: {result.stderr.strip()}")
+    if end is not None:
+        catalog = ParquetDataCatalog(str(staged))
+        # Only directories under bars are bar types
+        for bar_type in (path for path in (staged / "data" / "bars").iterdir() if path.is_dir()):
+            catalog.delete_data_range("bars", bar_type.name, start=end.value)
+    # Readable by anyone who can enter published_root, whatever the source catalog's mode
+    staged.chmod(0o755)
     if published.exists():
         published.rename(retired)
     staged.rename(published)

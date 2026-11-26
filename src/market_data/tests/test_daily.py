@@ -20,6 +20,7 @@ from market_data.daily import alert_ingested
 from market_data.daily import catalog_consolidator
 from market_data.daily import day_is_complete
 from market_data.daily import exchange_gaps
+from market_data.daily import publish_catalog
 from market_data.daily import run_and_alert
 from market_data.daily import RunAttempt
 from market_data.daily import run_attempt
@@ -107,6 +108,21 @@ def test_consolidation_leaves_one_ordered_file_per_directory(tmp_path):
     for records in (catalog.query_bars([BAR_TYPE]), catalog.query_trade_ticks(), catalog.query_order_book_depths()):
         ts_init = [record.ts_init for record in records]
         assert len(ts_init) == 12 and ts_init == sorted(ts_init)
+
+
+def test_published_catalog_holds_no_bars_from_end_onward_and_keeps_every_tick(tmp_path):
+    catalog_path = tmp_path / "catalog"
+    catalog_path.mkdir()
+    for day in ("2026-09-28", "2026-09-30"):
+        load_day(catalog_path=catalog_path, transformed=day_batches(day, 100.0))
+    end = pd.Timestamp("2026-09-30", tz="Asia/Ho_Chi_Minh")
+
+    publish_catalog(catalog_path, tmp_path / "published", end=end)
+
+    published = ParquetDataCatalog(str(tmp_path / "published" / "catalog"))
+    bars = published.query_bars([BAR_TYPE])
+    assert len(bars) == 4 and all(bar.ts_init < end.value for bar in bars)
+    assert len(published.query_trade_ticks()) == 8 and len(published.query_order_book_depths()) == 8
 
 
 @pytest.mark.parametrize(("n_bars", "complete"), [(FULL_DAY_BARS - 3, True), (0, False)])

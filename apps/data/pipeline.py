@@ -48,6 +48,7 @@ from market_data.notify import send_alert
 from market_data.sources import ETLStageError
 from market_data.sources.hnx.extract import extract_day as extract_exchange_day
 from market_data.sources.hnx.extract import front_contract
+from nautilus_bridge.backtest.sample_split import sample_window
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +56,7 @@ load_dotenv(ROOT / ".env")
 DATA_ROOT = Path(os.environ["DATA_ROOT"])
 CATALOG_PATH = DATA_ROOT / "catalog"
 PUBLISHED_ROOT = DATA_ROOT / "published"
+PUBLISHED_OS_ROOT = DATA_ROOT / "published_os"
 DNSE_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "dnse"
 BROKER_RAW_ROOT = DATA_ROOT / "raw" / "vietnam"
 HNX_RAW_ROOT = DATA_ROOT / "raw" / "vietnam" / "hnx"
@@ -140,7 +142,8 @@ def ingest(notifier: DiscordWebhook | None, now: datetime, day: date | None, log
     if ingested and not failed:
         try:
             with stage("Catalog", "publish", now.date()):
-                publish_catalog(CATALOG_PATH, PUBLISHED_ROOT)
+                publish_catalog(CATALOG_PATH, PUBLISHED_ROOT, end=sample_window("OS")[0])
+                publish_catalog(CATALOG_PATH, PUBLISHED_OS_ROOT)
             published = True
         except ETLStageError as error:
             send_alert(notifier, alert_failed("Catalog publish", error, attempt, str(log_path)), raise_on_error=True)
