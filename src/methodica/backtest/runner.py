@@ -46,6 +46,9 @@ def run_backtest(
     volatility_model,
     risk_aversion,
 ):
+    if sample not in ("IS", "OS"):
+        raise ValueError(f"sample must be 'IS' or 'OS', got {sample!r}")
+
     source_bar_type = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
     instrument = load_instrument(instrument_id)
     multiplier = instrument.multiplier.as_double()
