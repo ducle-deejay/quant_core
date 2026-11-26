@@ -19,9 +19,10 @@ def hit_rate(signal, fwd_ret):
     return (pair.iloc[:, 0] == pair.iloc[:, 1]).mean()
 
 
-def ic_ir(signal, fwd_ret, period):
+def ic_ir(signal, fwd_ret):
     pair = pd.concat({"signal": signal, "fwd_ret": fwd_ret}, axis=1).dropna()
-    ics = pair.groupby(pd.Grouper(freq=period)).apply(lambda g: g.signal.corr(g.fwd_ret)).dropna()
+    z = (pair - pair.mean()) / pair.std()
+    ics = (z.signal * z.fwd_ret).groupby(z.index.normalize()).mean()
     return ics.mean() / ics.std()
 
 
